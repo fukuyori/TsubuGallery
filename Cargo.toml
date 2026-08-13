@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = [
+    "core",
+    "renderer",
+    "processing-lite",
+    "gallery",
+    "app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+tsubu-core = { path = "core" }
+tsubu-renderer = { path = "renderer" }
+tsubu-processing-lite = { path = "processing-lite" }
+tsubu-gallery = { path = "gallery" }
+
+wgpu = "30.0"
+winit = "0.30"
+egui = "0.36"
+egui-wgpu = "0.36"
+egui-winit = "0.36"
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "1.0"
+# フォントの字形取り出し。egui も同じものを使っているので依存は増えない。
+skrifa = "0.44"
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+thiserror = "2"
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[profile.dev]
+opt-level = 1
+
+# Dependencies of the renderer are unusably slow in a debug build; the sketch
+# runtime is only meaningful at 60fps, so optimise them even in dev.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

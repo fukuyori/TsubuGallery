@@ -1,0 +1,12 @@
+# ビルド生成物
+/target/
+
+# 実行時に作られるデータ領域 (作品・サムネイル・DB)
+/out/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# macOS
+.DS_Store

@@ -1,0 +1,10 @@
+[package]
+name = "tsubu-gallery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tsubu-core.workspace = true
+log.workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "tsubu-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tsubugallery"
+path = "src/main.rs"
+
+[dependencies]
+tsubu-core.workspace = true
+tsubu-renderer.workspace = true
+tsubu-processing-lite.workspace = true
+tsubu-gallery.workspace = true
+
+wgpu.workspace = true
+winit.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+pollster.workspace = true
+image.workspace = true
+log.workspace = true
+env_logger.workspace = true

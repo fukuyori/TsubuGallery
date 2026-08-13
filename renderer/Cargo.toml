@@ -1,0 +1,16 @@
+[package]
+name = "tsubu-renderer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu = { workspace = true, features = ["std"] }
+bytemuck.workspace = true
+log.workspace = true
+thiserror.workspace = true
+skrifa.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

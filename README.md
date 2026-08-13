@@ -1,0 +1,772 @@
+# TsubuGallery
+
+English · [日本語](README.ja.md)
+
+A cross-platform gallery for storing, running and watching short Processing
+sketches.
+
+See [`docs/TsubuGallery_Design.md`](docs/TsubuGallery_Design.md) for the design
+(written in Japanese). This repository implements all of **Prototypes A–E** from
+§29 of that document.
+
+| Prototype | Goal | Status |
+|---|---|---|
+| A | Draw a fixed sketch fullscreen at 60 fps in Rust | Done |
+| B | Keep several sketches resident and switch instantly | Done |
+| C | Grab frames from the same renderer and save them as images | Done |
+| D | Pick a sketch from a grid and open the viewer | Done |
+| E | Run Processing Lite code through parser → bytecode | Done |
+
+Phase 7 (SQLite, favourites, tags, search) is in as well.
+
+```text
+Gallery → pick a sketch → Fullscreen Viewer → Esc → Gallery
+   │
+   └→ N new / E edit → Editor → ⌘S save → compile → Gallery
+```
+
+## Running it
+
+```sh
+cargo run --release
+```
+
+On first launch the bundled sketches are written into the data directory and
+appear in the gallery. Drop more `.pde` files there to add your own.
+
+### Controls
+
+**Gallery**
+
+| Key | Action |
+|---|---|
+| `↑` `↓` `←` `→` | Move the selection |
+| `Home` / `End` | First / last |
+| Click | Select |
+| `Enter` / `Space` / double click | Open in the viewer |
+| `R` | Open a random sketch |
+| `N` | New sketch |
+| `E` | Edit the selected sketch |
+| `Delete` / `Backspace` | Delete (with confirmation) |
+| `S` / click the star | Favourite |
+| `T` | Regenerate the selected thumbnail |
+| `V` | Cycle the view mode (grid → large cards → list) |
+| `C` | Add or remove the sketch from collections |
+| `P` | Start / stop the slideshow |
+| Search box | Substring match on title and id |
+| `F` / `F11` | Fullscreen |
+| `L` | Switch the UI language |
+| `,` / **Settings** button | Settings |
+| `Esc` | Quit |
+
+**Viewer** (design §8.1)
+
+| Key | Action |
+|---|---|
+| `→` / `PageDown` | Next sketch |
+| `←` / `PageUp` | Previous sketch |
+| `Space` | Pause / resume |
+| `P` | Start / stop the slideshow |
+| `R` | Random |
+| `T` | Update the thumbnail |
+| `E` | Edit this sketch |
+| `I` | Info overlay (fps / frameCount / switch time) |
+| `F` / `F11` | Fullscreen |
+| `L` | Switch the UI language |
+| `Esc` | Leave fullscreen, or go back to the gallery |
+
+**Editor**
+
+| Key | Action |
+|---|---|
+| `⌘S` | Save and compile |
+| `⌘Enter` | Save and run |
+| `⌘F` | Expand (add newlines and indentation) |
+| `⌘K` | Compress (strip whitespace and comments) |
+| `Esc` | Close (asks if unsaved) |
+
+`⌘` and `⌥` are the macOS labels. On Windows and Linux they become `Ctrl` and
+`Alt`, and the on-screen hints show those instead.
+
+Editing itself:
+
+| Key | Action |
+|---|---|
+| `Enter` | Newline, indented to match the previous line. One level deeper after `{` |
+| `Tab` / `Shift+Tab` | Indent / outdent the selected lines |
+| `⌘/` | Toggle comments on the selected lines |
+| `⌘D` | Duplicate the line |
+| `⌥↑` / `⌥↓` | Move the line up or down |
+| `⌘Z` / `⌘⇧Z` | Undo / redo |
+
+Clicking the error message at the bottom jumps the cursor to that line.
+
+The code pane has line numbers and syntax colouring for Processing Lite: types,
+keywords, API functions, built-in variables, numbers and comments are told
+apart. A line that failed to compile gets a red background and line number.
+
+The vocabulary used for colouring (keywords and API names) is read from the same
+lexer and `natives` table the runtime uses, so adding a word to the language also
+colours it. A test pins the two together so they cannot drift.
+
+#### Checking as you type
+
+You do not have to save. When your hands stop for 0.4 s the code is compiled in
+the background and failing lines turn red. Nothing touches the file or the
+running sketch, so a typo never stops the picture that is already on screen.
+A compile takes 30–45 µs for the bundled sketches, well inside one frame (16 ms).
+
+#### Telling the dialects apart
+
+When a compile fails, the editor says which dialect it read the code as and
+lists what that dialect **does not support yet**, with line numbers. Showing only
+an error position gives you nothing to act on.
+
+```text
+Read as p5.js, but some of it is not supported.
+  line 2  API we do not have yet
+  line 2  strings
+```
+
+The guess is only a guess, so **code that compiles is never commented on**.
+
+#### Expand and compress
+
+`#つぶやきProcessing` (tweet-sized Processing) is usually folded onto one line to
+save characters. **Expand** to read it, **compress** to post it. The character
+count is always shown at the bottom of the editor.
+
+```processing
+// compressed (207 chars)
+int t;void setup(){size(400,400);}void draw(){background(0);for(int i=0;i<100;i++){
+float a=i*.1+t*.01;float r=i*2.;noStroke();fill(255,i,255-i);circle(200.+r*cos(a),
+200.+r*sin(a),4.);}if(t>100)t=0;else t++;}
+```
+
+```processing
+// expanded
+void draw() {
+  background(0);
+  for (int i = 0; i < 100; i++) {
+    float a = i * 0.1 + t * 0.01;
+    ...
+  }
+  if (t > 100)
+    t = 0;
+  else
+    t++;
+}
+```
+
+Expanding breaks lines at statement boundaries, indents, and then **wraps any
+line longer than 96 columns inside its brackets**. A compressed sketch can have a
+single statement hundreds of characters long, which is unreadable even after
+indenting.
+
+```js
+// before wrapping (150 chars)
+a = (y, d = mag(k = (5 + sin(y * 2 - t / 2) * 2) * cos(i / 29), e = y / 7 - 13) - 6) => point(…)
+
+// after
+a = (
+  y,
+  d = mag(k = (5 + sin(y * 2 - t / 2) * 2) * cos(i / 29), e = y / 7 - 13) - 6
+) => point((q = 3 * sin(k * 2) + cos(y)) * d + w, (cos(e) + sin(k)) * d + w)
+```
+
+It picks the outermost bracket group and splits on the commas inside it, then
+recurses into pieces that are still too long. Brackets inside comments are not
+counted. A single blank line from the original is kept.
+
+Compressing removes whitespace and comments and shortens numbers (`0.5` → `.5`,
+`1.0` → `1.`, `2.0f` → `2.`). It never shortens in a way that changes the type
+(`1.0` → `1`), and it **does not rename variables**, so it will not get as small
+as code golfed by hand.
+
+Neither direction reorders tokens, so meaning is preserved. Tests pin that the
+bytecode is identical before and after for every bundled sketch, and that a round
+trip is stable. Even for code that does not parse, the token sequence is
+guaranteed unchanged.
+
+The viewer's control overlay fades out after 2.6 s without input (§8.2).
+
+### Adding, editing and deleting sketches
+
+Press `N` in the gallery to start a new sketch from a template. The name is
+chosen so it does not clash (`sketch`, `sketch-2`, …) and can be changed above
+the code pane. Saving writes `<data>/sketches/<name>.pde`.
+
+Saving recompiles on the spot and regenerates the thumbnail. **The file is always
+written even if compilation fails** — you should never lose what you typed. The
+running instance keeps going with the last good code (design §15.1: "on a syntax
+error, keep the last good cache").
+
+Deleting cannot be undone, so it always asks first. Both the `.pde` and the
+thumbnail are removed. Deleting a bundled sketch does not bring it back on the
+next launch (the bundled set is only written out when the library is empty).
+
+Files placed from outside the app are picked up the same way. You are free to use
+your own text editor instead of the built-in one.
+
+### Finding and organising (design §20)
+
+The top of the gallery filters and sorts.
+
+| Control | Effect |
+|---|---|
+| Search box | Substring match on title and id (case insensitive) |
+| Favourites | Only starred sketches |
+| Errors | Only sketches that fail to compile |
+| Tags | Only sketches with the chosen tag |
+| Sort | By name / recently added / recently opened |
+
+Tags are typed comma-separated in the editor's **Tags** field. They show at the
+bottom right of the card and become filter choices.
+
+Favourites, tags, creation time and last-opened time survive a restart.
+
+### Generating every thumbnail at once
+
+Runs every sketch without opening a window and writes images. Also usable as a
+rendering smoke test in CI.
+
+```sh
+cargo run --release -- --capture-all ./out
+```
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `TSUBU_DATA_DIR` | Use a different data directory |
+| `TSUBU_START_SCREEN` | Override the start screen: `gallery` / `viewer` / `editor` / `settings`. Without it, the setting is used |
+
+```text
+<data>/
+  sketches/          sketches (*.pde) — the source of truth
+  thumbnails/        <id>.png
+  library.sqlite3    metadata (favourites / tags / collections / settings)
+  instance.lock      running marker (see "Single instance" below)
+  cache/             bytecode cache (unused; see "Deferred optimisation")
+```
+
+### Single instance
+
+Only one process may open a given data directory. Opening it twice makes SQLite
+writes contend and generates thumbnails twice over. The second one explains
+itself and exits with status 1.
+
+```console
+$ tsubugallery
+TsubuGallery is already running. (pid 35013)
+Only one instance at a time. Set TSUBU_DATA_DIR to open a separate data directory.
+```
+
+`--capture-all` is treated the same way, since it writes to the same place.
+
+The mechanism is an OS file lock on `instance.lock`
+(`std::fs::File::try_lock`). **It is always released when the process dies**, so a
+forced kill does not block the next launch. Not having to decide whether a PID
+file is stale is exactly why this was chosen. The PID written into the file is
+only there for a human to read.
+
+Different data directories run side by side, so `TSUBU_DATA_DIR` lets you compare
+two builds at once.
+
+Where the lock cannot be taken (a data directory that is not writable, say) the
+app warns and starts anyway.
+
+### Settings (design §24)
+
+Open with `,` or the **Settings** button at the top right of the gallery.
+Changes take effect immediately and are written to the `setting` table in
+`library.sqlite3`.
+
+| Group | Items |
+|---|---|
+| General | Language / theme (dark, light) / start screen |
+| Gallery | View mode / card size / sort order / show titles |
+| Viewer | Open fullscreen / frame rate / next-sketch order / preload neighbours / slideshow interval / screensaver |
+| Thumbnail | Capture frame / image quality |
+| Runtime | Per-frame instruction limit |
+
+Both keys and values are language-independent ASCII. Unreadable values fall back
+to the default, so hand-editing the table cannot stop the app from starting.
+
+### View modes (design §6.2)
+
+Three ways to lay out the list. `V` cycles them, and the choice is saved.
+
+| Mode | Description |
+|---|---|
+| Grid | Default. 2–10 columns depending on window width |
+| Large cards | Up to 3 columns. One sketch shown big, with bigger text |
+| List | One row per sketch. Dialect, tags and errors sit beside the image instead of on top of it |
+
+The column count is also the step size for the up/down keys, so every mode
+reports the number it actually used (the list reports 1). The other four items
+§6.2 lists — favourites only, by tag, recently added, random — are already
+covered by filtering and sorting (§20).
+
+### Playback — slideshow and screensaver (design §27)
+
+`P` starts advancing automatically. The interval is 2–120 s in the settings, and
+the order follows the "next sketch" setting (in order / random).
+
+**The playlist is whatever the gallery is showing.** There is no separate queue;
+it walks the visible list in its current order. Filter to favourites, to a tag,
+or to a collection, then press `P`, and that is your playlist. The arrow keys
+move within the same range.
+
+The screensaver turns on once you pick an idle time in the settings (off by
+default). After that much time without input, a fullscreen slideshow starts; any
+input restores the previous screen and fullscreen state. Nothing is overlaid
+while it runs, and the keystroke that dismisses it is not passed on to the
+screen, so you cannot accidentally delete a sketch waking it up.
+
+It never starts while editing or in the settings, since you may simply be reading
+the screen.
+
+### Collections (design §27)
+
+Select a sketch and press `C`. Ticking a box takes effect immediately. Typing a
+new name and pressing **Add** creates that collection and puts the sketch in it.
+
+A collection selector appears in the filter bar (hidden when there are none).
+Choosing one narrows the list, and `P` then plays that collection.
+
+Deleting a collection does not delete sketches. Deleting a sketch removes its
+memberships (`ON DELETE CASCADE`). Renaming a sketch carries them along
+(`ON UPDATE CASCADE`).
+
+### Files are the source, the database is metadata
+
+Design §19.1 puts `source` in the `Sketch` table too. Here the `.pde` file is the
+source of truth and the database holds only the other columns. Three reasons:
+
+- You can use any editor. Sketches are short text; needing the app to touch them
+  would be the bigger inconvenience
+- A corrupted database never costs you your sketches. Only the extras have to be
+  rebuilt
+- The same reasoning that keeps thumbnails out of the database (§7.3) applies to
+  the source
+
+At startup the file listing and the database are reconciled: new files get a row,
+and rows for files deleted outside the app are dropped. Sketches still run if the
+database cannot be opened (you just lose favourites and tags).
+
+### The canvas persists across frames
+
+If `draw()` does not call `background()`, the previous frame stays on screen,
+matching Processing and p5.js. The staple of tweet-sized Processing —
+
+```java
+void draw() {
+  background(0, 12);   // translucent wash → trails
+  circle(...);
+}
+```
+
+— and the style that never calls `background()` at all both come out the way they
+do in the real thing.
+
+It is implemented with two textures used alternately
+(`renderer/src/canvas.rs`). Because drawing resolves MSAA into the target, you
+cannot read the previous frame while writing the same place, so the read side and
+the write side are separate. Thumbnails accumulate one frame at a time up to the
+target frame too, so sketches with trails look the same as when they run.
+
+Nothing accumulates while paused. Stacking the same shapes every frame would make
+a supposedly frozen picture keep darkening.
+
+## Two dialects
+
+Drop in a `.pde` and it runs. Both **Processing (Java Mode)** and **p5.js** are
+accepted, and which one it is gets detected automatically — you never have to say
+(design §23.2, swappable frontends).
+
+```text
+Processing Lite ─┐
+                 ├─ AST → bytecode → VM → renderer
+p5.js subset ────┘
+```
+
+Everything below bytecode is shared; only the VM's value type was widened to
+cover arrays, objects and functions.
+
+## Processing Lite (Java Mode)
+
+The supported surface follows design §14. Full Java Mode compatibility is not a
+goal.
+
+```processing
+// Particles on the golden angle, slowly turning as a whole.
+void draw() {
+  background(10);
+  float s = min(width, height);
+  float t = frameCount * 0.008;
+
+  noStroke();
+  pushMatrix();
+  translate(width * 0.5, height * 0.5);
+  rotate(t);
+
+  for (int i = 0; i < 320; i++) {
+    float f = i / 320.0;
+    float angle = i * 2.399963;
+    float radius = sqrt(f) * s * 0.46;
+    fill(60 + f * 190, 80 + f * 40, 255 - f * 70, 235);
+    circle(radius * cos(angle), radius * sin(angle), map(f, 0, 1, s * 0.03, s * 0.004));
+  }
+
+  popMatrix();
+}
+```
+
+### The language
+
+| Category | Supported |
+|---|---|
+| Types | `int` `float` `boolean` `void` `String` `PVector`, 1-D arrays (`float[]` `int[]` `boolean[]` `String[]` `PVector[]`) |
+| Operators | `+ - * / %`, `== != < <= > >=`, `&& \|\|` (short-circuit), `!`, ternary |
+| Bitwise | `& \| ^ ~ << >> >>>` |
+| Assignment | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` `++` `--` |
+| Control flow | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `switch` |
+| Arrays | `new float[n]`, `new float[r][c]`, `{1,2,3}`, `a[i]`, `a[y][x]`, `a.length`, enhanced for (`for (int v : a)`) |
+| Classes | `class P { ... }`, fields, constructor, methods, `this`, `new P(...)`, `P[]` |
+| Vectors | `new PVector(x, y)`, reading and writing `v.x`, methods like `v.add(u)` |
+| Casts | `(int)x` `(float)x` `(boolean)x` |
+| Literals | decimal, hex (`0xFF6B35`), exponent (`1e3`), `1.0f`, char (`'a'` = code point), string (`"..."`) |
+| Other | User-defined functions (recursion allowed), globals, block scope |
+
+`int` arithmetic stays integral as in Java (`7 / 2` is `3`). Bitwise operations
+coerce both sides to 32-bit integers and only look at the low 5 bits of a shift
+count. Precedence matches Java too, including the trap where `a & 1 == 0` parses
+as `a & (1 == 0)`.
+
+```processing
+// Classes, PVector and a 2-D array.
+class Bird {
+  PVector pos, vel;
+  Bird(float x, float y) {
+    pos = new PVector(x, y);
+    vel = new PVector(random(-2, 2), random(-2, 2));
+  }
+  void step() { pos.add(vel); }
+  void show() { circle(pos.x, pos.y, 4 + vel.mag()); }
+}
+
+Bird[] flock = new Bird[140];
+float[][] grid = new float[12][12];
+
+void setup() {
+  size(600, 600);
+  for (int i = 0; i < flock.length; i++) flock[i] = new Bird(random(600), random(600));
+}
+
+void draw() {
+  background(12);
+  for (Bird b : flock) { b.step(); b.show(); }
+}
+```
+
+```processing
+// Unpacking packed colours, a common idiom, works as written.
+int[] pal = {0xFF6B35, 0x4ECDC4, 0xFFE66D};
+float[] y = new float[64];
+
+void draw() {
+  for (int c : pal) {
+    fill((c >> 16) & 255, (c >> 8) & 255, c & 255);
+    for (int i = 0; i < y.length; i++) {
+      if (i % 7 == 0) continue;
+      if (i > 60) break;
+      circle(i * 9, y[i], (int)(6 + (i & 7)));
+    }
+  }
+}
+```
+
+`switch` falls through to the next `case` without a `break`, as in Java. That is
+used deliberately when golfing, so it is reproduced. A `break` inside a `switch`
+leaves only the `switch`; a `continue` reaches the enclosing loop.
+
+Vectors are the same thing as p5's `createVector()`: `add()` and friends mutate
+the receiver and return it, so `v.mult(3).add(2,0)` chains. Every element of
+`new PVector[n]` is a separate instance — sharing one would move them all at
+once.
+
+`int(x)` and `float(x)` are spelled like type names but can be called as
+functions. They are distinct from the cast `(int)x`; a following `(` is what
+tells them apart.
+
+Class methods are compiled as ordinary functions taking `this` as their first
+argument, and are attached to each instance as properties. Inside a method, a
+bare field name means `this.x`.
+
+Arrays go up to two dimensions. Each row of `new float[r][c]` is a separate
+array; sharing one would make a write to one row hit every row.
+
+**Not supported**: arrays beyond 2-D, inheritance, `static`, imports.
+
+### API (design §14.2)
+
+| Category | Functions and variables |
+|---|---|
+| Screen | `size()` (accepted, ignored), `width` `height` `frameCount` |
+| Basic shapes | `point() line() rect() ellipse() circle() triangle()` |
+| Free-form shapes | `beginShape() vertex() curveVertex() bezierVertex() endShape()`, `arc() quad() bezier() curve()` |
+| Text | `text() textSize() textAlign() textWidth()`, `str() nf()` |
+| Shape modes | `rectMode() ellipseMode() angleMode()`, `square()` |
+| Vectors | `createVector()`, `add sub mult div set copy mag magSq normalize limit setMag heading rotate dist dot cross lerp angleBetween` |
+| Looping | `noLoop() loop()` |
+| Colour values | `color() lerpColor()` |
+| Colour and stroke | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
+| Transforms | `translate() rotate() scale() pushMatrix() popMatrix()` |
+| Maths | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
+| Random and noise | `random() noise() randomSeed() millis()` |
+| Input | `mouseX` `mouseY` `mousePressed` `keyPressed` |
+| Constants | `PI` `TWO_PI` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
+
+`background()`, `fill()` and `stroke()` switch on argument count exactly as
+Processing does.
+
+`beginShape()` fills concave shapes correctly. Fanning the vertices would spill
+outside the notches, so ear clipping is used instead. A filled `arc()` is a pie
+wedge and its stroke is the arc itself (Processing's default `OPEN`).
+
+`angleMode(DEGREES)` applies to the trigonometric functions, their inverses,
+`rotate()` and `arc()` alike. `rectMode()` affects `rect()` and `square()`, and
+`ellipseMode()` affects `ellipse()` (`circle()` is always centre-based, as in
+Processing).
+
+`noLoop()` stops `frameCount` from advancing, which keeps a sketch that draws
+once from random numbers from flickering as it is redrawn every frame.
+
+### Text (`text()`)
+
+Japanese works. Glyph outlines are taken from an OS font, filled in-process, and
+packed into a single texture (an atlas). Only the characters actually used are
+rasterised, and each is reused.
+
+Filling uses the non-zero winding rule, so characters with holes such as `o` or
+`あ` come out correctly hollow.
+
+Shapes and text go through the same draw path: an opaque white pixel sits at the
+top left of the atlas and shape vertices point at it. That keeps the pipeline
+down to one, at the price that **forgetting to upload the atlas to the GPU makes
+shapes transparent too**. So that it cannot be forgotten, the drawing functions
+take the whole `Graphics` rather than just the draw list.
+
+Where no font can be found, `text()` draws nothing (it does not fail).
+
+`color()` returns an `[r, g, b, a]` array rather than a dedicated type.
+`fill()`, `stroke()` and `background()` use such a value directly without
+conversion, so it does not get converted twice under `colorMode(HSB)`.
+
+A sketch that calls `size()` or `createCanvas()` has that canvas scaled up with
+its aspect ratio preserved and centred on screen. `width` and `height` report the
+declared size, so a sketch written against `createCanvas(400,400)` runs as-is.
+
+Without those calls, `width` and `height` are the real display size. Writing
+against the short side (`min(width, height)`) then looks the same at any
+resolution.
+
+`random()` runs from a fixed seed derived from the sketch id, so thumbnails do
+not change from run to run.
+
+## p5.js subset
+
+Most code circulating as `#つぶやきProcessing` is p5.js, so it should run when
+pasted in unchanged.
+
+```js
+t=0
+$=[]
+draw=_⇒{t?colorMode(HSB):createCanvas(W=720,W)
+background(0,.03)
+for(i=2;i--;)$[t++%W]={x:t*1.5%W,y:t*4%W,s:25,c:t%360}
+$.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p.y+=sin(A),p.s*=.99))}
+```
+
+### What is supported
+
+| Category | Supported |
+|---|---|
+| Variables | Assignment without a type, `let` / `const` / `var` |
+| Functions | Arrow functions (`=>` `⇒` `→`), `function` declarations, functions as values (`B=blendMode`) |
+| Arrays | Literals, indexed read/write, `length`, `map` / `forEach` / `filter` / `push` / `keys` / `entries`, `Array(n)` |
+| Spread | `[...xs]`, `[...a, b, ...c]` |
+| Strings | `"..."` `'...'` `` `...` ``, `${}` interpolation, `+` concatenation, `length charAt substring indexOf split repeat toUpperCase toLowerCase trim` |
+| Destructuring | `[a,b]=[1,2]`, swapping `[a,b]=[b,a]`, `[o.x,v[0]]=…` |
+| Objects | Literals (`{x:1}`, shorthand `{x}`), reading and writing `p.x`, `p.x+=v` |
+| Expressions | Assignment as an expression, comma operator, ternary, short-circuit, prefix and postfix `++` / `--` |
+| Bitwise | `& \| ^ ~ << >> >>>`, compound assignment (`&=`, `<<=`, …) |
+| Control flow | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
+| Literals | decimal, hex (`0xFF6B35`), exponent |
+| Other | Semicolon insertion (ASI), numbers as truthiness (`t?…`, `for(i=2;i--;)`) |
+| p5 API | `createCanvas` `colorMode(HSB)` `blendMode(ADD)` `push` / `pop`, 3-argument `noise` |
+| `Math` | `Math.sin` and friends map to the built-ins. `Math.PI` `Math.hypot` `Math.sign` too, and `S=Math.sin` works as a value |
+| Variadic | `min()` and `max()` take any number of arguments |
+
+There is one number type, as in JavaScript (`7/2` is `3.5`).
+
+```javascript
+// A staple of tweet-sized p5, running as written.
+draw=_=>{t||createCanvas(W=600,W);t=(t||0)+.02;background(8);noStroke()
+for(i of [...Array(120).keys()]){
+  [x,y]=[W/2+cos(i*.13+t)*(40+i*1.6), W/2+sin(i*.19+t)*(40+i*1.6)]
+  c=(i*0x030507)&0xFFFFFF
+  fill((c>>16)&255,(c>>8)&255,c&255,200)
+  if(i%9==0)continue
+  circle(x,y,3+(i&7))}}
+```
+
+### What is not there yet
+
+- **Closures.** An arrow function sees its own parameters and globals only;
+  anything that is not a parameter is treated as global
+- `class` / `new` / `async`
+
+Code using something unsupported is listed line by line by the editor (above).
+
+### Safety (design §21)
+
+User code can reach nothing but the API in the tables above. There is no entry
+point to files, the network, subprocesses or FFI anywhere in the runtime.
+
+The VM caps instructions per frame (20 million by default, configurable). A frame
+that exceeds it is cut off and control returns to the viewer; a sketch that
+exceeds it three frames running is stopped and shows an error instead. An
+infinite loop cannot take the gallery down with it.
+
+### Errors
+
+Compile errors come with a position.
+
+```
+line 3, column 3: `;` expected
+```
+
+A sketch that fails still appears in the list, with an error badge on its card.
+Opening it in the viewer shows why.
+
+## Distribution (Phase 9)
+
+```sh
+cargo build --release
+```
+
+The resulting binary **stands alone**. Translations, the bundled sketches and
+SQLite are all compiled in, so it does not care where it lives or what the
+working directory is.
+
+| Item | Value |
+|---|---|
+| Binary | `target/release/tsubugallery` (about 14 MB on macOS arm64) |
+| Runtime dependencies | Only the OS frameworks |
+| What it creates | Just the data directory, e.g. `~/Library/Application Support/TsubuGallery/` |
+
+```sh
+tsubugallery --help       # usage
+tsubugallery --version    # version
+```
+
+### Platforms
+
+| OS | Status |
+|---|---|
+| macOS (arm64) | Verified on hardware |
+| Windows / Linux | `renderer` and `processing-lite` type-check. Not verified on hardware |
+
+Cross-building for Windows and Linux needs that platform's C toolchain (SQLite is
+built from source). Running `cargo build --release` on the target OS is the
+reliable route.
+
+## Layout
+
+A cargo workspace matching the module boundaries in design §31.
+
+```text
+core/              library / repository / locale / paths … shared layer, independent of UI and runtime
+renderer/          draw / batch / texture / capture / canvas / font … Processing API → triangles → wgpu
+processing-lite/   lexer → parser → ast → compiler ─┐
+                   js/{lexer,parser,ast,compiler} ──┴→ bytecode → vm
+                   natives / highlight / format / dialect / examples / sketch
+gallery/           grid / model / view_model        … column count, selection, ordering (UI independent)
+app/               ui / gallery_ui / viewer_ui / editor_ui / editor / settings_ui
+                   viewer / gfx / loader / headless / theme
+locales/           ja-JP.json / en-US.json
+```
+
+Dependencies run `app → {gallery, processing-lite, renderer, core}`,
+`processing-lite → renderer`, `gallery → core`.
+
+- The renderer knows nothing about the gallery UI or Processing Lite
+- The viewer does not know what a sketch really is (it only sees `dyn Sketch`)
+- `gallery/` contains no egui, so layout and selection can be tested without
+  opening a window
+
+### How a frame flows
+
+```text
+at startup   source → lexer → parser → ast → compiler → bytecode
+at display   bytecode → vm → natives → Graphics → triangles → wgpu
+```
+
+As design §15.2 requires, no parser runs at the moment a sketch is picked from
+the gallery. Adding another frontend such as the p5.js subset only means lowering
+to the AST; everything after is shared (§23.2).
+
+## Technology choices
+
+| Layer | Choice | Why |
+|---|---|---|
+| GPU | wgpu 30 | Metal / Vulkan / DX12 from one codebase. Android and iOS use the same path |
+| Windowing | winit 0.30 | One event loop across five platforms |
+| UI | egui 0.36 (egui-wgpu) | Shares a single wgpu surface with the viewer, so switching costs one frame |
+| Drawing | Custom batch renderer | Every shape becomes triangles, normally one draw call. Shared with thumbnails |
+| Language | Hand-written | The supported surface is bounded by §14, so a dependency would buy nothing |
+| Metadata | rusqlite (bundled) | Specified in design §19. Bundled keeps all five platforms the same |
+
+MSAA is 4x. The viewer and thumbnails go through the same `BatchRenderer`.
+Blend modes switch pipelines per run of geometry, so a sketch using only one has
+a single run and stays effectively one draw call.
+A non-sRGB framebuffer is chosen so vertex colours pass through as sRGB, which
+also makes alpha blending happen in the same space as Processing and keeps
+egui's colours correct.
+
+## Deferred optimisation
+
+**Bytecode disk cache (design §15.1).** Compiling a bundled sketch takes under a
+thousand instructions, and all six together do not show up in startup time. The
+requirement that §15.1 actually cares about — not compiling at display time — is
+already met by compiling everything at startup, so adding a serialisation format
+can wait until sketch counts make it measurable. `<data>/cache/` is reserved for
+it.
+
+## Not implemented
+
+- Java Mode language extensions: inheritance, arrays beyond 2-D, `static`
+- p5.js: `class`, object destructuring
+- p5 APIs: images (`image` / `pixels`), `strokeCap` / `strokeJoin`,
+  `frameRate()`, 3D (`box` / `sphere`)
+- Import / export, GIF and video export (design §27)
+- Registering as an OS screensaver (macOS `.saver` / Windows `.scr`)
+- Android / iOS (Phases 10 and 11)
+- P3D and shaders
+
+## Development
+
+```sh
+cargo test --workspace      # 409 tests
+cargo clippy --workspace --all-targets
+```
+
+The Japanese UI borrows a CJK font from the OS (`app/src/fonts.rs`). Where none
+is found, the UI falls back to English at startup.
+
+The egui screens (gallery, editor) are tested without opening a window:
+synthesised `RawInput` is fed in, one frame is built, and the test checks that
+vertices actually come out and that the shortcuts are wired
+(see the tests in `app/src/editor_ui.rs` and `app/src/gallery_ui.rs`).

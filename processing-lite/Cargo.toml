@@ -1,0 +1,10 @@
+[package]
+name = "tsubu-processing-lite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tsubu-renderer.workspace = true
+log.workspace = true
