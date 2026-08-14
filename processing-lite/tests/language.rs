@@ -1091,3 +1091,400 @@ fn noise_is_continuous_along_the_third_axis() {
     let far: Vec<f32> = (1..8).map(|i| at(3.0 + i as f32)).collect();
     assert!(far.iter().any(|v| (v - base).abs() > 2.0), "z を変えても同じです: {base}, {far:?}");
 }
+
+
+// ---- 影と push()/pop() --------------------------------------------------
+
+/// 最初に描かれた三角形の色。
+fn first_color(src: &str) -> [f32; 4] {
+    let mut s = VmSketch::compile(src, 1).expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    g.frame_count = 1;
+    s.draw(&mut g);
+    assert!(s.error().is_none(), "{:?} / {src}", s.error());
+    g.draw_list().vertices.first().expect("何か描かれている").color
+}
+
+const PLAIN_RECT: &str = "draw=_=>{createCanvas(400,400);noStroke();rect(150,150,100,100)}";
+
+/// `drawingContext.shadowBlur` が形の外へ広がる。
+///
+/// 受け取るだけで捨てていたので、影だけで成り立っている作品が真っ白に
+/// なっていた。
+#[test]
+fn a_shadow_spreads_around_the_shape() {
+    let plain = bounds(PLAIN_RECT);
+    let lit = bounds(
+        "draw=_=>{createCanvas(400,400);noStroke();\
+         drawingContext.shadowBlur=20;drawingContext.shadowColor=color(0);\
+         rect(150,150,100,100)}",
+    );
+    assert!(lit.0 < plain.0 - 5.0, "左へ広がっていません: {lit:?} と {plain:?}");
+    assert!(lit.2 > plain.2 + 5.0, "右へ広がっていません: {lit:?} と {plain:?}");
+    // 影は形の下に敷く。最初に出る色は黒に近いはず。
+    let c = first_color(
+        "draw=_=>{createCanvas(400,400);noStroke();fill(255,0,0);\
+         drawingContext.shadowBlur=20;drawingContext.shadowColor=color(0);\
+         rect(150,150,100,100)}",
+    );
+    assert!(c[0] < 0.1 && c[1] < 0.1 && c[3] > 0.0, "影が黒く敷かれていません: {c:?}");
+}
+
+/// `shadowOffsetX` / `shadowOffsetY` でずれる。
+#[test]
+fn a_shadow_can_be_offset() {
+    let at = bounds(
+        "draw=_=>{createCanvas(400,400);noStroke();\
+         drawingContext.shadowColor=color(0);drawingContext.shadowOffsetX=30;\
+         rect(150,150,100,100)}",
+    );
+    let plain = bounds(PLAIN_RECT);
+    assert!((at.2 - plain.2 - 30.0).abs() < 1.0, "右へずれていません: {at:?}");
+}
+
+/// p5.js の `pop()` は見た目まで戻す。
+///
+/// canvas の `save()` / `restore()` と同じ扱いなので、影の指定も戻る。
+/// Processing の `popMatrix()` は座標変換だけで、こちらは戻さない。
+#[test]
+fn the_p5_pop_puts_back_the_style_and_the_shadow() {
+    // push() の中で付けた影は pop() で消える。
+    let after = bounds(
+        "draw=_=>{createCanvas(400,400);noStroke();push();\
+         drawingContext.shadowBlur=20;drawingContext.shadowColor=color(0);pop();\
+         rect(150,150,100,100)}",
+    );
+    let plain = bounds(PLAIN_RECT);
+    assert!((after.0 - plain.0).abs() < 0.5, "影が残っています: {after:?} と {plain:?}");
+
+    // 塗りの色も戻る。
+    let popped = first_color(
+        "draw=_=>{createCanvas(400,400);noStroke();fill(255,255,255);\
+         push();fill(255,0,0);pop();rect(150,150,100,100)}",
+    );
+    assert!(popped[1] > 0.9, "p5 の pop() が塗りを戻していません: {popped:?}");
+
+    // Processing の popMatrix() は色を戻さない。
+    let kept = first_color(
+        "void setup(){size(400,400);}\n\
+         void draw(){noStroke();fill(255,255,255);\
+         pushMatrix();fill(255,0,0);popMatrix();rect(150,150,100,100);}",
+    );
+    assert!(kept[1] < 0.1, "popMatrix() が色まで戻しています: {kept:?}");
+}
+
+
+/// フォントを積んだうえで、最初に描かれた三角形の色を返す。
+///
+/// フォントの無い環境では `None`。
+fn first_text_color(src: &str) -> Option<[f32; 4]> {
+    const CANDIDATES: &[&str] = &[
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "C:/Windows/Fonts/meiryo.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    ];
+    let font = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok())?;
+
+    let mut s = VmSketch::compile(src, 1).expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.font.set_fonts(vec![font]);
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    g.frame_count = 1;
+    s.draw(&mut g);
+    assert!(s.error().is_none(), "{:?} / {src}", s.error());
+    Some(g.draw_list().vertices.first().expect("字が描かれている").color)
+}
+
+/// p5.js の `text()` は塗りと線の両方で描く。
+///
+/// 白いカードに白い字を置く作品は、線が付かないと何も見えない。
+/// Processing の `text()` は塗りだけなので、そちらは付けない。
+#[test]
+fn p5_text_is_stroked_but_processing_text_is_not() {
+    let Some(p5) = first_text_color(
+        "draw=_=>{createCanvas(400,400);textSize(60);fill(255,255,255);stroke(255,0,0);text('あ',50,200)}",
+    ) else {
+        eprintln!("フォントが無いので飛ばします");
+        return;
+    };
+    assert!(p5[0] > 0.9 && p5[1] < 0.1, "p5 の字に線が付いていません: {p5:?}");
+
+    let java = first_text_color(
+        "void setup(){size(400,400);}\n\
+         void draw(){textSize(60);fill(255,255,255);stroke(255,0,0);text(\"あ\",50,200);}",
+    )
+    .expect("フォントはある");
+    assert!(java[1] > 0.9, "Processing の字に線が付いています: {java:?}");
+
+    // 線を消せば p5 でも塗りだけになる。
+    let bare = first_text_color(
+        "draw=_=>{createCanvas(400,400);textSize(60);fill(255,255,255);noStroke();text('あ',50,200)}",
+    )
+    .expect("フォントはある");
+    assert!(bare[1] > 0.9, "noStroke() が効いていません: {bare:?}");
+}
+
+
+/// `f(...xs)`。引数の並びに展開を書ける。
+///
+/// 配列リテラルの展開だけを見ていたので、`stroke(...B, 9)` のような
+/// 書き方が通らなかった。引数の個数が実行時まで決まらないので、
+/// ひとつの配列にまとめてから渡す。
+#[test]
+fn a_call_can_spread_its_arguments() {
+    // 塗りつぶした四角は三角形 2 つ。展開して渡しても同じ。
+    for src in [
+        "draw=_=>{createCanvas(400,400);noStroke();let B=[10,20,30,40];rect(...B)}",
+        "draw=_=>{createCanvas(400,400);noStroke();let B=[20,30,40];rect(10, ...B)}",
+        "draw=_=>{createCanvas(400,400);noStroke();let B=[10,20];rect(...B, 30, 40)}",
+        "draw=_=>{createCanvas(400,400);noStroke();let B=[20,30];rect(10, ...B, 40)}",
+    ] {
+        assert_eq!(triangles(src), 2, "{src}");
+    }
+
+    // 場所も引数を並べて書いたときと同じ。
+    let spread = bounds("draw=_=>{createCanvas(400,400);noStroke();let B=[10,20,30,40];rect(...B)}");
+    let plain = bounds("draw=_=>{createCanvas(400,400);noStroke();rect(10,20,30,40)}");
+    assert_eq!(spread, plain);
+}
+
+/// 展開はユーザー定義の関数、メソッド、`Math.*` でも使える。
+#[test]
+fn spreading_works_for_every_kind_of_call() {
+    assert_eq!(
+        triangles(
+            "f=(a,b,c,d)=>rect(a,b,c,d);\n\
+             draw=_=>{createCanvas(400,400);noStroke();let B=[10,20,30,40];f(...B)}"
+        ),
+        2,
+        "ユーザー定義の関数"
+    );
+    assert_eq!(
+        triangles(
+            "draw=_=>{createCanvas(400,400);noStroke();\
+             let a=[10,20];let b=[30,40];a.push(...b);rect(a[0],a[1],a[2],a[3])}"
+        ),
+        2,
+        "配列のメソッド"
+    );
+    // Math.max(...xs) は組み込みへ読み替える。`Math` は実体を持たない。
+    let (_, _, x1, _) = bounds(
+        "draw=_=>{createCanvas(400,400);noStroke();let B=[3,40,12];rect(0,0,Math.max(...B),10)}",
+    );
+    assert!((x1 - 40.0).abs() < 0.01, "Math.max の展開が効いていません: {x1}");
+}
+
+/// `...` を引数の並び以外へ書いたら弾く。
+#[test]
+fn a_stray_spread_is_refused() {
+    assert!(VmSketch::compile("draw=_=>{let a=...[1,2]}", 1).is_err());
+}
+
+
+/// 配列のメソッド。`push` / `map` の類だけでは足りない。
+///
+/// つぶやき系は配列を待ち行列のように使う。`shift()` が無いだけで
+/// 作品が止まる。
+#[test]
+fn arrays_have_the_methods_javascript_gives_them() {
+    /// 式の値を `rect` の幅で測る。
+    fn value_of(expr: &str) -> f32 {
+        let (_, _, x1, _) =
+            bounds(&format!("draw=_=>{{createCanvas(400,400);noStroke();rect(0,0,({expr}),10)}}"));
+        x1
+    }
+
+    for (expr, want) in [
+        // 端から出し入れする。
+        ("a=[7,8,9], a.shift(), a[0]*10+a.length", 82.0),
+        ("a=[7,8,9], a.pop()*10+a.length", 92.0),
+        ("a=[8], a.unshift(7), a[0]*10+a.length", 72.0),
+        ("a=[7,8,9], a.at(-1)", 9.0),
+        // 切り出す。splice は取り除いたぶんを返す。
+        ("a=[1,2,3,4], a.slice(1,3).join(\"\")", 23.0),
+        ("a=[1,2,3,4], b=a.splice(1,2), b[0]*10+a.length", 22.0),
+        ("[1,2].concat([3],4).length", 4.0),
+        ("[[1,2],[3]].flat().length", 3.0),
+        // 並べ替えと探索。
+        ("[1,2,3].reverse()[0]", 3.0),
+        ("[0,0,0].fill(5)[2]", 5.0),
+        ("[7,8,9].indexOf(9)", 2.0),
+        ("[7,8].includes(8) ? 1 : 0", 1.0),
+        ("[7,8].includes(3) ? 1 : 0", 0.0),
+        ("[7,8,9].lastIndexOf(3)+10", 9.0),
+        // 比べ方を渡さないと文字として並ぶ。JavaScript と同じ。
+        ("[3,20,1].sort()[0]", 1.0),
+        ("[3,20,1].sort()[1]", 20.0),
+        ("[3,20,1].sort((a,b)=>a-b)[2]", 20.0),
+        // たたみ込みと述語。
+        ("[1,2,3].reduce((a,b)=>a+b,0)", 6.0),
+        ("[4,5].reduce((a,b)=>a+b)", 9.0),
+        ("[1,8,9].find(v=>v>5)", 8.0),
+        ("[1,8,9].findLast(v=>v>5)", 9.0),
+        ("[1,8,9].findIndex(v=>v>5)", 1.0),
+        ("[1,8].findIndex(v=>v>90)+10", 9.0),
+        ("[1,2].some(v=>v>1) ? 1 : 0", 1.0),
+        ("[1,2].every(v=>v>0) ? 1 : 0", 1.0),
+        ("[1,2].every(v=>v>1) ? 1 : 0", 0.0),
+        ("[1,2].flatMap(v=>[v,v]).length", 4.0),
+        ("[\"a\",\"b\"].join(\"-\").length", 3.0),
+    ] {
+        let got = value_of(expr);
+        assert!((got - want).abs() < 0.01, "{expr} → {got} (期待 {want})");
+    }
+}
+
+/// 空の配列にも安全に使える。
+#[test]
+fn the_array_methods_are_safe_on_an_empty_array() {
+    for src in [
+        "draw=_=>{let a=[];a.shift();a.pop();a.reverse();a.sort();circle(1,2,3)}",
+        "draw=_=>{let a=[];a.slice(2,9);a.splice(1,5);a.fill(0);circle(1,2,3)}",
+        "draw=_=>{let a=[];a.reduce((x,y)=>x+y);a.find(v=>v);circle(1,2,3)}",
+    ] {
+        assert!(triangles(src) > 0, "{src}");
+    }
+}
+
+
+/// `point()` は丸。四角ではない。
+///
+/// Processing も p5.js も、点は線の端と同じ丸で描く。太い点をばらまく作品が
+/// 角ばって見えていた。
+#[test]
+fn a_fat_point_is_round() {
+    let src = "draw=_=>{createCanvas(400,400);strokeWeight(40);point(200,200)}";
+    let (x0, y0, x1, y1) = bounds(src);
+    // 太さぶんの直径に収まる。
+    assert!((x1 - x0 - 40.0).abs() < 1.0, "大きさが違います: {:?}", (x0, y0, x1, y1));
+    assert!((y1 - y0 - 40.0).abs() < 1.0, "大きさが違います: {:?}", (x0, y0, x1, y1));
+
+    // 四角なら三角形 2 つ。丸は扇形に分かれるのでもっと多い。
+    assert!(triangles(src) > 8, "四角のままです: {}", triangles(src));
+
+    // 隅が空いている。四角ならここまで色が来る。
+    let mut s = VmSketch::compile(src, 1).expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    g.frame_count = 1;
+    s.draw(&mut g);
+    let corner = g
+        .draw_list()
+        .vertices
+        .iter()
+        .any(|p| (p.pos[0] - 220.0).abs() < 0.5 && (p.pos[1] - 220.0).abs() < 0.5);
+    assert!(!corner, "隅に頂点があります。まだ四角です");
+
+    // 細い点は四角のままでよい。見た目が変わらないのに頂点だけ増える。
+    assert_eq!(
+        triangles("draw=_=>{createCanvas(400,400);strokeWeight(1);point(200,200)}"),
+        2
+    );
+}
+
+
+/// `background()` を呼ばない作品の下地は、方言で違う。
+///
+/// Processing のキャンバスは灰 204 で始まる。p5.js のキャンバスは透明で、
+/// 後ろのページの白が透ける。半透明を塗り重ねる作品では、この下地が
+/// そのまま画面全体の明るさになる。
+#[test]
+fn the_ground_under_a_sketch_depends_on_the_dialect() {
+    let ground = |src: &str| {
+        let mut s = VmSketch::compile(src, 1).expect("コンパイルできる");
+        let mut g = Graphics::new();
+        g.begin_frame(400.0, 400.0);
+        s.setup(&mut g);
+        g.default_background()
+    };
+
+    let p5 = ground("draw=_=>{createCanvas(400,400);circle(1,2,3)}");
+    assert_eq!((p5.r, p5.g, p5.b), (1.0, 1.0, 1.0), "p5 の下地が白ではありません");
+
+    let java = ground("void setup(){size(400,400);}\nvoid draw(){circle(1,2,3);}");
+    assert!((java.r - 0.8).abs() < 0.01, "Processing の下地が灰 204 ではありません: {java:?}");
+}
+
+
+/// p5.js の `createCanvas()` は呼ぶたびにキャンバスを作り直す。
+///
+/// `draw()` の頭で毎フレーム呼んで画面を消す書き方がある。作り直さないと
+/// 半透明を重ねる作品が積もり続け、数フレームで彩度が振り切れて
+/// 別の絵になる。Processing の `size()` にこの働きは無い。
+#[test]
+fn calling_create_canvas_again_wipes_the_canvas() {
+    let mut s = VmSketch::compile(
+        "draw=_=>{createCanvas(400,400);noStroke();fill(255,0,0);rect(0,0,50,50)}",
+        1,
+    )
+    .expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+
+    // 1 フレーム目に何か描いておく。
+    g.begin_frame(400.0, 400.0);
+    g.frame_count = 1;
+    s.draw(&mut g);
+    let first = g.draw_list().indices.len();
+    assert!(first > 0);
+
+    // 2 フレーム目。createCanvas() が消しに入るので、溜めた絵は残らない。
+    g.begin_frame(400.0, 400.0);
+    g.frame_count = 2;
+    s.draw(&mut g);
+    assert_eq!(g.draw_list().indices.len(), first, "描いた量が増えています");
+    assert!(g.draw_list().clear.is_some(), "キャンバスを消していません");
+}
+
+/// Processing の `size()` は消さない。
+#[test]
+fn calling_size_again_leaves_the_canvas_alone() {
+    let mut s = VmSketch::compile(
+        "void draw(){ size(400,400); noStroke(); fill(255,0,0); rect(0,0,50,50); }",
+        1,
+    )
+    .expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    g.frame_count = 1;
+    s.draw(&mut g);
+    assert!(g.draw_list().clear.is_none(), "size() がキャンバスを消しています");
+}
+
+/// `createCanvas()` は塗りと線も既定へ戻す。`noFill()` の類は残る。
+///
+/// キャンバスの文脈ごと作り直されるため。作品が毎フレーム `colorMode()` や
+/// `noStroke()` を呼び直しているのは、これを見越してのこと。
+#[test]
+fn creating_the_canvas_again_puts_the_paint_back_to_default() {
+    // 1 フレーム目で赤にしても、2 フレーム目の頭で白へ戻る。
+    let mut s = VmSketch::compile(
+        "c=0\ndraw=_=>{createCanvas(400,400);noStroke();c||fill(255,0,0);c=1;rect(0,0,50,50)}",
+        1,
+    )
+    .expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    for frame in 1..=2 {
+        g.begin_frame(400.0, 400.0);
+        g.frame_count = frame;
+        s.draw(&mut g);
+    }
+    let c = g.draw_list().vertices.first().expect("描かれる").color;
+    assert!(c[1] > 0.9, "塗りが既定へ戻っていません: {c:?}");
+
+    // noStroke() は p5 側の旗なので残る。線は増えない。
+    let quiet = triangles("draw=_=>{createCanvas(400,400);noStroke();rect(0,0,50,50)}");
+    assert_eq!(quiet, 2, "線が復活しています");
+}

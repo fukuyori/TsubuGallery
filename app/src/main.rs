@@ -131,7 +131,14 @@ fn run(paths: DataPaths) {
                 Settings::default()
             });
         let width = settings.image_quality.width();
-        match headless::capture_all(&paths, &dir, width, width * 10 / 16, settings.capture_frame) {
+        match headless::capture_all(
+            &paths,
+            &dir,
+            width,
+            width * 10 / 16,
+            settings.capture_frame,
+            crate::viewer::Viewer::to_fit(settings.canvas_fit),
+        ) {
             Ok(paths) => {
                 println!("{} 件のサムネイルを生成しました\n{}", paths.len(), paths.join("\n"))
             }
@@ -339,6 +346,7 @@ impl App {
 
         // 作品の `text()` は OS のフォントを借りる。無ければ文字は出ない。
         let mut thumb_graphics = tsubu_renderer::Graphics::new();
+        thumb_graphics.set_fit(Viewer::to_fit(settings.canvas_fit));
         let sketch_fonts = fonts::load_sketch_fonts();
         if !sketch_fonts.is_empty() {
             viewer.set_fonts(sketch_fonts.clone());
@@ -1291,6 +1299,9 @@ impl App {
     // ---- 描画 -----------------------------------------------------------
 
     fn redraw(&mut self) {
+        // 1 フレームの仕事にかかる時間。これをフレームの間隔で割ると、
+        // このアプリが CPU をどれだけ使い続けているかになる。
+        let frame_started = std::time::Instant::now();
         self.pump_thumbnails();
         self.pump_screensaver();
         self.pump_slideshow();
@@ -1310,6 +1321,9 @@ impl App {
             Screen::Viewer => Color::BLACK,
         };
 
+        // 画面の空きを待つ時間は仕事ではない。ここを数えると負荷が
+        // いつも 100% に見えてしまう。
+        let waiting = std::time::Instant::now();
         let frame = match gfx.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
@@ -1326,6 +1340,7 @@ impl App {
                 return;
             }
         };
+        let vsync_wait = waiting.elapsed();
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = gfx
@@ -1506,6 +1521,7 @@ impl App {
         self.apply_editor_actions(&editor_actions);
         self.apply_settings_actions(&settings_actions);
         self.sync_runtime_errors();
+        self.viewer.note_frame_work(frame_started.elapsed().saturating_sub(vsync_wait));
     }
 
     fn apply_settings_actions(&mut self, actions: &[SettingsAction]) {

@@ -71,7 +71,7 @@ appear in the gallery. Drop more `.pde` files there to add your own.
 | `R` | Random |
 | `T` | Update the thumbnail |
 | `E` | Edit this sketch |
-| `I` | Info overlay (author / link / fps / frameCount / switch time) |
+| `I` | Info overlay (author / link / fps / **CPU load** / sketch time / instructions and triangles per frame / frameCount / switch time) |
 | `O` | Open the link in a browser |
 | `F` / `F11` | Fullscreen |
 | `L` | Switch the UI language |
@@ -310,12 +310,34 @@ Changes take effect immediately and are written to the `setting` table in
 |---|---|
 | General | Language / theme (dark, light) / start screen |
 | Gallery | View mode / card size / sort order / show titles |
-| Viewer | Open fullscreen / frame rate / next-sketch order / preload neighbours / slideshow interval / screensaver |
+| Viewer | Open fullscreen / **canvas fit** / frame rate / next-sketch order / preload neighbours / slideshow interval / screensaver |
 | Thumbnail | Capture frame / image quality |
 | Runtime | Per-frame instruction limit |
 
+**Canvas fit** decides what happens when a sketch declares a canvas whose shape
+does not match the window. Tweet-sized sketches are usually square, so a wide
+window leaves a band of empty space on each side. *Contain* (the default) keeps
+the whole canvas visible; *Cover* scales it up until the window is full and lets
+whatever overflows fall outside. The setting applies to thumbnails as well, so a
+gallery card and the viewer show the same framing.
+
 Both keys and values are language-independent ASCII. Unreadable values fall back
 to the default, so hand-editing the table cannot stop the app from starting.
+
+### What `I` shows
+
+`I` opens a panel over the viewer with what the current sketch actually costs.
+
+| Row | Meaning |
+|---|---|
+| CPU load | Share of wall-clock time the main thread spends working, with the two times behind it: `work / interval`. Waiting for the display is not work, so a sketch that finishes early reads low. It stops at 100% — one thread cannot do more |
+| Sketch time | How long `draw()` took: the VM plus building the geometry |
+| Instructions/frame | Bytecode instructions the sketch executed. The per-frame budget (Settings → Runtime) is measured in these |
+| Triangles/frame | What the GPU was handed |
+
+Together they say where a slow sketch is slow. A high instruction count with few
+triangles is the language being asked to do too much; the reverse is the
+renderer.
 
 ### View modes (design §6.2)
 
@@ -379,6 +401,22 @@ At startup the file listing and the database are reconciled: new files get a row
 and rows for files deleted outside the app are dropped. Sketches still run if the
 database cannot be opened (you just lose favourites and tags).
 
+### A sketch keeps its own drawing state
+
+The viewer holds every sketch instantiated at once so that switching does not
+restart anything (design §18), but the whole gallery shares one `Graphics`. That
+combination has a trap in it: a sketch's `setup()` runs exactly once, so anything
+it decides — `stroke(-1)`, `size()`, `colorMode(HSB)`, `textSize()`, whether the
+canvas is 3D — is gone for good the moment the shared state is reset for someone
+else. A sketch whose only white is set in `setup()` and whose `draw()` starts
+with `clear()` then paints black on black, and the screen simply stays dark.
+Preloading made it worse, because it runs `setup()` against a *different*
+`Graphics` altogether.
+
+So each sketch's state is parked (`GraphicsState`) when you switch away and put
+back when you return, and the preloader parks what it warmed up. Only the
+per-frame scratch — the matrix stack, an unfinished `beginShape()` — is dropped.
+
 ### The canvas persists across frames
 
 If `draw()` does not call `background()`, the previous frame stays on screen,
@@ -393,6 +431,13 @@ void draw() {
 
 — and the style that never calls `background()` at all both come out the way they
 do in the real thing.
+
+Something has to give the accumulation back when it is thrown away, though.
+Switching sketches and resizing the window both drop it, and a static-mode
+sketch (design §14.1) has no `draw()` to repaint with — everything it draws
+happens inside `setup()`, which runs once. Such a sketch is therefore run again
+from the top whenever the canvas is discarded, with its random seed put back so
+the picture is the one you saw before, and the one on its gallery card.
 
 It is implemented with two textures used alternately
 (`renderer/src/canvas.rs`). Because drawing resolves MSAA into the target, you
@@ -552,16 +597,20 @@ for (d = 960; d > 9; d -= 80)
   }
 ```
 
-Sketches that never call `background()` get Processing's default grey (204)
-canvas. Black would make this kind of sketch — drawn with the default black
-stroke — completely invisible.
+Sketches that never call `background()` get the ground their dialect gives them:
+Processing's grey (204), or white for p5.js, whose canvas is transparent over a
+white page. It is not cosmetic. A sketch that piles up translucent fills never
+quite reaches full saturation, so the ground colour is what the whole picture's
+lightness is built on — grey under a p5 sketch turns a pastel wash into a
+muddy one. Black would be wrong for both: this kind of sketch is drawn with the
+default black stroke and would be invisible.
 
 ### API (design §14.2)
 
 | Category | Functions and variables |
 |---|---|
 | Screen | `size()` / `createCanvas()` (the declared canvas is scaled to fit), `width` `height` `frameCount` |
-| Basic shapes | `point() line() rect() ellipse() circle() triangle()`. A 5th argument onwards rounds `rect()` corners |
+| Basic shapes | `point() line() rect() ellipse() circle() triangle()`. A 5th argument onwards rounds `rect()` corners. `point()` is a round dot and thick lines get round ends, as in both originals |
 | Free-form shapes | `beginShape() vertex() curveVertex() bezierVertex() endShape()`, `arc() quad() bezier() curve()` |
 | Text | `text() textSize() textAlign() textWidth()`, `str() nf()`, `String.fromCodePoint()` |
 | Shape modes | `rectMode() ellipseMode() angleMode()`, `square()` |
@@ -569,7 +618,7 @@ stroke — completely invisible.
 | Looping | `noLoop() loop()` `clear()` |
 | Colour values | `color() lerpColor()`, components `red() green() blue() alpha() hue() saturation() brightness()` |
 | Colour and stroke | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
-| Transforms | `translate() rotate() scale() pushMatrix() popMatrix() resetMatrix()`. `translate()` and `scale()` also take 3 arguments, `rotate()` takes `(angle, x, y, z)` |
+| Transforms | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`. `translate()` and `scale()` also take 3 arguments, `rotate()` takes `(angle, x, y, z)` |
 | 3D | `size(w, h, P3D)`, `box() sphere() rotateX() rotateY() rotateZ() lights() noLights()` |
 | Maths | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
 | Random and noise | `random() randomGaussian() noise() randomSeed() millis()` |
@@ -666,6 +715,17 @@ glyph.
 Characters missing from all of them are not drawn. Nothing fails if no font is
 found at all.
 
+**Which symbol font matters.** The same character sits at a different height and
+a different size in every font, and a sketch that places a shape behind a glyph
+was tuned against whatever font its author had. `seguisym.ttf` (Segoe UI Symbol)
+is tried first because most sketches are written on Windows or in a browser;
+Noto's symbol fonts and macOS's Apple Symbols follow. On macOS, Apple Symbols
+draws a mahjong tile 19px lower than Segoe does at `textSize(99)` — enough to
+pull a tile off the card drawn behind it. Fonts you install yourself are found
+too: `~/Library/Fonts`, `~/.fonts`, `~/.local/share/fonts` and
+`%LOCALAPPDATA%/Microsoft/Windows/Fonts` are searched alongside the system
+directories.
+
 `color()` returns an `[r, g, b, a]` array rather than a dedicated type.
 `fill()`, `stroke()` and `background()` use such a value directly without
 conversion, so it does not get converted twice under `colorMode(HSB)`.
@@ -701,8 +761,9 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 |---|---|
 | Variables | Assignment without a type, `let` / `const` / `var` |
 | Functions | Arrow functions (`=>` `⇒` `→`), `function` declarations, functions as values (`B=blendMode`) |
-| Arrays | Literals, indexed read/write, `length`, `map` / `forEach` / `filter` / `push` / `keys` / `entries`, `Array(n)` |
-| Spread | `[...xs]`, `[...a, b, ...c]` |
+| Arrays | Literals, indexed read/write, `length`, `Array(n)` |
+| Array methods | `push pop shift unshift at slice splice concat reverse fill flat join indexOf lastIndexOf includes sort keys entries`, and the callback ones `map forEach filter flatMap find findLast findIndex some every reduce` |
+| Spread | `[...xs]`, `[...a, b, ...c]`, and in a call's arguments: `stroke(...c, 9)`, `Math.max(...xs)` |
 | Strings | `"..."` `'...'` `` `...` ``, `${}` interpolation, `+` concatenation, `length charAt substring indexOf split repeat toUpperCase toLowerCase trim` |
 | Destructuring | `[a,b]=[1,2]`, swapping `[a,b]=[b,a]`, `[o.x,v[0]]=…` |
 | Objects | Literals (`{x:1}`, shorthand `{x}`), reading and writing `p.x`, `p.x+=v` |
@@ -711,7 +772,8 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | Control flow | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
 | Literals | decimal, hex (`0xFF6B35`), exponent |
 | Other | Semicolon insertion (ASI), numbers as truthiness (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` (including `WEBGL`) `colorMode(HSB)` `blendMode(ADD)` `push` / `pop`, 3-argument `noise` |
+| p5 API | `createCanvas` (including `WEBGL`) `colorMode(HSB)` `blendMode(ADD)`, 3-argument `noise`, `drawingContext` shadows |
+| `push` / `pop` | Save and restore the transform **and** the style, as p5 does — unlike Processing's `pushMatrix()`, which is the transform alone. `pushStyle()` / `popStyle()` are there too |
 | `Math` | `Math.sin` and friends map to the built-ins. `Math.PI` `Math.hypot` `Math.sign` too, and `S=Math.sin` works as a value |
 | Variadic | `min()` and `max()` take any number of arguments |
 
@@ -736,12 +798,47 @@ for(i of [...Array(120).keys()]){
 
 Code using something unsupported is listed line by line by the editor (above).
 
-### Accepted but inert
+`text()` in p5.js paints with the stroke as well as the fill; Processing's
+paints with the fill alone. The difference matters: a white glyph on a white
+card is invisible without its outline. Glyphs are stored as filled coverage, so
+the outline is faked by drawing the glyph eight times around a small circle in
+the stroke colour before the fill goes on top.
+
+### Shadows (`drawingContext`)
 
 `drawingContext` is the browser's own canvas context, which does not exist here.
-A container that swallows writes is handed over instead, so a sketch setting
-`drawingContext.shadowBlur` keeps running — it just gets no shadow. The editor's
-diagnosis says so.
+What is handed over instead is an object whose shadow properties are read back:
+`shadowBlur`, `shadowColor`, `shadowOffsetX` and `shadowOffsetY` all work. Some
+sketches are made entirely of shadows — white cards on a white ground — and
+without them there is nothing to see.
+
+The blur is not a real Gaussian. The same shape is drawn again in the shadow
+colour at a few dozen offsets, in rings that thin out towards the edge. Close
+enough to read as a soft shadow, and it costs nothing in the shape code — a
+rounded `rect()`, a glyph and a `box()` all shadow the same way. The price is
+that a shadowed shape emits about thirty times the triangles, so a sketch that
+shadows thousands of shapes per frame will feel it.
+
+### `createCanvas()` re-creates the canvas
+
+p5's `createCanvas()` builds the canvas element again every time it is called,
+which wipes what was on it and resets the drawing context — fill and stroke go
+back to their defaults, the stroke weight to 1, the transform to identity.
+`noFill()` and `noStroke()` survive, because those are flags on p5 rather than
+on the canvas.
+
+Sketches use this. Calling `createCanvas()` at the top of `draw()` is how some
+of them clear the frame, which is also why they call `colorMode()` and
+`noStroke()` again on every pass. Get it wrong and a sketch that layers
+translucent fills piles up instead of starting fresh; within a few frames the
+colour saturates and the picture is something else entirely.
+
+Processing's `size()` does not do this, and is left alone.
+
+### Accepted but inert
+
+Everything else on `drawingContext` (`filter`, `globalCompositeOperation`,
+gradients) is swallowed silently, so a sketch that sets it keeps running.
 
 ### Safety (design §21)
 
@@ -876,7 +973,7 @@ it.
 ## Development
 
 ```sh
-cargo test --workspace      # 448 tests
+cargo test --workspace      # 473 tests
 cargo clippy --workspace --all-targets
 ```
 

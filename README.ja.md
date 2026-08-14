@@ -69,7 +69,7 @@ cargo run --release
 | `R` | ランダム |
 | `T` | サムネイル更新 |
 | `E` | この作品を編集 |
-| `I` | 情報表示 (作者 / リンク / fps / frameCount / 切り替え時間) |
+| `I` | 情報表示 (作者 / リンク / fps / **CPU 負荷** / 作品の実行時間 / フレームあたりの命令数と三角形 / frameCount / 切り替え時間) |
 | `O` | リンクをブラウザで開く |
 | `F` / `F11` | 全画面 |
 | `L` | UI 言語を切り替え |
@@ -292,12 +292,32 @@ TsubuGallery はすでに起動しています。 (pid 35013)
 |---|---|
 | 全般 | 言語 / 配色 (暗い・明るい) / 起動時の画面 |
 | ギャラリー | 表示方式 / カードの大きさ / 並び順 / 作品名を出す |
-| ビューア | 全画面で開く / フレームレート / 次の作品の選び方 / 隣の作品を先に読む / スライドショーの間隔 / スクリーンセーバー |
+| ビューア | 全画面で開く / **画面への収め方** / フレームレート / 次の作品の選び方 / 隣の作品を先に読む / スライドショーの間隔 / スクリーンセーバー |
 | サムネイル | 撮るフレーム / 画質 |
 | 実行 | 1 フレームの上限 |
 
+**画面への収め方**は、作品が宣言したキャンバスと窓の形が違うときにどうするかを
+決める。つぶやき系はたいてい正方形なので、横長の窓では左右に余白の帯が出る。
+「収める」(既定) はキャンバス全体を見せ、「埋める」は窓が埋まるまで拡大して、
+はみ出したぶんは切る。サムネイルにも同じ設定が効くので、ギャラリーのカードと
+Viewer の見え方が揃う。
+
 設定キーと値はどちらも言語に依存しない ASCII 文字列で持つ。読めない値は既定値へ
 倒すので、手で書き換えて壊しても起動はする。
+
+### `I` で出るもの
+
+`I` を押すと、いま動いている作品の「値段」が Viewer の上に出る。
+
+| 行 | 意味 |
+|---|---|
+| CPU 負荷 | 主スレッドが実時間のうちどれだけ働いているか。内訳の `仕事 / 間隔` も添える。画面の空きを待つ時間は仕事に数えないので、早く終わる作品は低く出る。100% で止まる — 糸 1 本はそれ以上使えない |
+| 作品の実行 | `draw()` にかかった時間。VM と図形の組み立て |
+| 命令数 / フレーム | 作品が実行したバイトコードの数。設定の実行予算 (Runtime) はこの単位 |
+| 三角形 / フレーム | GPU へ渡した量 |
+
+重い作品がどこで重いかは、この 4 つで分かる。命令数が多くて三角形が少なければ
+言語側に無理をさせている。逆なら描画側。
 
 ### 表示方式 (設計書 §6.2)
 
@@ -354,6 +374,21 @@ TsubuGallery はすでに起動しています。 (pid 35013)
 起動時にファイル一覧と DB を突き合わせ、初めて見る作品は行を作り、アプリの外で
 消された作品の行は落とす。DB が開けなくても作品は動く (お気に入りとタグを諦めるだけ)。
 
+### 描画状態は作品ごとに持つ
+
+Viewer は切り替えで何も作り直さずに済むよう、全作品をインスタンス化したまま
+抱える (設計書 §18)。一方で `Graphics` はギャラリー全体で 1 つを使い回す。
+この組み合わせには罠がある。作品の `setup()` は一度きりしか走らないので、
+そこで決めたこと — `stroke(-1)`、`size()`、`colorMode(HSB)`、`textSize()`、
+3D かどうか — は、他の作品のために状態を初期化した瞬間に永久に失われる。
+白い線を `setup()` でだけ決め、`draw()` が `clear()` で始まる作品は、
+黒地に黒い線を引くことになり、画面が真っ黒のままになる。先読みはこれを
+悪化させる。`setup()` が**別の** `Graphics` の側で走ってしまうため。
+
+そこで、作品から離れるときにその状態を預け ([`GraphicsState`])、戻ってきたら
+復す。先読みも、温めた結果を預けておく。捨てるのは 1 フレーム限りのもの —
+座標変換のスタックや、閉じ忘れた `beginShape()` — だけ。
+
 ### キャンバスはフレームをまたいで残る
 
 `draw()` の中で `background()` を呼ばなければ、前のフレームの絵がそのまま残る。
@@ -375,6 +410,12 @@ void draw() {
 
 一時停止中は積み増さない。同じ図形を毎フレーム重ねると、止めたはずの絵が濃くなって
 いってしまう。
+
+ただし、捨てられた積み重ねを描き戻す者が要る。作品の切り替えでも窓の大きさ変更でも
+キャンバスは捨てられるが、静的モード (設計書 §14.1) の作品には描き直す `draw()` が
+無い。絵は全部 `setup()` の中にあり、それは一度きりしか走らない。そこでこの手の
+作品は、キャンバスが捨てられるたびに頭から動かし直す。乱数の出発点も戻すので、
+さっき見た絵、そしてギャラリーのカードと同じ絵が出る。
 
 ## 2 つの方言
 
@@ -520,15 +561,19 @@ for (d = 960; d > 9; d -= 80)
   }
 ```
 
-`background()` を呼ばない作品の地は Processing と同じ灰色 (204)。黒にすると、
-既定の黒い線で描くこの種の作品が何も見えなくなる。
+`background()` を呼ばない作品の地は、方言に合わせる。Processing なら灰 204、
+p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が透ける)。これは
+見た目の趣味ではない。半透明を塗り重ねる作品は完全には濁りきらないので、
+下地の色が絵全体の明るさの土台になる。p5 の作品を灰の上に置くと、淡い
+色調が濁って別物になる。黒はどちらにとっても誤り — この種の作品は既定の
+黒い線で描くので、何も見えなくなる。
 
 ### API (設計書 §14.2)
 
 | 分類 | 関数・変数 |
 |---|---|
 | 画面 | `size()` / `createCanvas()` (宣言したキャンバスを表示領域へ収める)、`width` `height` `frameCount` |
-| 基本描画 | `point() line() rect() ellipse() circle() triangle()`。`rect()` は 5 個目以降の引数で角が丸くなる |
+| 基本描画 | `point() line() rect() ellipse() circle() triangle()`。`rect()` は 5 個目以降の引数で角が丸くなる。`point()` は丸い点で、太い線の端も丸い (どちらの本家もそう) |
 | 自由な形 | `beginShape() vertex() curveVertex() bezierVertex() endShape()`、`arc() quad() bezier() curve()` |
 | 文字 | `text() textSize() textAlign() textWidth()`、`str() nf()`、`String.fromCodePoint()` |
 | 形の指定 | `rectMode() ellipseMode() angleMode()`、`square()` |
@@ -536,7 +581,7 @@ for (d = 960; d > 9; d -= 80)
 | 進行 | `noLoop() loop()` `clear()` |
 | 色の値 | `color() lerpColor()`、成分の取り出し `red() green() blue() alpha() hue() saturation() brightness()` |
 | 色と線 | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
-| 座標変換 | `translate() rotate() scale() pushMatrix() popMatrix() resetMatrix()`。`translate()` と `scale()` は 3 引数、`rotate()` は `(角度, x, y, z)` も取る |
+| 座標変換 | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`。`translate()` と `scale()` は 3 引数、`rotate()` は `(角度, x, y, z)` も取る |
 | 3D | `size(w, h, P3D)`、`box() sphere() rotateX() rotateY() rotateZ() lights() noLights()` |
 | 数学 | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
 | 乱数・ノイズ | `random() randomGaussian() noise() randomSeed() millis()` |
@@ -620,6 +665,16 @@ for (d = 960; d > 9; d -= 80)
 
 どれにも無い字は描かない。フォントが 1 本も見つからない環境でも落ちはしない。
 
+**どの記号フォントを使うかで絵が変わる。** 同じ字でもフォントごとに大きさも
+ベースラインからの位置も違い、字の後ろに図形を敷く作品は、作者の手元にあった
+フォントに合わせて座標が決めてある。作品はたいてい Windows か Web ブラウザで
+書かれているので、`seguisym.ttf` (Segoe UI Symbol) を最初に探し、Noto の記号
+フォント、macOS の Apple Symbols と続く。macOS の Apple Symbols は
+`textSize(99)` のとき麻雀牌を Segoe より 19px 低く描くので、後ろに敷いた
+カードから牌がはみ出す。自分で入れたフォントも拾う — `~/Library/Fonts`、
+`~/.fonts`、`~/.local/share/fonts`、`%LOCALAPPDATA%/Microsoft/Windows/Fonts` を
+OS の置き場と一緒に探す。
+
 `color()` が返すのは `[r, g, b, a]` の配列で、専用の型は足していない。
 `fill()` / `stroke()` / `background()` はこれを受け取ると変換を通さず直に使うので、
 `colorMode(HSB)` のもとでも二重変換にならない。
@@ -654,8 +709,9 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 |---|---|
 | 変数 | 型を書かない代入、`let` / `const` / `var` |
 | 関数 | アロー関数 (`=>` `⇒` `→`)、`function` 宣言、関数を値として持つ (`B=blendMode`) |
-| 配列 | リテラル、添字の読み書き、`length`、`map` / `forEach` / `filter` / `push` / `keys` / `entries`、`Array(n)` |
-| 展開 | `[...xs]`、`[...a, b, ...c]` |
+| 配列 | リテラル、添字の読み書き、`length`、`Array(n)` |
+| 配列のメソッド | `push pop shift unshift at slice splice concat reverse fill flat join indexOf lastIndexOf includes sort keys entries`、コールバックを取る `map forEach filter flatMap find findLast findIndex some every reduce` |
+| 展開 | `[...xs]`、`[...a, b, ...c]`、引数の並びでも: `stroke(...c, 9)`、`Math.max(...xs)` |
 | 文字列 | `"..."` `'...'` `` `...` ``、`${}` の展開、`+` で連結、`length charAt substring indexOf split repeat toUpperCase toLowerCase trim` |
 | 分割代入 | `[a,b]=[1,2]`、入れ替え `[a,b]=[b,a]`、`[o.x,v[0]]=…` |
 | オブジェクト | リテラル (`{x:1}`、略記 `{x}`)、`p.x` の読み書き、`p.x+=v` |
@@ -664,7 +720,8 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | 制御 | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
 | リテラル | 10 進、16 進 (`0xFF6B35`)、指数 |
 | その他 | セミコロン省略 (ASI)、数値の真偽値化 (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` (`WEBGL` も) `colorMode(HSB)` `blendMode(ADD)` `push` / `pop`、3 引数 `noise` |
+| p5 API | `createCanvas` (`WEBGL` も) `colorMode(HSB)` `blendMode(ADD)`、3 引数 `noise`、`drawingContext` の影 |
+| `push` / `pop` | p5 と同じく座標変換**と**見た目の両方を退避する。座標変換だけの Processing の `pushMatrix()` とは違う。`pushStyle()` / `popStyle()` もある |
 | `Math` | `Math.sin` などを組み込みへ読み替える。`Math.PI` `Math.hypot` `Math.sign` も。`S=Math.sin` と値で持てる |
 | 可変長 | `min()` / `max()` は引数をいくつでも取る |
 
@@ -689,11 +746,42 @@ for(i of [...Array(120).keys()]){
 
 対応していないものを使っているコードは、エディタが行番号つきで挙げる (下記)。
 
+p5.js の `text()` は塗りだけでなく線でも描く。Processing の `text()` は塗り
+だけ。この違いは効いてくる — 白いカードに白い字を置くと、縁が無ければ何も
+見えない。字形は塗りつぶした形しか持っていないので、縁は小さな円の上に 8 回
+線の色で重ねて作り、そのうえに塗りを置いている。
+
+### 影 (`drawingContext`)
+
+`drawingContext` はブラウザのキャンバスそのもので、ここには無い。代わりに、
+影の指定だけを読み返せる入れ物を渡す。`shadowBlur`、`shadowColor`、
+`shadowOffsetX`、`shadowOffsetY` が効く。白い地に白いカードを並べるような、
+影だけで成り立っている作品があり、これが無いと何も見えない。
+
+ぼけは本物のガウスぼかしではない。同じ形を影の色で何十枚か、外へいくほど
+薄くなる輪の上にずらして重ねている。やわらかい影として読める程度には近く、
+図形側のコードを一切変えずに済む — 角の丸い `rect()` も、文字も、`box()` も
+同じように影がつく。代わりに、影のついた図形は三角形が 30 倍ほどに増えるので、
+1 フレームに何千個も影を落とす作品では効いてくる。
+
+### `createCanvas()` はキャンバスを作り直す
+
+p5 の `createCanvas()` は、呼ぶたびにキャンバスの要素を作り直す。描いてあった
+ものは消え、描画の文脈も初期化されて、塗りと線は既定へ、線の太さは 1 へ、
+座標変換は単位行列へ戻る。`noFill()` と `noStroke()` は残る。あれは p5 側の
+旗で、キャンバスに載っていないため。
+
+作品はこれを使う。`draw()` の頭で `createCanvas()` を呼ぶのが画面を消す手口で、
+毎フレーム `colorMode()` や `noStroke()` を呼び直しているのもそのため。ここを
+違えると、半透明を重ねる作品が消えずに積もり、数フレームで彩度が振り切れて
+まったく別の絵になる。
+
+Processing の `size()` にこの働きは無いので、そちらはそのまま。
+
 ### 受け付けるが効かないもの
 
-`drawingContext` はブラウザのキャンバスそのもので、ここには無い。書き込みを
-受け取るだけの入れ物を渡す。`drawingContext.shadowBlur` を書く作品も止まらずに
-動くが、影は付かない。エディタの診断がそう伝える。
+`drawingContext` のそれ以外 (`filter`、`globalCompositeOperation`、グラデーション)
+は黙って捨てる。書いた作品も止まらずに動く。
 
 ### 安全性 (設計書 §21)
 
@@ -822,7 +910,7 @@ MSAA は 4x。Viewer もサムネイルも同じ `BatchRenderer` を通る。
 ## 開発
 
 ```sh
-cargo test --workspace      # 448 tests
+cargo test --workspace      # 473 tests
 cargo clippy --workspace --all-targets
 ```
 

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use crate::batch::{BatchRenderer, DEPTH_FORMAT, SAMPLE_COUNT, depth_state};
-use crate::draw::{Color, Graphics};
+use crate::draw::Graphics;
 use crate::texture::MsaaTarget;
 
 /// テクスチャを描画先いっぱいに貼るシェーダー。頂点バッファを持たず、
@@ -246,8 +246,8 @@ impl Canvas {
         self.ensure(device, width, height);
 
         // 消す色が指定されていなければ前のフレームを残す。ただし 1 枚目だけは
-        // 残すものが無いので、Processing の既定と同じ灰色で始める。
-        let clear = list.clear.or((!self.painted).then_some(Color::DEFAULT_BACKGROUND));
+        // 残すものが無いので、方言ごとの下地で始める。
+        let clear = list.clear.or((!self.painted).then_some(g.default_background()));
 
         batch.prepare(
             device,

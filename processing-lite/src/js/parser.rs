@@ -517,7 +517,12 @@ impl Parser {
                     let mut args = Vec::new();
                     if !self.check(&Tok::RParen) {
                         loop {
-                            args.push(self.assignment()?);
+                            // `f(...xs)`。個数は実行時にしか分からない。
+                            if self.eat(&Tok::Spread) {
+                                args.push(Expr::Spread(Box::new(self.assignment()?)));
+                            } else {
+                                args.push(self.assignment()?);
+                            }
                             if !self.eat(&Tok::Comma) {
                                 break;
                             }

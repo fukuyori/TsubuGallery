@@ -23,6 +23,8 @@ pub struct VmSketch {
     /// どちらのフロントエンドが通ったか。
     dialect: Dialect,
     vm: Vm,
+    /// `random()` の数列の出発点。動かし直すときにここへ戻す。
+    seed: u64,
     budget: u64,
     consecutive_traps: u32,
     error: Option<String>,
@@ -42,6 +44,7 @@ impl VmSketch {
             program,
             dialect,
             vm,
+            seed,
             budget: DEFAULT_FRAME_BUDGET,
             consecutive_traps: 0,
             error: None,
@@ -90,6 +93,13 @@ impl Sketch for VmSketch {
     }
 
     fn setup(&mut self, g: &mut Graphics) {
+        // p5.js の text() は塗りと線の両方で描く。Processing は塗りだけ。
+        g.set_text_stroked(self.dialect == Dialect::P5);
+        // 下地。Processing は灰 204、p5.js のキャンバスは透明でページの白が透ける。
+        g.set_default_background(match self.dialect {
+            Dialect::P5 => tsubu_renderer::Color::WHITE,
+            Dialect::Processing => tsubu_renderer::Color::DEFAULT_BACKGROUND,
+        });
         let result = self.vm.init_globals(&self.program, g, self.budget);
         if let Err(trap) = result {
             self.error = Some(trap.to_string());
@@ -118,6 +128,21 @@ impl Sketch for VmSketch {
 
     fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    fn instructions_last_frame(&self) -> u64 {
+        self.vm.last_frame_ops
+    }
+
+    /// 静的モードの作品は `draw()` を持たない (設計書 §14.1)。
+    fn draws_once(&self) -> bool {
+        self.program.draw.is_none()
+    }
+
+    fn restart(&mut self) {
+        self.vm = Vm::new(&self.program, self.seed);
+        self.consecutive_traps = 0;
+        self.error = None;
     }
 }
 

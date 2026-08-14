@@ -124,6 +124,8 @@ pub enum Expr {
         delta: f32,
         prefix: bool,
     },
+    /// `f(...xs)` の `...xs`。引数の並びの中にだけ現れる。
+    Spread(Box<Expr>),
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,

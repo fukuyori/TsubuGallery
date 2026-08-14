@@ -495,6 +495,11 @@ impl Compiler {
             Expr::Assign { target, op, value } => self.assign(target, *op, value)?,
             Expr::Update { target, delta, prefix } => self.update(target, *delta, *prefix)?,
             Expr::Call { callee, args, line, column } => self.call(callee, args, *line, *column)?,
+
+            // `...xs` は引数の並びの中にしか書けない。
+            Expr::Spread(_) => {
+                return Err(CompileError::new(0, 0, "... はここには書けません".to_string()));
+            }
         }
         Ok(())
     }
@@ -648,6 +653,74 @@ impl Compiler {
         Ok(())
     }
 
+    /// `f(...xs)` のような、引数の個数が実行時まで決まらない呼び出し。
+    ///
+    /// 引数をひとつの配列に組み立ててから渡す。組み立て方は配列リテラルの
+    /// 展開と同じ。
+    fn spread_call(&mut self, callee: &Expr, args: &[Expr]) -> Result<(), CompileError> {
+        // `Math.max(...xs)` は組み込みへ読み替える。`Math` は実体を持たない
+        // ので、メソッド呼び出しにすると受け手が無くて落ちる。
+        if let Expr::Member { object, name } = callee
+            && (is_math(object) || is_namespace(object, "String"))
+            && let Some(native) = natives::resolve_by_name(math_name(name))
+        {
+            self.spread_args(args)?;
+            self.code.push(Op::CallNativeSpread(native));
+            return Ok(());
+        }
+
+        // 受け手や呼ぶ相手は引数の配列より先に積む。
+        let target = match callee {
+            Expr::Member { object, name } => {
+                let key = self.key(name);
+                self.expression(object)?;
+                Some(key)
+            }
+            Expr::Ident(name)
+                if !self.globals.contains_key(name)
+                    && !self.params.contains_key(name)
+                    && natives::is_native(name) =>
+            {
+                None
+            }
+            _ => {
+                self.expression(callee)?;
+                Some(u16::MAX)
+            }
+        };
+
+        self.spread_args(args)?;
+
+        match (target, callee) {
+            (None, Expr::Ident(name)) => {
+                let native = natives::resolve_by_name(name)
+                    .ok_or_else(|| CompileError::new(0, 0, format!("{name} は呼べません")))?;
+                self.code.push(Op::CallNativeSpread(native));
+            }
+            (Some(key), Expr::Member { .. }) => self.code.push(Op::CallMethodSpread(key)),
+            _ => self.code.push(Op::CallValueSpread),
+        }
+        Ok(())
+    }
+
+    /// 引数の並びを 1 本の配列に組み立てる。
+    fn spread_args(&mut self, args: &[Expr]) -> Result<(), CompileError> {
+        self.code.push(Op::NewArray(0));
+        for arg in args {
+            match arg {
+                Expr::Spread(inner) => {
+                    self.expression(inner)?;
+                    self.code.push(Op::ArrayExtend);
+                }
+                other => {
+                    self.expression(other)?;
+                    self.code.push(Op::ArrayPush);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn call(
         &mut self,
         callee: &Expr,
@@ -655,6 +728,10 @@ impl Compiler {
         line: u32,
         column: u32,
     ) -> Result<(), CompileError> {
+        // `f(...xs)`。個数が実行時まで決まらないので、引数を配列にまとめて渡す。
+        if args.iter().any(|a| matches!(a, Expr::Spread(_))) {
+            return self.spread_call(callee, args);
+        }
         let argc = args.len() as u8;
 
         // `Math.sin(x)` と `String.fromCodePoint(n)` は組み込みへ読み替える。

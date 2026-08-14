@@ -6,7 +6,8 @@
 use tsubu_core::Locales;
 use tsubu_core::locale::LanguagePreference;
 use tsubu_core::settings::{
-    CAPTURE_FRAME_RANGE, CardSize, Choice, ExecutionBudget, FrameRate, ImageQuality, Navigation,
+    CAPTURE_FRAME_RANGE, CanvasFit, CardSize, Choice, ExecutionBudget, FrameRate, ImageQuality,
+    Navigation,
     SLIDESHOW_INTERVAL_RANGE, ScreenSaver, Settings, SortOrder, StartScreen, Theme, ViewMode,
 };
 
@@ -104,6 +105,13 @@ pub fn build(root: &mut egui::Ui, state: &mut SettingsUi<'_>) -> Vec<SettingsAct
                     &t("settings.fullscreen"),
                     &mut state.settings.fullscreen,
                 );
+                choice_row::<CanvasFit>(
+                    ui,
+                    state.locales,
+                    &t("settings.canvas_fit"),
+                    &mut state.settings.canvas_fit,
+                );
+                note(ui, &t("settings.canvas_fit.note"));
                 choice_row::<FrameRate>(
                     ui,
                     state.locales,
@@ -373,6 +381,8 @@ mod tests {
             "settings.sort_order",
             "settings.show_titles",
             "settings.fullscreen",
+            "settings.canvas_fit",
+            "settings.canvas_fit.note",
             "settings.frame_rate",
             "settings.navigation",
             "settings.preload",

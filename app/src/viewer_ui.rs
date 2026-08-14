@@ -141,6 +141,19 @@ fn hint_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
         });
 }
 
+/// 3 桁ごとに区切る。命令数は 100 万を超えるので、素の数字では読めない。
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn info_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
     egui::Area::new("tsubu.viewer.info".into())
         .anchor(egui::Align2::RIGHT_TOP, [-20.0, 20.0])
@@ -171,6 +184,29 @@ fn info_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
                         }
                         row(locales.t("viewer.stat.frame_rate"), format!("{:.1} fps", info.stats.fps));
                         row(locales.t("viewer.stat.frame"), info.stats.frame_count.to_string());
+                        // 仕事の時間をフレームの間隔で割ったもの。1 に近いほど
+                        // 余裕が無く、超えると目標のフレームレートに届かない。
+                        row(
+                            locales.t("viewer.stat.load"),
+                            format!(
+                                "{:>3.0}%   {:.1} / {:.1} ms",
+                                info.stats.load * 100.0,
+                                info.stats.frame_ms,
+                                info.stats.interval_ms
+                            ),
+                        );
+                        row(
+                            locales.t("viewer.stat.sketch_time"),
+                            format!("{:.2} ms", info.stats.sketch_ms),
+                        );
+                        row(
+                            locales.t("viewer.stat.instructions"),
+                            thousands(info.stats.instructions),
+                        );
+                        row(
+                            locales.t("viewer.stat.triangles"),
+                            thousands(info.stats.triangles as u64),
+                        );
                         row(
                             locales.t("viewer.stat.switch_time"),
                             format!("{:.3} ms", info.stats.last_switch_ms),
@@ -179,4 +215,26 @@ fn info_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
                 );
             });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 大きい数は 3 桁ごとに区切る。
+    ///
+    /// 命令数は 100 万を超える。素の数字では桁が読めない。
+    #[test]
+    fn big_numbers_are_grouped() {
+        for (n, want) in [
+            (0u64, "0"),
+            (7, "7"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (12_345, "12,345"),
+            (1_234_567, "1,234,567"),
+        ] {
+            assert_eq!(thousands(n), want);
+        }
+    }
 }

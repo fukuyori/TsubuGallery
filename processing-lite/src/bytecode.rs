@@ -288,6 +288,12 @@ pub enum Op {
     GetProp(u16),
     /// `[obj, value]` → `[value]`。代入は式なので値を残す。
     SetProp(u16),
+
+    /// 引数を配列にまとめて渡す呼び出し。`f(...xs)` のように、個数が
+    /// 実行時まで決まらないときに使う。積んである配列の中身が引数になる。
+    CallNativeSpread(crate::natives::Native),
+    CallMethodSpread(u16),
+    CallValueSpread,
     /// `[target, index]` → `[value]`。
     GetIndex,
     /// `[target, index, value]` → `[value]`。

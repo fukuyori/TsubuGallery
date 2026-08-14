@@ -5,12 +5,12 @@
 
 use std::fmt;
 
-use tsubu_renderer::Graphics;
+use tsubu_renderer::{Color, Graphics, Shadow};
 
 use crate::ast::Type;
 use crate::bytecode::{Op, Program, Value, VectorRef};
 use crate::math::Rng;
-use crate::natives;
+use crate::natives::{self, BuiltinVar};
 
 /// 1 フレームで実行してよい命令数の既定値。
 ///
@@ -71,6 +71,15 @@ pub struct Vm {
     pub last_frame_ops: u64,
     /// 引数の受け渡し用。毎回確保しないため使い回す。
     args: Vec<Value>,
+    /// `drawingContext`。触った作品にだけ作る。
+    ///
+    /// 書き込みが消えては影の指定を受け取れないので、同じ実体を返し続ける。
+    drawing_context: Option<Value>,
+    /// `push()` のたびに積む `drawingContext` の控え。
+    ///
+    /// p5.js の `push()` は canvas の `save()` も呼ぶので、影の指定は
+    /// `pop()` で元へ戻る。
+    saved_contexts: Vec<Vec<(u16, Value)>>,
 }
 
 impl Vm {
@@ -84,6 +93,8 @@ impl Vm {
             rng: Rng::new(seed),
             last_frame_ops: 0,
             args: Vec::with_capacity(8),
+            drawing_context: None,
+            saved_contexts: Vec::new(),
         }
     }
 
@@ -210,7 +221,15 @@ impl Vm {
                     let v = self.pop()?;
                     self.globals[slot as usize] = v;
                 }
-                Op::LoadBuiltin(var) => self.stack.push(var.read(g)),
+                Op::LoadBuiltin(var) => {
+                    let v = match var {
+                        BuiltinVar::DrawingContext => {
+                            self.drawing_context.get_or_insert_with(Value::new_object).clone()
+                        }
+                        _ => var.read(g),
+                    };
+                    self.stack.push(v);
+                }
 
                 Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem => {
                     let rhs = self.pop()?;
@@ -290,7 +309,7 @@ impl Vm {
                         .ok_or_else(|| Trap::Internal("引数がスタックに足りません".into()))?;
                     self.args.clear();
                     self.args.extend(self.stack.drain(split..));
-                    let result = natives::call(native, &self.args, g, &mut self.rng);
+                    let result = self.call_native(native, program, g);
                     self.stack.push(result);
                 }
 
@@ -441,6 +460,34 @@ impl Vm {
                     self.stack.push(value);
                 }
 
+                // 引数を配列で受ける呼び出し。`f(...xs)` から来る。
+                Op::CallNativeSpread(native) => {
+                    let args = self.pop()?;
+                    self.args.clear();
+                    if let Value::Array(items) = &args {
+                        self.args.extend(items.borrow().iter().cloned());
+                    }
+                    let result = self.call_native(native, program, g);
+                    self.stack.push(result);
+                }
+                Op::CallMethodSpread(key) => {
+                    let argc = self.unpack_args()?;
+                    let split = self.split_at(argc as usize + 1)?;
+                    let receiver = self.stack[split].clone();
+                    if let Value::Function(index) = get_property(&receiver, key, program) {
+                        self.enter(program, index, argc + 1)?;
+                    } else {
+                        self.stack.remove(split);
+                        self.call_method(program, receiver, key, argc, g)?;
+                    }
+                }
+                Op::CallValueSpread => {
+                    let argc = self.unpack_args()?;
+                    let split = self.split_at(argc as usize + 1)?;
+                    let callee = self.stack.remove(split);
+                    self.invoke(program, callee, argc, g)?;
+                }
+
                 Op::CallValue(argc) => {
                     let split = self.split_at(argc as usize + 1)?;
                     let callee = self.stack.remove(split);
@@ -487,6 +534,18 @@ impl Vm {
         self.stack.last().cloned().ok_or_else(|| Trap::Internal("スタックが空".into()))
     }
 
+    /// 積んである引数の配列をばらしてスタックへ戻し、個数を返す。
+    ///
+    /// 引数の個数は 255 まで。それ以上は溢れるので切る。
+    fn unpack_args(&mut self) -> Result<u8, Trap> {
+        let args = self.pop()?;
+        let Value::Array(items) = args else { return Ok(0) };
+        let items = items.borrow();
+        let argc = items.len().min(u8::MAX as usize);
+        self.stack.extend(items.iter().take(argc).cloned());
+        Ok(argc as u8)
+    }
+
     /// 値として持っている関数を呼ぶ。引数はスタックに積まれている。
     fn invoke(
         &mut self,
@@ -501,7 +560,7 @@ impl Vm {
                 let split = self.split_at(argc as usize)?;
                 self.args.clear();
                 self.args.extend(self.stack.drain(split..));
-                let result = natives::call(native, &self.args, g, &mut self.rng);
+                let result = self.call_native(native, program, g);
                 self.stack.push(result);
                 Ok(())
             }
@@ -549,7 +608,7 @@ impl Vm {
             let split = self.split_at(argc as usize)?;
             self.args.clear();
             self.args.extend(self.stack.drain(split..));
-            let result = natives::call(native, &self.args, g, &mut self.rng);
+            let result = self.call_native(native, program, g);
             self.stack.push(result);
             return Ok(());
         }
@@ -592,11 +651,176 @@ impl Vm {
                 self.stack.push(Value::new_array(items));
                 Ok(())
             }
-            ("map" | "forEach" | "filter", 1) => {
+            // 端から出し入れする。`shift()` は待ち行列を進める作品でよく出る。
+            ("pop" | "shift", 0) => {
+                let mut items = array.borrow_mut();
+                let taken = if name == "pop" {
+                    items.pop()
+                } else if items.is_empty() {
+                    None
+                } else {
+                    Some(items.remove(0))
+                };
+                self.stack.push(taken.unwrap_or(Value::Undefined));
+                Ok(())
+            }
+            ("unshift", _) => {
+                let mut items = array.borrow_mut();
+                for (i, v) in args.into_iter().enumerate() {
+                    items.insert(i, v);
+                }
+                let length = items.len();
+                self.stack.push(Value::Float(length as f32));
+                Ok(())
+            }
+            ("at", 1) => {
+                let items = array.borrow();
+                let at = args[0].as_i32();
+                let index = if at < 0 { items.len() as i32 + at } else { at };
+                let found = usize::try_from(index).ok().and_then(|i| items.get(i).cloned());
+                self.stack.push(found.unwrap_or(Value::Undefined));
+                Ok(())
+            }
+            ("slice", _) => {
+                let items = array.borrow();
+                let (from, to) = slice_range(items.len(), args.first(), args.get(1));
+                self.stack.push(Value::new_array(items[from..to].to_vec()));
+                Ok(())
+            }
+            // `splice(start, count, ...items)`。取り除いたぶんを返す。
+            ("splice", _) => {
+                let mut items = array.borrow_mut();
+                let len = items.len();
+                let start = clamp_index(len, args.first().map(Value::as_i32).unwrap_or(0));
+                let count = match args.get(1) {
+                    Some(v) => (v.as_i32().max(0) as usize).min(len - start),
+                    None => len - start,
+                };
+                let removed: Vec<Value> = items.splice(start..start + count, args.iter().skip(2).cloned()).collect();
+                drop(items);
+                self.stack.push(Value::new_array(removed));
+                Ok(())
+            }
+            ("concat", _) => {
+                let mut out = array.borrow().clone();
+                for arg in args {
+                    match arg {
+                        Value::Array(other) => out.extend(other.borrow().iter().cloned()),
+                        single => out.push(single),
+                    }
+                }
+                self.stack.push(Value::new_array(out));
+                Ok(())
+            }
+            ("reverse", 0) => {
+                array.borrow_mut().reverse();
+                self.stack.push(receiver.clone());
+                Ok(())
+            }
+            ("fill", _) => {
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                let mut items = array.borrow_mut();
+                let (from, to) = slice_range(items.len(), args.get(1), args.get(2));
+                for slot in &mut items[from..to] {
+                    *slot = value.clone();
+                }
+                drop(items);
+                self.stack.push(receiver.clone());
+                Ok(())
+            }
+            // 1 段だけ平らにする。`flat(n)` の n は見ない。
+            ("flat", _) => {
+                let mut out = Vec::new();
+                for item in array.borrow().iter() {
+                    match item {
+                        Value::Array(inner) => out.extend(inner.borrow().iter().cloned()),
+                        single => out.push(single.clone()),
+                    }
+                }
+                self.stack.push(Value::new_array(out));
+                Ok(())
+            }
+            ("join", _) => {
+                let sep = match args.first() {
+                    Some(Value::Str(s)) => s.to_string(),
+                    Some(other) => other.to_display(),
+                    None => ",".to_string(),
+                };
+                let text = array
+                    .borrow()
+                    .iter()
+                    .map(|v| match v {
+                        Value::Undefined | Value::Void => String::new(),
+                        other => other.to_display(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(&sep);
+                self.stack.push(Value::new_str(text.as_str()));
+                Ok(())
+            }
+            ("indexOf" | "lastIndexOf" | "includes", _) => {
+                let wanted = args.first().cloned().unwrap_or(Value::Undefined);
+                let items = array.borrow();
+                let hit = if name == "lastIndexOf" {
+                    items.iter().rposition(|v| compare(Op::Eq, v.clone(), wanted.clone()))
+                } else {
+                    items.iter().position(|v| compare(Op::Eq, v.clone(), wanted.clone()))
+                };
+                drop(items);
+                self.stack.push(match name {
+                    "includes" => Value::Bool(hit.is_some()),
+                    _ => Value::Float(hit.map_or(-1.0, |i| i as f32)),
+                });
+                Ok(())
+            }
+            // 比べ方を渡さないと、JavaScript と同じく文字として並べる。
+            ("sort", _) => {
+                let items: Vec<Value> = array.borrow().clone();
+                let sorted = match args.first() {
+                    Some(cmp) => self.sort_with(program, items, cmp.clone(), g)?,
+                    None => {
+                        let mut items = items;
+                        items.sort_by_key(|v| v.to_display());
+                        items
+                    }
+                };
+                *array.borrow_mut() = sorted;
+                self.stack.push(receiver.clone());
+                Ok(())
+            }
+            ("reduce", _) => {
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let items: Vec<Value> = array.borrow().clone();
+                let mut iter = items.into_iter().enumerate();
+                let mut acc = match args.get(1) {
+                    Some(init) => init.clone(),
+                    None => match iter.next() {
+                        Some((_, first)) => first,
+                        None => {
+                            self.stack.push(Value::Undefined);
+                            return Ok(());
+                        }
+                    },
+                };
+                for (index, item) in iter {
+                    self.stack.push(acc);
+                    self.stack.push(item);
+                    self.stack.push(Value::Float(index as f32));
+                    self.invoke(program, callback.clone(), 3, g)?;
+                    self.run_until(program, g)?;
+                    acc = self.pop()?;
+                }
+                self.stack.push(acc);
+                Ok(())
+            }
+            ("map" | "forEach" | "filter" | "find" | "findIndex" | "findLast" | "some" | "every"
+                | "flatMap", 1) => {
                 let callback = args.into_iter().next().expect("1 個ある");
                 let items: Vec<Value> = array.borrow().clone();
                 let mut results = Vec::with_capacity(items.len());
 
+                // 見つけた時点で答えが決まるものは、そこで止める。
+                let mut answer: Option<Value> = None;
                 for (index, item) in items.into_iter().enumerate() {
                     // コールバックは 1 要素ずつ、その場で最後まで走らせる。
                     self.stack.push(item.clone());
@@ -604,23 +828,88 @@ impl Vm {
                     self.invoke(program, callback.clone(), 2, g)?;
                     self.run_until(program, g)?;
                     let produced = self.pop()?;
+                    let hit = produced.truthy();
 
                     match name {
                         "map" => results.push(produced),
-                        "filter" if produced.truthy() => results.push(item),
+                        "filter" if hit => results.push(item),
+                        "flatMap" => match produced {
+                            Value::Array(inner) => results.extend(inner.borrow().iter().cloned()),
+                            single => results.push(single),
+                        },
+                        "find" if hit => {
+                            answer = Some(item);
+                            break;
+                        }
+                        "findLast" if hit => answer = Some(item),
+                        "findIndex" if hit => {
+                            answer = Some(Value::Float(index as f32));
+                            break;
+                        }
+                        "some" if hit => {
+                            answer = Some(Value::Bool(true));
+                            break;
+                        }
+                        "every" if !hit => {
+                            answer = Some(Value::Bool(false));
+                            break;
+                        }
                         _ => {}
                     }
                 }
 
-                self.stack.push(if name == "forEach" {
-                    Value::Undefined
-                } else {
-                    Value::new_array(results)
+                self.stack.push(match (name, answer) {
+                    (_, Some(found)) => found,
+                    ("forEach", None) => Value::Undefined,
+                    ("find" | "findLast", None) => Value::Undefined,
+                    ("findIndex", None) => Value::Float(-1.0),
+                    ("some", None) => Value::Bool(false),
+                    ("every", None) => Value::Bool(true),
+                    _ => Value::new_array(results),
                 });
                 Ok(())
             }
             _ => Err(Trap::NoSuchMethod(name.to_string())),
         }
+    }
+
+    /// 比べ方を渡された `sort()`。
+    ///
+    /// 比較のたびに作品のコードを呼ぶので、標準の `sort_by` は使えない
+    /// (途中で失敗しうる)。素直にマージソートで回数を抑える。
+    fn sort_with(
+        &mut self,
+        program: &Program,
+        mut items: Vec<Value>,
+        cmp: Value,
+        g: &mut Graphics,
+    ) -> Result<Vec<Value>, Trap> {
+        if items.len() <= 1 {
+            return Ok(items);
+        }
+        let right = items.split_off(items.len() / 2);
+        let left = self.sort_with(program, items, cmp.clone(), g)?;
+        let right = self.sort_with(program, right, cmp.clone(), g)?;
+
+        let mut out = Vec::with_capacity(left.len() + right.len());
+        let (mut i, mut j) = (0, 0);
+        while i < left.len() && j < right.len() {
+            self.stack.push(left[i].clone());
+            self.stack.push(right[j].clone());
+            self.invoke(program, cmp.clone(), 2, g)?;
+            self.run_until(program, g)?;
+            // 0 以下なら左が先。JavaScript の決まり。
+            if self.pop()?.as_f32() <= 0.0 {
+                out.push(left[i].clone());
+                i += 1;
+            } else {
+                out.push(right[j].clone());
+                j += 1;
+            }
+        }
+        out.extend_from_slice(&left[i..]);
+        out.extend_from_slice(&right[j..]);
+        Ok(out)
     }
 
     /// いま積んだフレームが終わるまで回す。コールバックの実行に使う。
@@ -679,6 +968,67 @@ fn get_property(target: &Value, key: u16, program: &Program) -> Value {
             _ => Value::Undefined,
         },
         _ => Value::Undefined,
+    }
+}
+
+impl Vm {
+    /// `drawingContext` へ書かれた影の指定を Graphics へ移す。
+    ///
+    /// `drawingContext` を触っていない作品では何もしない。触った作品でも
+    /// 見るのは 4 つの項目だけなので、図形ごとに呼んでも安い。
+    /// ネイティブ関数をひとつ呼ぶ。`drawingContext` の面倒もここで見る。
+    fn call_native(&mut self, native: natives::Native, program: &Program, g: &mut Graphics) -> Value {
+        self.sync_drawing_context(program, g);
+        let result = natives::call(native, &self.args, g, &mut self.rng);
+        // まだ `drawingContext` を触っていなくても控えは取る。触るのが
+        // push() のあとなら、pop() でその指定ごと消えるのが正しい。
+        match native {
+            natives::Native::Push => {
+                let now = match &self.drawing_context {
+                    Some(Value::Object(fields)) => fields.borrow().clone(),
+                    _ => Vec::new(),
+                };
+                self.saved_contexts.push(now);
+            }
+            natives::Native::Pop => {
+                if let (Some(saved), Some(Value::Object(fields))) =
+                    (self.saved_contexts.pop(), &self.drawing_context)
+                {
+                    *fields.borrow_mut() = saved;
+                }
+            }
+            _ => {}
+        }
+        result
+    }
+
+    fn sync_drawing_context(&self, program: &Program, g: &mut Graphics) {
+        let Some(Value::Object(fields)) = &self.drawing_context else { return };
+        let mut shadow = Shadow { blur: 0.0, offset: [0.0; 2], color: Color::BLACK };
+        let mut touched = false;
+        for (key, value) in fields.borrow().iter() {
+            match program.key(*key) {
+                "shadowBlur" => {
+                    shadow.blur = value.as_f32();
+                    touched = true;
+                }
+                "shadowOffsetX" => {
+                    shadow.offset[0] = value.as_f32();
+                    touched = true;
+                }
+                "shadowOffsetY" => {
+                    shadow.offset[1] = value.as_f32();
+                    touched = true;
+                }
+                // 色は `color(0)` の戻り値。詰めた整数で来る。
+                "shadowColor" => {
+                    shadow.color = crate::natives::color_from_value(value, g);
+                    touched = true;
+                }
+                _ => {}
+            }
+        }
+        g.set_shadow(touched.then_some(shadow));
     }
 }
 
@@ -985,6 +1335,21 @@ fn arithmetic(op: Op, lhs: Value, rhs: Value) -> Result<Value, Trap> {
         Op::Rem => a % b,
         _ => return Err(Trap::Internal(format!("算術命令ではない: {op:?}"))),
     }))
+}
+
+/// 負の添字は末尾から数える。範囲外は端で止める。JavaScript と同じ。
+fn clamp_index(len: usize, at: i32) -> usize {
+    if at < 0 { (len as i32 + at).max(0) as usize } else { (at as usize).min(len) }
+}
+
+/// `slice()` / `fill()` の範囲。省略すると全体。
+fn slice_range(len: usize, from: Option<&Value>, to: Option<&Value>) -> (usize, usize) {
+    let start = clamp_index(len, from.map(Value::as_i32).unwrap_or(0));
+    let end = match to {
+        Some(Value::Undefined) | None => len,
+        Some(v) => clamp_index(len, v.as_i32()),
+    };
+    (start, end.max(start))
 }
 
 fn compare(op: Op, lhs: Value, rhs: Value) -> bool {

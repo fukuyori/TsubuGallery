@@ -8,15 +8,32 @@ use std::time::Instant;
 
 use tsubu_processing_lite::LoadedSketch;
 use tsubu_processing_lite::math::Rng;
-use tsubu_renderer::Graphics;
+use tsubu_renderer::{Graphics, GraphicsState};
 
 /// 直近フレームの計測値。HUD が表示する。
+/// 表示用にならす。跳ねた値をそのまま出すと読めない。
+fn smooth(previous: f32, now: f32) -> f32 {
+    if previous <= 0.0 { now } else { previous * 0.9 + now * 0.1 }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
     pub fps: f32,
     pub frame_count: u64,
     /// 最後の作品切り替えに要した時間 (ms)。
     pub last_switch_ms: f32,
+    /// 作品を 1 フレーム進めるのにかかった時間 (ms)。VM と図形の組み立て。
+    pub sketch_ms: f32,
+    /// 1 フレームぶんの仕事の時間 (ms)。作品、UI、GPU への積み込みまで。
+    pub frame_ms: f32,
+    /// フレームの間隔 (ms)。実測。
+    pub interval_ms: f32,
+    /// 仕事の時間 ÷ フレームの間隔。この主スレッドが CPU を使っている割合。
+    pub load: f32,
+    /// 作品が 1 フレームに実行した命令数。
+    pub instructions: u64,
+    /// 1 フレームぶんの三角形。
+    pub triangles: usize,
 }
 
 pub struct Viewer {
@@ -30,12 +47,18 @@ pub struct Viewer {
     graphics: Graphics,
     /// 先読み用。表示中の描画内容を壊さないよう別インスタンスを使う。
     warmup: Graphics,
+    /// 作品ごとの描画状態。切り替えても `setup()` の結果を失わないため。
+    states: Vec<Option<GraphicsState>>,
 
     paused: bool,
     started: Instant,
     last_frame: Instant,
     fps: f32,
     last_switch_ms: f32,
+    /// 直近の実測。急に跳ねると読めないので、ならしてから見せる。
+    sketch_ms: f32,
+    frame_ms: f32,
+    interval_ms: f32,
     rng: Rng,
 
     width: f32,
@@ -53,7 +76,9 @@ impl Viewer {
     /// 作品 0 本でも作れる。すべて削除された Gallery でも成立させるため。
     pub fn new(sketches: Vec<LoadedSketch>) -> Self {
         let frame_counts = vec![0; sketches.len()];
+        let states = vec![None; sketches.len()];
         Self {
+            states,
             sketches,
             frame_counts,
             current: 0,
@@ -65,6 +90,9 @@ impl Viewer {
             last_frame: Instant::now(),
             fps: 0.0,
             last_switch_ms: 0.0,
+            sketch_ms: 0.0,
+            frame_ms: 0.0,
+            interval_ms: 0.0,
             rng: Rng::new(0x0073_556E_6275_u64),
             width: 1.0,
             height: 1.0,
@@ -81,11 +109,25 @@ impl Viewer {
         self.warmup.font.set_fonts(fonts);
     }
 
+    /// 設定の当てはめ方を描画側の型へ。
+    ///
+    /// 設定は core、描画は renderer にあり、互いを知らない。
+    pub fn to_fit(fit: tsubu_core::settings::CanvasFit) -> tsubu_renderer::CanvasFit {
+        match fit {
+            tsubu_core::settings::CanvasFit::Contain => tsubu_renderer::CanvasFit::Contain,
+            tsubu_core::settings::CanvasFit::Cover => tsubu_renderer::CanvasFit::Cover,
+        }
+    }
+
     /// 設定を反映する (設計書 §24)。
     pub fn apply_settings(&mut self, settings: &Settings) {
         self.frame_rate = settings.frame_rate;
         self.navigation = settings.navigation;
         self.preload = settings.preload;
+        // 正方形の作品を横長の画面へ出すときの当てはめ方。
+        let fit = Self::to_fit(settings.canvas_fit);
+        self.graphics.set_fit(fit);
+        self.warmup.set_fit(fit);
 
         let budget = settings.execution_budget.instructions();
         for sketch in &mut self.sketches {
@@ -129,6 +171,7 @@ impl Viewer {
         if let Some(slot) = self.sketches.get_mut(index) {
             *slot = sketch;
             self.frame_counts[index] = 0;
+            self.states[index] = None;
             self.graphics.reset_state();
             self.epoch += 1;
         }
@@ -139,6 +182,7 @@ impl Viewer {
         let index = index.min(self.sketches.len());
         self.sketches.insert(index, sketch);
         self.frame_counts.insert(index, 0);
+        self.states.insert(index, None);
         if self.current >= index && self.sketches.len() > 1 {
             self.current += 1;
         }
@@ -151,6 +195,7 @@ impl Viewer {
         }
         self.sketches.remove(index);
         self.frame_counts.remove(index);
+        self.states.remove(index);
         self.current = self.current.min(self.sketches.len().saturating_sub(1));
         self.graphics.reset_state();
         self.epoch += 1;
@@ -167,9 +212,31 @@ impl Viewer {
     pub fn stats(&self) -> Stats {
         Stats {
             fps: self.fps,
-            frame_count: self.frame_counts[self.current],
+            frame_count: self.frame_counts.get(self.current).copied().unwrap_or(0),
             last_switch_ms: self.last_switch_ms,
+            sketch_ms: self.sketch_ms,
+            frame_ms: self.frame_ms,
+            // 間隔より仕事が長ければ、目標のフレームレートには追いつけない。
+            interval_ms: self.interval_ms,
+            load: if self.interval_ms > 0.0 {
+                (self.frame_ms / self.interval_ms).min(1.0)
+            } else {
+                0.0
+            },
+            instructions: self
+                .sketches
+                .get(self.current)
+                .map_or(0, LoadedSketch::instructions_last_frame),
+            triangles: self.graphics.draw_list().indices.len() / 3,
         }
+    }
+
+    /// 1 フレームぶんの仕事にかかった時間を受け取る。
+    ///
+    /// 作品だけでなく UI と GPU への積み込みまで含めた実測は、呼ぶ側にしか
+    /// 分からない。ここでならして負荷にする。
+    pub fn note_frame_work(&mut self, elapsed: std::time::Duration) {
+        self.frame_ms = smooth(self.frame_ms, elapsed.as_secs_f32() * 1000.0);
     }
 
     pub fn set_mouse(&mut self, x: f32, y: f32, pressed: bool) {
@@ -183,10 +250,17 @@ impl Viewer {
     /// 一時停止中もこの関数は呼ぶ (ウィンドウ再描画のたびに同じ絵が必要なため)
     /// が、`frameCount` は進めない。
     pub fn render_frame(&mut self, width: f32, height: f32) -> Option<&Graphics> {
+        // 大きさが変わるとキャンバスは作り直され、溜めた絵は消える。
+        // `setup()` の中だけで描く作品は、ここでも動かし直さないと白紙になる。
+        let resized = (self.width - width).abs() > 0.5 || (self.height - height).abs() > 0.5;
         self.width = width;
         self.height = height;
         if self.sketches.is_empty() {
             return None;
+        }
+        if resized && self.sketches[self.current].draws_once() {
+            self.sketches[self.current].restart();
+            self.graphics.reset_state();
         }
 
         let now = Instant::now();
@@ -196,6 +270,7 @@ impl Viewer {
             // 表示がちらつかない程度に平滑化する。
             let instant_fps = 1.0 / dt;
             self.fps = if self.fps == 0.0 { instant_fps } else { self.fps * 0.9 + instant_fps * 0.1 };
+            self.interval_ms = smooth(self.interval_ms, dt * 1000.0);
         }
 
         // 目標フレームレートより速く回さない。表示の更新はディスプレイに任せ、
@@ -215,7 +290,9 @@ impl Viewer {
         self.graphics.begin_frame(width, height);
         self.graphics.frame_count = self.frame_counts[self.current];
         self.graphics.time = self.started.elapsed().as_secs_f32();
+        let t0 = Instant::now();
         self.sketches[self.current].step(&mut self.graphics);
+        self.sketch_ms = smooth(self.sketch_ms, t0.elapsed().as_secs_f32() * 1000.0);
         Some(&self.graphics)
     }
 
@@ -226,8 +303,9 @@ impl Viewer {
     /// 表示中の作品を最初から動かし直す。編集の保存後に使う。
     pub fn restart_current(&mut self) {
         if let Some(sketch) = self.sketches.get_mut(self.current) {
-            sketch.initialized = false;
+            sketch.restart();
             self.frame_counts[self.current] = 0;
+            self.states[self.current] = None;
             self.graphics.reset_state();
             self.epoch += 1;
         }
@@ -295,8 +373,21 @@ impl Viewer {
             return;
         }
         let t0 = Instant::now();
+        // いまの作品の状態を預ける。`setup()` はもう二度と走らないので、
+        // ここで取っておかないと塗りや線の色が既定へ戻ってしまう。
+        self.states[self.current] = Some(self.graphics.state());
         self.current = index;
-        self.graphics.reset_state();
+        match self.states[index].clone() {
+            Some(state) => self.graphics.set_state(state),
+            None => self.graphics.reset_state(),
+        }
+        // 切り替えると溜めた絵は捨てられる。`setup()` の中だけで描く作品は
+        // 描き直す者がいないので、ここで最初から動かし直す。
+        if self.sketches[index].draws_once() {
+            self.sketches[index].restart();
+            self.states[index] = None;
+            self.graphics.reset_state();
+        }
         self.epoch += 1;
         self.last_switch_ms = t0.elapsed().as_secs_f32() * 1000.0;
         self.preload_neighbours();
@@ -315,13 +406,18 @@ impl Viewer {
         }
         let neighbours = [(self.current + 1) % n, (self.current + n - 1) % n];
         for index in neighbours {
-            if self.sketches[index].initialized {
+            // `setup()` の中だけで描く作品を温めても、絵は warmup 側の
+            // キャンバスへ行って消える。切り替えのときに動かし直す。
+            if self.sketches[index].initialized || self.sketches[index].draws_once() {
                 continue;
             }
             self.warmup.reset_state();
             self.warmup.begin_frame(self.width, self.height);
             self.warmup.frame_count = self.frame_counts[index];
             self.sketches[index].step(&mut self.warmup);
+            // `setup()` はこの warmup 側で走ってしまった。結果を預けておかないと、
+            // 切り替えたときに `setup()` で決めた色や大きさが失われる。
+            self.states[index] = Some(self.warmup.state());
         }
     }
 }
@@ -430,5 +526,158 @@ mod tests {
             v.random(&[0, 1, 2]);
             assert_ne!(v.current_index(), before);
         }
+    }
+
+    /// `setup()` で決めた色が、作品を切り替えても失われない。
+    ///
+    /// Viewer は 1 つの Graphics を全作品で使い回す。切り替えのたびに初期状態へ
+    /// 戻していたので、`stroke(-1)` だけを `setup()` に書いた作品は、
+    /// 一度離れて戻ると線が黒になった。`clear()` の黒地と重なって画面が
+    /// 真っ黒のままになる。`setup()` は作品ごとに一度きりなので直らない。
+    #[test]
+    fn what_setup_decided_survives_switching_away_and_back() {
+        use tsubu_processing_lite::VmSketch;
+
+        let sketch = |id: &str, src: &str| {
+            LoadedSketch::new(
+                SketchInfo { id: id.into(), title: id.into(), thumbnail_frame: 1 },
+                Box::new(VmSketch::compile(src, 1).expect("コンパイルできる")),
+            )
+        };
+        let mut viewer = Viewer::new(vec![
+            // setup() でだけ白い線とキャンバスを決める作品。
+            sketch(
+                "white",
+                "void setup(){ size(720, 720); stroke(-1); }\n\
+                 void draw(){ clear(); line(0, 0, 100, 100); }",
+            ),
+            sketch("other", "void draw(){ background(0); circle(50, 50, 10); }"),
+        ]);
+
+        fn line_color(v: &mut Viewer) -> (f32, f32, f32) {
+            let g = v.render_frame(200.0, 100.0).expect("描かれる");
+            let c = g.draw_list().vertices.first().expect("線がある").color;
+            (c[0], c[1], c[2])
+        }
+
+        assert_eq!(line_color(&mut viewer), (1.0, 1.0, 1.0), "最初から白くない");
+        viewer.switch_to(1);
+        viewer.render_frame(200.0, 100.0);
+        viewer.switch_to(0);
+        assert_eq!(line_color(&mut viewer), (1.0, 1.0, 1.0), "戻ったら線が黒くなりました");
+    }
+
+    /// 先読みした作品も、切り替えたときに `setup()` の結果を持っている。
+    ///
+    /// 先読みは別の Graphics で `setup()` を走らせる。そちらの結果を
+    /// 預けておかないと、先読みした作品にかぎって色が既定へ戻る。
+    #[test]
+    fn a_preloaded_sketch_keeps_what_its_setup_decided() {
+        use tsubu_processing_lite::VmSketch;
+
+        let sketch = |id: &str, src: &str| {
+            LoadedSketch::new(
+                SketchInfo { id: id.into(), title: id.into(), thumbnail_frame: 1 },
+                Box::new(VmSketch::compile(src, 1).expect("コンパイルできる")),
+            )
+        };
+        let mut viewer = Viewer::new(vec![
+            sketch("first", "void draw(){ background(0); circle(50, 50, 10); }"),
+            sketch(
+                "white",
+                "void setup(){ size(720, 720); stroke(-1); }\n\
+                 void draw(){ clear(); line(0, 0, 100, 100); }",
+            ),
+        ]);
+        // 隣を先読みすると、1 の `setup()` は warmup 側の Graphics で走る。
+        viewer.width = 200.0;
+        viewer.height = 100.0;
+        viewer.preload_neighbours();
+        assert!(viewer.sketches[1].initialized, "先読みが走っていません");
+        viewer.switch_to(1);
+        let g = viewer.render_frame(200.0, 100.0).expect("描かれる");
+        let c = g.draw_list().vertices.first().expect("線がある").color;
+        assert_eq!((c[0], c[1], c[2]), (1.0, 1.0, 1.0), "先読みした作品の線が黒です");
+    }
+
+    /// `setup()` の中だけで描く作品は、戻ってきたら描き直す。
+    ///
+    /// 静的モード (設計書 §14.1) の作品は `draw()` を持たない。切り替えると
+    /// 溜めた絵は捨てられるので、描き直す者がいないと白紙のままになる。
+    /// 同じ乱数の数列から始めるので、絵はサムネイルとも一致する。
+    #[test]
+    fn a_sketch_that_draws_only_in_setup_is_run_again_when_shown_again() {
+        use tsubu_processing_lite::VmSketch;
+
+        let sketch = |id: &str, src: &str| {
+            LoadedSketch::new(
+                SketchInfo { id: id.into(), title: id.into(), thumbnail_frame: 1 },
+                Box::new(VmSketch::compile(src, 1).expect("コンパイルできる")),
+            )
+        };
+        // 静的モード。`draw()` が無く、絵は 1 度きり。
+        let mut viewer = Viewer::new(vec![
+            sketch("static", "size(400, 400);\nline(0, 0, random(100), 50);"),
+            sketch("other", "void draw(){ background(0); circle(50, 50, 10); }"),
+        ]);
+
+        let first = {
+            let g = viewer.render_frame(200.0, 100.0).expect("描かれる");
+            let v = &g.draw_list().vertices;
+            assert!(!v.is_empty(), "静的モードの作品が描かれていません");
+            v.iter().map(|p| p.pos[0]).fold(f32::MIN, f32::max)
+        };
+
+        viewer.switch_to(1);
+        viewer.render_frame(200.0, 100.0);
+        viewer.switch_to(0);
+
+        let g = viewer.render_frame(200.0, 100.0).expect("描かれる");
+        let v = &g.draw_list().vertices;
+        assert!(!v.is_empty(), "戻ったら白紙になりました");
+        // 乱数も戻すので、同じ絵が出る。
+        let again = v.iter().map(|p| p.pos[0]).fold(f32::MIN, f32::max);
+        assert!((first - again).abs() < 0.01, "違う絵になりました: {first} と {again}");
+    }
+
+    /// 窓の大きさが変わっても、`setup()` の中だけで描く作品は消えない。
+    #[test]
+    fn resizing_does_not_wipe_a_sketch_that_draws_only_in_setup() {
+        use tsubu_processing_lite::VmSketch;
+
+        let mut viewer = Viewer::new(vec![LoadedSketch::new(
+            SketchInfo { id: "s".into(), title: "s".into(), thumbnail_frame: 1 },
+            Box::new(
+                VmSketch::compile("size(400, 400);\nline(0, 0, 100, 50);", 1)
+                    .expect("コンパイルできる"),
+            ),
+        )]);
+
+        assert!(!viewer.render_frame(200.0, 100.0).expect("描かれる").draw_list().is_empty());
+        // 大きさが変わるとキャンバスは作り直される。
+        let g = viewer.render_frame(400.0, 300.0).expect("描かれる");
+        assert!(!g.draw_list().is_empty(), "大きさを変えたら白紙になりました");
+    }
+
+    /// 負荷は仕事の時間をフレームの間隔で割ったもの。
+    ///
+    /// 画面の空きを待つ時間は仕事に数えない。数えると、何を映していても
+    /// いつも 100% に見えて役に立たなくなる。
+    #[test]
+    fn the_load_is_work_over_wall_time() {
+        let mut viewer = viewer_of(1);
+        // 16ms 間隔で 4ms 働いた、という状態を作る。
+        for _ in 0..40 {
+            viewer.interval_ms = smooth(viewer.interval_ms, 16.0);
+            viewer.note_frame_work(std::time::Duration::from_micros(4000));
+        }
+        let stats = viewer.stats();
+        assert!((stats.load - 0.25).abs() < 0.02, "負荷が合いません: {}", stats.load);
+
+        // 間隔を超えて働いても 100% で止まる。1 本の糸はそれ以上使えない。
+        for _ in 0..80 {
+            viewer.note_frame_work(std::time::Duration::from_micros(40_000));
+        }
+        assert!((viewer.stats().load - 1.0).abs() < 0.001, "{}", viewer.stats().load);
     }
 }

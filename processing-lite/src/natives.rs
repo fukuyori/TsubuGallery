@@ -229,6 +229,10 @@ pub enum Native {
     Rotate,
     Scale,
     PushMatrix,
+    Push,
+    Pop,
+    PushStyle,
+    PopStyle,
 
     // 3D (設計書 §14.2)。
     Box,
@@ -313,8 +317,11 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "noiseSeed", native: Native::NoiseSeed, arities: &[1] },
     Signature { name: "millis", native: Native::Millis, arities: &[0] },
     // p5 では pushMatrix / popMatrix をこう呼ぶ。
-    Signature { name: "push", native: Native::PushMatrix, arities: &[0] },
-    Signature { name: "pop", native: Native::PopMatrix, arities: &[0] },
+    // p5.js の push()/pop() は見た目まで戻す。Processing の pushMatrix() とは違う。
+    Signature { name: "push", native: Native::Push, arities: &[0] },
+    Signature { name: "pop", native: Native::Pop, arities: &[0] },
+    Signature { name: "pushStyle", native: Native::PushStyle, arities: &[0] },
+    Signature { name: "popStyle", native: Native::PopStyle, arities: &[0] },
     Signature { name: "background", native: Native::Background, arities: &[1, 2, 3, 4] },
     Signature { name: "fill", native: Native::Fill, arities: &[1, 2, 3, 4] },
     Signature { name: "stroke", native: Native::Stroke, arities: &[1, 2, 3, 4] },
@@ -434,6 +441,13 @@ pub fn is_variadic(name: &str) -> bool {
     VARIADIC.contains(&name)
 }
 
+/// 引数の個数を問わず、名前だけでネイティブを引く。
+///
+/// `f(...xs)` のように個数が実行時まで決まらない呼び出しで使う。
+pub fn resolve_by_name(name: &str) -> Option<Native> {
+    SIGNATURES.iter().find(|s| s.name == name).map(|s| s.native)
+}
+
 pub fn accepted_arities(name: &str) -> Vec<u8> {
     SIGNATURES
         .iter()
@@ -442,8 +456,49 @@ pub fn accepted_arities(name: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// `drawingContext` の影が乗る図形。
+///
+/// 影は同じ形をずらして重ねて作るので、呼び直しても副作用の無いものに
+/// 限る。`random()` を使う関数を入れると乱数の数列がずれる。
+fn casts_shadow(native: Native) -> bool {
+    matches!(
+        native,
+        Native::Rect
+            | Native::Ellipse
+            | Native::Circle
+            | Native::SquareShape
+            | Native::Triangle
+            | Native::Quad
+            | Native::Line
+            | Native::Point
+            | Native::Arc
+            | Native::Bezier
+            | Native::Curve
+            | Native::EndShape
+            | Native::Text
+            | Native::Box
+            | Native::Sphere
+    )
+}
+
 /// ネイティブ関数を実行する。引数の数は解決時に検証済み。
 pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value {
+    // 影があれば、同じ形を先にぼかし色で置く。
+    if casts_shadow(native) {
+        let samples = g.shadow_samples();
+        let any = !samples.is_empty();
+        for (offset, weight) in samples {
+            g.begin_shadow(offset, weight);
+            run(native, args, g, rng);
+        }
+        if any {
+            g.end_shadow();
+        }
+    }
+    run(native, args, g, rng)
+}
+
+fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value {
     // 値として呼ばれた場合 (`B = blendMode; B(ADD)`) は引数の数を検証していない。
     // 足りない分は 0 として扱い、範囲外アクセスで落ちないようにする。
     let f = |i: usize| args.get(i).map_or(0.0, Value::as_f32);
@@ -457,6 +512,13 @@ pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> 
                 Some(41) => g.enable_3d(Origin::TopLeft),
                 Some(42) => g.enable_3d(Origin::Center),
                 _ => {}
+            }
+            // p5.js の createCanvas() は呼ぶたびにキャンバスを作り直す。
+            // 中身は消え、塗りと線も既定へ戻る。`draw()` の頭で毎フレーム
+            // 呼んで画面を消す書き方があり、そこが違うと絵が積もり続ける。
+            // Processing の size() にこの働きは無い。
+            if native == Native::CreateCanvas {
+                g.recreate_canvas();
             }
             Value::Void
         }
@@ -693,6 +755,22 @@ pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> 
             g.push_matrix();
             Value::Void
         }
+        Native::Push => {
+            g.push_all();
+            Value::Void
+        }
+        Native::Pop => {
+            g.pop_all();
+            Value::Void
+        }
+        Native::PushStyle => {
+            g.push_style();
+            Value::Void
+        }
+        Native::PopStyle => {
+            g.pop_style();
+            Value::Void
+        }
         Native::PopMatrix => {
             g.pop_matrix();
             Value::Void
@@ -920,6 +998,11 @@ fn numbers(args: &[Value]) -> Vec<f32> {
 ///
 /// `color()` の中身は RGB の 0〜255 で持っているので、[`Graphics::color_from`]
 /// は通さない。通すと `colorMode(HSB)` のときに二重変換になる。
+/// 値ひとつを色として読む。`color()` の戻り値や詰めた整数を受ける。
+pub fn color_from_value(value: &Value, g: &Graphics) -> Color {
+    resolve_color(std::slice::from_ref(value), g)
+}
+
 fn resolve_color(args: &[Value], g: &Graphics) -> Color {
     // `stroke(-1)` のように int をひとつ渡す書き方は、詰めた色 (0xAARRGGBB)。
     // Processing は型で見分けるので、こちらも int のときだけそう読む。

@@ -100,6 +100,15 @@ choice!(
 );
 
 choice!(
+    /// `size()` で宣言されたキャンバスを、画面へどう当てはめるか。
+    ///
+    /// つぶやき系は正方形が多く、横長の画面では左右が余る。
+    CanvasFit, "settings.canvas_fit",
+    { Contain => "contain", Cover => "cover" },
+    default = Contain
+);
+
+choice!(
     /// サムネイルの解像度。
     ImageQuality, "settings.image_quality",
     { Low => "low", Standard => "standard", High => "high" },
@@ -221,6 +230,8 @@ pub struct Settings {
     pub show_titles: bool,
 
     pub fullscreen: bool,
+    /// キャンバスを画面へ収めるか、埋めるか。
+    pub canvas_fit: CanvasFit,
     pub frame_rate: FrameRate,
     pub navigation: Navigation,
     pub preload: bool,
@@ -246,6 +257,7 @@ impl Default for Settings {
             sort_order: SortOrder::default(),
             show_titles: true,
             fullscreen: false,
+            canvas_fit: CanvasFit::default(),
             frame_rate: FrameRate::default(),
             navigation: Navigation::default(),
             preload: true,
@@ -279,6 +291,7 @@ impl Settings {
             ("sort_order", self.sort_order.key().into()),
             ("show_titles", bool_key(self.show_titles).into()),
             ("fullscreen", bool_key(self.fullscreen).into()),
+            ("canvas_fit", self.canvas_fit.key().into()),
             ("frame_rate", self.frame_rate.key().into()),
             ("navigation", self.navigation.key().into()),
             ("preload", bool_key(self.preload).into()),
@@ -309,6 +322,7 @@ impl Settings {
                 "sort_order" => set(&mut s.sort_order, value),
                 "show_titles" => set_bool(&mut s.show_titles, value),
                 "fullscreen" => set_bool(&mut s.fullscreen, value),
+                "canvas_fit" => set(&mut s.canvas_fit, value),
                 "frame_rate" => set(&mut s.frame_rate, value),
                 "navigation" => set(&mut s.navigation, value),
                 "preload" => set_bool(&mut s.preload, value),
@@ -378,6 +392,7 @@ mod tests {
             sort_order: SortOrder::RecentlyOpened,
             show_titles: false,
             fullscreen: true,
+            canvas_fit: CanvasFit::Cover,
             frame_rate: FrameRate::Fps30,
             navigation: Navigation::Random,
             preload: false,

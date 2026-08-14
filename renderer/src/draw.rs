@@ -205,7 +205,141 @@ struct Shape {
     curves: Vec<[f32; 2]>,
 }
 
+/// `drawingContext` の影。canvas の `shadowBlur` / `shadowColor` 相当。
+///
+/// 本物はガウスぼかしだが、ここでは同じ形をずらして何枚か重ねて似せる。
+/// 図形ごとの専用処理が要らないので、丸い角の矩形でも文字でも同じように効く。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shadow {
+    /// canvas の `shadowBlur`。ぼけの広がり (ピクセル)。
+    pub blur: f32,
+    /// `shadowOffsetX` / `shadowOffsetY`。
+    pub offset: [f32; 2],
+    pub color: Color,
+}
+
+impl Shadow {
+    /// 影を落とすか。色が透明、またはぼけも位置ずれも無ければ落とさない。
+    fn is_visible(&self) -> bool {
+        self.color.a > 0.0 && (self.blur > 0.0 || self.offset != [0.0, 0.0])
+    }
+
+    /// 重ねる位置と、その 1 枚の濃さ。
+    ///
+    /// 中心を濃く、外の輪ほど薄くする。同じ濃さで重ねると縁が硬い帯になって、
+    /// canvas のなだらかなぼけにならない。
+    fn samples(&self) -> Vec<([f32; 2], f32)> {
+        let [dx, dy] = self.offset;
+        if self.blur <= 0.0 {
+            return vec![([dx, dy], 1.0)];
+        }
+        // ぼけが大きくても枚数は増やさない。重い作品で効きすぎないように。
+        let radius = self.blur.min(64.0) * 0.7;
+        let mut out = vec![([dx, dy], 1.0)];
+        for (scale, weight, count) in [(0.35, 0.40, 8), (0.70, 0.18, 10), (1.0, 0.07, 12)] {
+            for i in 0..count {
+                // 輪ごとに少し回して、放射状の筋が出ないようにする。
+                let a = std::f32::consts::TAU * (i as f32 + scale) / count as f32;
+                let r = radius * scale;
+                out.push(([dx + a.cos() * r, dy + a.sin() * r], weight));
+            }
+        }
+        out
+    }
+}
+
+/// `size()` で宣言されたキャンバスを、表示領域へどう当てはめるか。
+///
+/// つぶやき系の作品は正方形が多く、横長の画面に出すと左右が余る。
+/// 埋めれば大きく見えるが、上下 (または左右) がはみ出して切れる。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CanvasFit {
+    /// 全体が入るように収める。余った側に余白が出る。
+    #[default]
+    Contain,
+    /// 表示領域を埋める。収まらない側は切れる。
+    Cover,
+}
+
+/// 作品 1 つぶんの描画状態。
+///
+/// `setup()` で決まって以降ずっと効くもの — 塗り、線、キャンバスの大きさ、
+/// 角度の単位、3D かどうか — をひとまとめにする。作品を切り替えるとき、
+/// これを預けておいて戻ってきたら復す。
+#[derive(Clone, Debug)]
+pub struct GraphicsState {
+    color_mode: ColorMode,
+    color_max: [f32; 4],
+    blend: BlendMode,
+    canvas: Option<(f32, f32)>,
+    fill: Option<Color>,
+    stroke: Option<Color>,
+    stroke_weight: f32,
+    space: Option<Space>,
+    shadow: Option<Shadow>,
+    styles: Vec<Style>,
+    text_stroked: bool,
+    default_background: Color,
+    text_size: f32,
+    text_align: (TextAlign, TextAlign),
+    rect_mode: ShapeMode,
+    ellipse_mode: ShapeMode,
+    angle_mode: AngleMode,
+    looping: bool,
+}
+
+impl Default for GraphicsState {
+    fn default() -> Self {
+        Self {
+            color_mode: ColorMode::Rgb,
+            color_max: [255.0; 4],
+            blend: BlendMode::Blend,
+            canvas: None,
+            fill: Some(Color::WHITE),
+            stroke: Some(Color::BLACK),
+            stroke_weight: 1.0,
+            space: None,
+            shadow: None,
+            styles: Vec::new(),
+            text_stroked: false,
+            default_background: Color::DEFAULT_BACKGROUND,
+            text_size: 12.0,
+            text_align: (TextAlign::Start, TextAlign::Baseline),
+            rect_mode: ShapeMode::Corner,
+            ellipse_mode: ShapeMode::Center,
+            angle_mode: AngleMode::Radians,
+            looping: true,
+        }
+    }
+}
+
+/// `pushStyle()` で退避する描画の見た目。座標変換は含まない。
+#[derive(Clone, Copy, Debug)]
+struct Style {
+    fill: Option<Color>,
+    stroke: Option<Color>,
+    stroke_weight: f32,
+    text_size: f32,
+    text_align: (TextAlign, TextAlign),
+    rect_mode: ShapeMode,
+    ellipse_mode: ShapeMode,
+    angle_mode: AngleMode,
+    color_mode: ColorMode,
+    color_max: [f32; 4],
+    blend: BlendMode,
+    shadow: Option<Shadow>,
+}
+
+/// 影を描いているあいだ、退避しておく描画状態。
+struct ShadowPass {
+    fill: Option<Color>,
+    stroke: Option<Color>,
+    matrix: Affine,
+    model: Option<Mat4>,
+}
+
 /// 3D の状態。`size(w, h, P3D)` を書いた作品だけが持つ。
+#[derive(Clone, Debug)]
 struct Space {
     camera: Camera,
     /// モデルビュー行列。カメラの分もここに入っている。
@@ -273,6 +407,16 @@ pub struct Graphics {
     stack: Vec<Affine>,
     /// 3D。`size(w, h, P3D)` を書いた作品だけが持つ。
     space: Option<Space>,
+    /// `drawingContext` で指定された影。
+    shadow: Option<Shadow>,
+    /// 影を描いている最中。入れ子にならないようにする。
+    shadow_pass: Option<ShadowPass>,
+    /// `pushStyle()` の退避先。
+    styles: Vec<Style>,
+    /// `text()` に線を付けるか。p5.js の作品だけ真。
+    text_stroked: bool,
+    /// `background()` を一度も呼ばない作品の下地。
+    default_background: Color,
     /// いま積んでいる三角形が深度バッファへ書くか。
     ///
     /// 2D だけの作品では一度も書かない。深さは全部 0 のままなので、
@@ -316,6 +460,8 @@ pub struct Graphics {
     viewport: (f32, f32),
     /// 作品が `size()` / `createCanvas()` で宣言したキャンバス。
     canvas: Option<(f32, f32)>,
+    /// キャンバスを表示領域へどう当てはめるか。
+    fit: CanvasFit,
     /// キャンバスを表示領域へ収める変換。毎フレームここから始める。
     base: Affine,
 }
@@ -330,6 +476,11 @@ impl Graphics {
             matrix: Affine::IDENTITY,
             stack: Vec::with_capacity(16),
             space: None,
+            shadow: None,
+            shadow_pass: None,
+            styles: Vec::new(),
+            text_stroked: false,
+            default_background: Color::DEFAULT_BACKGROUND,
             depth_write: false,
             shape: None,
             font: crate::font::FontAtlas::new(),
@@ -352,6 +503,7 @@ impl Graphics {
             blend: BlendMode::Blend,
             viewport: (0.0, 0.0),
             canvas: None,
+            fit: CanvasFit::default(),
             base: Affine::IDENTITY,
         }
     }
@@ -383,12 +535,41 @@ impl Graphics {
         self.apply_canvas();
     }
 
+    /// p5.js の `createCanvas()` をもう一度呼んだときの後始末。
+    ///
+    /// p5 はキャンバスの要素を作り直す。描いてあったものは消え、キャンバスの
+    /// 文脈も初期化されるので、塗りと線の色、線の太さ、座標変換が既定へ戻る。
+    /// `noFill()` / `noStroke()` は p5 側の旗なので残る。
+    ///
+    /// `draw()` の頭で毎フレーム呼んで画面を消す書き方がある。Processing の
+    /// `size()` にこの働きは無いので、`createCanvas()` からだけ呼ぶ。
+    pub fn recreate_canvas(&mut self) {
+        self.list.vertices.clear();
+        self.list.indices.clear();
+        self.list.batches.clear();
+        self.list.clear = Some(self.default_background);
+        self.fill = self.fill.map(|_| Color::WHITE);
+        self.stroke = self.stroke.map(|_| Color::BLACK);
+        self.stroke_weight = 1.0;
+        self.shape = None;
+        self.stack.clear();
+        self.matrix = self.base;
+        if let Some(space) = &mut self.space {
+            space.model = space.camera.modelview();
+            space.stack.clear();
+        }
+    }
+
     /// キャンバス指定から `width` / `height` と基準の変換を決め直す。
     fn apply_canvas(&mut self) {
         let (view_w, view_h) = self.viewport;
         match self.canvas {
             Some((canvas_w, canvas_h)) => {
-                let scale = (view_w / canvas_w).min(view_h / canvas_h);
+                let (wide, tall) = (view_w / canvas_w, view_h / canvas_h);
+                let scale = match self.fit {
+                    CanvasFit::Contain => wide.min(tall),
+                    CanvasFit::Cover => wide.max(tall),
+                };
                 self.base = Affine {
                     a: scale,
                     b: 0.0,
@@ -416,6 +597,20 @@ impl Graphics {
         }
     }
 
+    /// キャンバスの当てはめ方を決める。設定から渡す。
+    ///
+    /// 作品を切り替えても保つ。見る人の好みであって作品の性質ではない。
+    pub fn set_fit(&mut self, fit: CanvasFit) {
+        if self.fit != fit {
+            self.fit = fit;
+            self.apply_canvas();
+        }
+    }
+
+    pub fn fit(&self) -> CanvasFit {
+        self.fit
+    }
+
     /// 実際の表示サイズ。作品から見える `width` / `height` とは違うことがある。
     pub fn viewport(&self) -> (f32, f32) {
         self.viewport
@@ -427,28 +622,70 @@ impl Graphics {
 
     /// スケッチを切り替えるときに呼ぶ。スタイルまで含めて初期状態へ戻す。
     pub fn reset_state(&mut self) {
-        self.color_mode = ColorMode::Rgb;
-        self.color_max = [255.0; 4];
-        self.blend = BlendMode::Blend;
-        self.canvas = None;
-        self.base = Affine::IDENTITY;
-        self.fill = Some(Color::WHITE);
-        self.stroke = Some(Color::BLACK);
-        self.stroke_weight = 1.0;
-        self.matrix = Affine::IDENTITY;
-        self.stack.clear();
-        self.space = None;
-        self.depth_write = false;
+        self.set_state(GraphicsState::default());
+        // 経過は作品ごとのもの。持ち越さない。
         self.frame_count = 0;
         self.time = 0.0;
-        self.shape = None;
-        self.text_size = 12.0;
-        self.text_align = (TextAlign::Start, TextAlign::Baseline);
-        self.rect_mode = ShapeMode::Corner;
-        self.ellipse_mode = ShapeMode::Center;
-        self.angle_mode = AngleMode::Radians;
-        self.looping = true;
         self.list.reset();
+    }
+
+    /// いまの描画状態を取り出す。
+    ///
+    /// Viewer は 1 つの [`Graphics`] を全作品で使い回す。切り替えのたびに
+    /// 初期状態へ戻すと、`setup()` で決めた色やキャンバスの大きさが消える。
+    /// `setup()` は作品ごとに一度しか走らないので、二度と戻ってこない。
+    /// 作品ごとにこれを持っておいて、戻ってきたときに復す。
+    pub fn state(&self) -> GraphicsState {
+        GraphicsState {
+            color_mode: self.color_mode,
+            color_max: self.color_max,
+            blend: self.blend,
+            canvas: self.canvas,
+            fill: self.fill,
+            stroke: self.stroke,
+            stroke_weight: self.stroke_weight,
+            space: self.space.clone(),
+            shadow: self.shadow,
+            styles: self.styles.clone(),
+            text_stroked: self.text_stroked,
+            default_background: self.default_background,
+            text_size: self.text_size,
+            text_align: self.text_align,
+            rect_mode: self.rect_mode,
+            ellipse_mode: self.ellipse_mode,
+            angle_mode: self.angle_mode,
+            looping: self.looping,
+        }
+    }
+
+    /// [`Graphics::state`] で取ったものを戻す。
+    pub fn set_state(&mut self, s: GraphicsState) {
+        self.color_mode = s.color_mode;
+        self.color_max = s.color_max;
+        self.blend = s.blend;
+        self.canvas = s.canvas;
+        self.fill = s.fill;
+        self.stroke = s.stroke;
+        self.stroke_weight = s.stroke_weight;
+        self.space = s.space;
+        self.shadow = s.shadow;
+        self.styles = s.styles;
+        self.text_stroked = s.text_stroked;
+        self.default_background = s.default_background;
+        self.text_size = s.text_size;
+        self.text_align = s.text_align;
+        self.rect_mode = s.rect_mode;
+        self.ellipse_mode = s.ellipse_mode;
+        self.angle_mode = s.angle_mode;
+        self.looping = s.looping;
+
+        // フレームの途中でしか意味を持たないものは持ち越さない。
+        self.stack.clear();
+        self.shape = None;
+        self.shadow_pass = None;
+        self.depth_write = false;
+        // キャンバスの指定から base と width/height を組み直す。
+        self.apply_canvas();
     }
 
     /// `rectMode()`。
@@ -657,6 +894,61 @@ impl Graphics {
 
     pub fn stroke_weight(&mut self, w: f32) {
         self.stroke_weight = w.max(0.0);
+    }
+
+    // ---- 影 (`drawingContext`) ------------------------------------------
+
+    /// `drawingContext.shadowBlur` などを設定する。
+    pub fn set_shadow(&mut self, shadow: Option<Shadow>) {
+        self.shadow = shadow.filter(Shadow::is_visible);
+    }
+
+    pub fn shadow(&self) -> Option<Shadow> {
+        self.shadow
+    }
+
+    /// 影を落とす形をこれから描く。重ねる位置を返す。
+    ///
+    /// 落とさないとき、または影そのものを描いている最中なら空。
+    pub fn shadow_samples(&self) -> Vec<([f32; 2], f32)> {
+        if self.shadow_pass.is_some() {
+            return Vec::new();
+        }
+        self.shadow.map(|s| s.samples()).unwrap_or_default()
+    }
+
+    /// 影の 1 枚を描き始める。塗りと線をぼかし色へ差し替え、位置をずらす。
+    pub fn begin_shadow(&mut self, offset: [f32; 2], weight: f32) {
+        let Some(shadow) = self.shadow else { return };
+        if self.shadow_pass.is_none() {
+            self.shadow_pass = Some(ShadowPass {
+                fill: self.fill,
+                stroke: self.stroke,
+                matrix: self.matrix,
+                model: self.space.as_ref().map(|s| s.model),
+            });
+        }
+        let alpha = (shadow.color.a * weight).clamp(0.0, 1.0);
+        let color = Color { a: alpha, ..shadow.color };
+        self.fill = self.fill.map(|_| color);
+        self.stroke = self.stroke.map(|_| color);
+        // ずらしは画面の向き。作品の回転には従わない (canvas と同じ)。
+        let saved = self.shadow_pass.as_ref().expect("いま入れた");
+        self.matrix = Affine { e: saved.matrix.e + offset[0], f: saved.matrix.f + offset[1], ..saved.matrix };
+        if let (Some(space), Some(model)) = (self.space.as_mut(), saved.model) {
+            space.model = model;
+        }
+    }
+
+    /// 影を描き終える。差し替えた状態を戻す。
+    pub fn end_shadow(&mut self) {
+        let Some(saved) = self.shadow_pass.take() else { return };
+        self.fill = saved.fill;
+        self.stroke = saved.stroke;
+        self.matrix = saved.matrix;
+        if let (Some(space), Some(model)) = (self.space.as_mut(), saved.model) {
+            space.model = model;
+        }
     }
 
     // ---- 3D (設計書 §14.2) ----------------------------------------------
@@ -873,6 +1165,56 @@ impl Graphics {
     }
 
     // ---- 座標変換 -------------------------------------------------------
+
+    /// `pushStyle()`。見た目だけを退避する。座標変換はそのまま。
+    pub fn push_style(&mut self) {
+        self.styles.push(Style {
+            fill: self.fill,
+            stroke: self.stroke,
+            stroke_weight: self.stroke_weight,
+            text_size: self.text_size,
+            text_align: self.text_align,
+            rect_mode: self.rect_mode,
+            ellipse_mode: self.ellipse_mode,
+            angle_mode: self.angle_mode,
+            color_mode: self.color_mode,
+            color_max: self.color_max,
+            blend: self.blend,
+            shadow: self.shadow,
+        });
+    }
+
+    /// `popStyle()`。
+    pub fn pop_style(&mut self) {
+        let Some(s) = self.styles.pop() else { return };
+        self.fill = s.fill;
+        self.stroke = s.stroke;
+        self.stroke_weight = s.stroke_weight;
+        self.text_size = s.text_size;
+        self.text_align = s.text_align;
+        self.rect_mode = s.rect_mode;
+        self.ellipse_mode = s.ellipse_mode;
+        self.angle_mode = s.angle_mode;
+        self.color_mode = s.color_mode;
+        self.color_max = s.color_max;
+        self.blend = s.blend;
+        self.shadow = s.shadow;
+    }
+
+    /// p5.js の `push()`。座標変換と見た目の両方を退避する。
+    ///
+    /// Processing の `pushMatrix()` とは違い、塗りや線の色まで戻る。
+    /// `drawingContext` の影も同じ扱い (p5 は canvas の `save()` を呼ぶ)。
+    pub fn push_all(&mut self) {
+        self.push_matrix();
+        self.push_style();
+    }
+
+    /// p5.js の `pop()`。
+    pub fn pop_all(&mut self) {
+        self.pop_style();
+        self.pop_matrix();
+    }
 
     pub fn push_matrix(&mut self) {
         match &mut self.space {
@@ -1138,6 +1480,15 @@ impl Graphics {
             [x1 - nx, y1 - ny],
             c,
         );
+        // 端は丸。Processing も p5.js も既定はこれで、太い線を折り返す作品では
+        // 継ぎ目が角ばるかどうかがそのまま見た目に出る。
+        //
+        // 細い線には付けない。見た目は変わらないのに、三角形だけ 3 倍に増える。
+        // 線を何万本も引く作品があるので、ここは効く。
+        if hw * self.scale_hint() > 1.5 {
+            self.round_cap(x1, y1, hw, c);
+            self.round_cap(x2, y2, hw, c);
+        }
     }
 
     // ---- 自由な形 (設計書 §14.2) ----------------------------------------
@@ -1292,6 +1643,26 @@ impl Graphics {
     // ---- 文字 (設計書 §14.2) --------------------------------------------
 
     /// `textSize()`。
+    /// `text()` に線を付けるか。p5.js は付け、Processing は付けない。
+    ///
+    /// 作品を読み込んだ側が方言に合わせて決める。
+    pub fn set_text_stroked(&mut self, on: bool) {
+        self.text_stroked = on;
+    }
+
+    /// `background()` を一度も呼ばない作品の下地。
+    ///
+    /// Processing は灰 204 で始まる。p5.js のキャンバスは透明で、後ろの
+    /// ページの白が透ける。半透明を塗り重ねる作品では、この下地の色が
+    /// そのまま画面全体の明るさになる。
+    pub fn set_default_background(&mut self, color: Color) {
+        self.default_background = color;
+    }
+
+    pub fn default_background(&self) -> Color {
+        self.default_background
+    }
+
     pub fn set_text_size(&mut self, size: f32) {
         self.text_size = size.max(0.0);
     }
@@ -1318,6 +1689,26 @@ impl Graphics {
 
     /// `text(str, x, y)`。フォントが無いときは何も描かない。
     pub fn text(&mut self, text: &str, x: f32, y: f32) {
+        // p5.js の text() は塗りと線の両方を使う。線が付かないと、白い地に
+        // 白い字を置く作品が消えてしまう。Processing の text() は塗りだけ。
+        if self.text_stroked
+            && let Some(edge) = self.stroke
+            && self.stroke_weight > 0.0
+        {
+            // 字形は塗りつぶした形しか持っていないので、少しずつずらして
+            // 重ね、はみ出したぶんを縁にする。
+            let r = self.stroke_weight * 0.5;
+            let fill = self.fill.take();
+            self.fill = Some(edge);
+            self.text_stroked = false;
+            for i in 0..8 {
+                let a = std::f32::consts::TAU * i as f32 / 8.0;
+                self.text(text, x + a.cos() * r, y + a.sin() * r);
+            }
+            self.text_stroked = true;
+            self.fill = fill;
+        }
+
         let Some(color) = self.fill else { return };
         if !self.font.has_font() || self.text_size <= 0.0 {
             return;
@@ -1446,10 +1837,38 @@ impl Graphics {
         }
     }
 
+    /// `point()`。太さのぶんの丸い点。
+    ///
+    /// Processing も p5.js も、点は線の端と同じ丸で描く。四角で描くと、
+    /// 太い点をばらまく作品が角ばって見える。
     pub fn point(&mut self, x: f32, y: f32) {
         let Some(c) = self.stroke else { return };
         let hw = (self.stroke_weight * 0.5).max(0.5 / self.scale_hint());
-        self.quad([x - hw, y - hw], [x + hw, y - hw], [x + hw, y + hw], [x - hw, y + hw], c);
+        self.round_cap(x, y, hw, c);
+    }
+
+    /// 中心と半径で丸を 1 つ。線の端と `point()` に使う。
+    ///
+    /// 半径が小さいうちは四角で済ませる。1px の点に扇形を張るのは無駄だし、
+    /// 見た目も変わらない。
+    fn round_cap(&mut self, x: f32, y: f32, r: f32, c: Color) {
+        let screen = r * self.scale_hint();
+        if screen <= 0.75 {
+            self.quad([x - r, y - r], [x + r, y - r], [x + r, y + r], [x - r, y + r], c);
+            return;
+        }
+        let steps = ((screen * 2.0) as usize).clamp(6, 32);
+        let center = self.pt(x, y);
+        let base = self.list.vertices.len() as u32;
+        self.push_vertex(center, c);
+        for i in 0..steps {
+            let a = std::f32::consts::TAU * i as f32 / steps as f32;
+            let p = self.pt(x + a.cos() * r, y + a.sin() * r);
+            self.push_vertex(p, c);
+        }
+        for i in 0..steps as u32 {
+            self.emit(&[base, base + 1 + i, base + 1 + (i + 1) % steps as u32]);
+        }
     }
 
     // ---- 内部ヘルパ -----------------------------------------------------
@@ -1934,5 +2353,53 @@ mod tests {
         g.begin_frame(100.0, 100.0);
         g.scale(4.0, 4.0);
         assert!((g.matrix.scale_hint() - 4.0).abs() < 1e-4);
+    }
+
+    /// キャンバスの当てはめ方。
+    ///
+    /// 正方形の作品を横長の画面へ出すとき、収めれば左右が余り、埋めれば
+    /// 大きく映るかわりに上下が切れる。
+    #[test]
+    fn a_square_canvas_can_be_contained_or_cover_the_view() {
+        let corners = |fit: CanvasFit| {
+            let mut g = Graphics::new();
+            g.set_fit(fit);
+            g.begin_frame(200.0, 100.0);
+            g.set_canvas(100.0, 100.0);
+            g.no_stroke();
+            g.fill(255.0);
+            // キャンバスいっぱいの四角。表示領域のどこへ来るかを見る。
+            g.rect(0.0, 0.0, 100.0, 100.0);
+            let v = &g.draw_list().vertices;
+            let x: Vec<f32> = v.iter().map(|p| p.pos[0]).collect();
+            let y: Vec<f32> = v.iter().map(|p| p.pos[1]).collect();
+            (
+                x.iter().cloned().fold(f32::MAX, f32::min),
+                y.iter().cloned().fold(f32::MAX, f32::min),
+                x.iter().cloned().fold(f32::MIN, f32::max),
+                y.iter().cloned().fold(f32::MIN, f32::max),
+            )
+        };
+
+        // 収める: 高さに合わせて等倍。左右に 50px ずつ余白。
+        assert_eq!(corners(CanvasFit::Contain), (50.0, 0.0, 150.0, 100.0));
+        // 埋める: 幅に合わせて 2 倍。上下が 50px ずつはみ出す。
+        assert_eq!(corners(CanvasFit::Cover), (0.0, -50.0, 200.0, 150.0));
+    }
+
+    /// 当てはめ方を変えたら、その場で効く。
+    ///
+    /// 設定画面で切り替えたときに次の `size()` まで待たされない。
+    #[test]
+    fn changing_the_fit_takes_effect_at_once() {
+        let mut g = Graphics::new();
+        g.begin_frame(200.0, 100.0);
+        g.set_canvas(100.0, 100.0);
+        g.no_stroke();
+        g.set_fit(CanvasFit::Cover);
+        g.fill(255.0);
+        g.rect(0.0, 0.0, 100.0, 100.0);
+        let right = g.draw_list().vertices.iter().map(|p| p.pos[0]).fold(f32::MIN, f32::max);
+        assert_eq!(right, 200.0, "切り替えが次のフレームまで効いていません");
     }
 }

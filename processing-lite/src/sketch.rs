@@ -36,6 +36,24 @@ pub trait Sketch {
     fn error(&self) -> Option<&str> {
         None
     }
+
+    /// 直前のフレームで実行した命令数。数えていなければ 0。
+    fn instructions_last_frame(&self) -> u64 {
+        0
+    }
+
+    /// `draw()` を持たず、`setup()` の中だけで絵を描く作品か。
+    ///
+    /// 静的モード (設計書 §14.1) の作品はこれになる。画面を捨てたら
+    /// `setup()` から動かし直さないと何も出ない。
+    fn draws_once(&self) -> bool {
+        false
+    }
+
+    /// 最初から動かし直せるようにする。乱数の数列も戻す。
+    ///
+    /// 同じ作品を二度見たときに同じ絵が出るように。サムネイルとも揃う。
+    fn restart(&mut self) {}
 }
 
 /// ギャラリーに並ぶ作品のメタ情報。
@@ -69,6 +87,22 @@ impl LoadedSketch {
 
     pub fn new(info: SketchInfo, sketch: Box<dyn Sketch>) -> Self {
         Self { info, sketch, initialized: false }
+    }
+
+    /// 直前のフレームで実行した命令数。
+    pub fn instructions_last_frame(&self) -> u64 {
+        self.sketch.instructions_last_frame()
+    }
+
+    /// `draw()` を持たない作品か。
+    pub fn draws_once(&self) -> bool {
+        self.sketch.draws_once()
+    }
+
+    /// 最初から動かし直す。次の [`LoadedSketch::step`] で `setup()` から。
+    pub fn restart(&mut self) {
+        self.sketch.restart();
+        self.initialized = false;
     }
 
     /// 1 フレーム進める。初回だけ `setup()` を挟む。

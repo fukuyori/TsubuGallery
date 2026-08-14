@@ -19,6 +19,7 @@ pub fn capture_all(
     width: u32,
     height: u32,
     default_frame: u64,
+    fit: tsubu_renderer::CanvasFit,
 ) -> Result<Vec<String>, String> {
     let instance = wgpu::Instance::default();
 
@@ -42,6 +43,7 @@ pub fn capture_all(
     let mut batch = BatchRenderer::new(&device);
     let mut capturer = Capturer::new();
     let mut graphics = Graphics::new();
+    graphics.set_fit(fit);
     graphics.font.set_fonts(crate::fonts::load_sketch_fonts());
     let mut written = Vec::new();
 
