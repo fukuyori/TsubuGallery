@@ -598,8 +598,11 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
 黒地に重ねて表示するので、見た目は変わらない。
 
 `beginShape()` は凹んだ形も正しく塗る。頂点を扇状に分けると凹みが外へはみ出す
-ので、耳切り法で三角形に分けている。`arc()` は塗ると扇形、線は弧そのもの
-(Processing の既定 `OPEN` と同じ)。
+ので、耳切り法で三角形に分けている。
+
+`arc()` は 7 つめで閉じ方を取る。どちらの本家とも同じ。`OPEN` (既定) と
+`CHORD` は両端を弦で結んで塗り、`PIE` は中心まで閉じて扇形にする。線は
+`OPEN` が弧だけ、`CHORD` は弦も、`PIE` は中心までの 2 本も引く。
 
 `angleMode(DEGREES)` は三角関数・逆関数・`rotate()`・`arc()` のすべてに効く。
 `rectMode()` は `rect()` と `square()` に、`ellipseMode()` は `ellipse()` に効く
@@ -720,7 +723,8 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | 制御 | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
 | リテラル | 10 進、16 進 (`0xFF6B35`)、指数 |
 | その他 | セミコロン省略 (ASI)、数値の真偽値化 (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` (`WEBGL` も) `colorMode(HSB)` `blendMode(ADD)`、3 引数 `noise`、`drawingContext` の影 |
+| p5 API | `createCanvas` (`WEBGL` も) `colorMode(HSB)`、3 引数 `noise`、`drawingContext` の影 |
+| 合成方法 | `blendMode()` に `BLEND ADD MULTIPLY SCREEN DIFFERENCE EXCLUSION DARKEST LIGHTEST SUBTRACT REPLACE` |
 | `push` / `pop` | p5 と同じく座標変換**と**見た目の両方を退避する。座標変換だけの Processing の `pushMatrix()` とは違う。`pushStyle()` / `popStyle()` もある |
 | `Math` | `Math.sin` などを組み込みへ読み替える。`Math.PI` `Math.hypot` `Math.sign` も。`S=Math.sin` と値で持てる |
 | 可変長 | `min()` / `max()` は引数をいくつでも取る |
@@ -750,6 +754,11 @@ p5.js の `text()` は塗りだけでなく線でも描く。Processing の `tex
 だけ。この違いは効いてくる — 白いカードに白い字を置くと、縁が無ければ何も
 見えない。字形は塗りつぶした形しか持っていないので、縁は小さな円の上に 8 回
 線の色で重ねて作り、そのうえに塗りを置いている。
+
+`DIFFERENCE` は近似。本来は `|下 - 上|` だが、GPU の合成は引き算の符号を
+選べないので、除外 (`上 + 下 - 2*上*下`) で代える。どちらかが 0 か 1 なら
+完全に一致する — 白い図形を黒地に重ねるいつもの使い方はここに入る — し、
+中間調でも近い。`EXCLUSION` は同じ式で、そちらは厳密。
 
 ### 影 (`drawingContext`)
 
@@ -910,7 +919,7 @@ MSAA は 4x。Viewer もサムネイルも同じ `BatchRenderer` を通る。
 ## 開発
 
 ```sh
-cargo test --workspace      # 473 tests
+cargo test --workspace      # 476 tests
 cargo clippy --workspace --all-targets
 ```
 

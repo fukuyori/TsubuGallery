@@ -636,8 +636,12 @@ through and hide a sketch drawn in white lines. On screen it is composited over
 black anyway, so it looks the same.
 
 `beginShape()` fills concave shapes correctly. Fanning the vertices would spill
-outside the notches, so ear clipping is used instead. A filled `arc()` is a pie
-wedge and its stroke is the arc itself (Processing's default `OPEN`).
+outside the notches, so ear clipping is used instead.
+
+`arc()` takes a seventh argument for how the shape closes, as in both originals.
+`OPEN` (the default) and `CHORD` close the fill with a straight chord between
+the two ends; `PIE` closes it through the centre, giving a wedge. The stroke is
+the arc alone for `OPEN`, plus the chord for `CHORD`, plus both radii for `PIE`.
 
 `angleMode(DEGREES)` applies to the trigonometric functions, their inverses,
 `rotate()` and `arc()` alike. `rectMode()` affects `rect()` and `square()`, and
@@ -772,7 +776,8 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | Control flow | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
 | Literals | decimal, hex (`0xFF6B35`), exponent |
 | Other | Semicolon insertion (ASI), numbers as truthiness (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` (including `WEBGL`) `colorMode(HSB)` `blendMode(ADD)`, 3-argument `noise`, `drawingContext` shadows |
+| p5 API | `createCanvas` (including `WEBGL`) `colorMode(HSB)`, 3-argument `noise`, `drawingContext` shadows |
+| Blend modes | `blendMode()` takes `BLEND ADD MULTIPLY SCREEN DIFFERENCE EXCLUSION DARKEST LIGHTEST SUBTRACT REPLACE` |
 | `push` / `pop` | Save and restore the transform **and** the style, as p5 does — unlike Processing's `pushMatrix()`, which is the transform alone. `pushStyle()` / `popStyle()` are there too |
 | `Math` | `Math.sin` and friends map to the built-ins. `Math.PI` `Math.hypot` `Math.sign` too, and `S=Math.sin` works as a value |
 | Variadic | `min()` and `max()` take any number of arguments |
@@ -803,6 +808,12 @@ paints with the fill alone. The difference matters: a white glyph on a white
 card is invisible without its outline. Glyphs are stored as filled coverage, so
 the outline is faked by drawing the glyph eight times around a small circle in
 the stroke colour before the fill goes on top.
+
+`DIFFERENCE` is an approximation. It is `|below - above|`, and GPU blending
+cannot pick the sign of a subtraction, so exclusion (`above + below -
+2·above·below`) stands in for it. The two agree exactly wherever either operand
+is 0 or 1 — which covers the usual case of white shapes over black — and are
+close in between. `EXCLUSION` gets the same formula, exactly this time.
 
 ### Shadows (`drawingContext`)
 
@@ -973,7 +984,7 @@ it.
 ## Development
 
 ```sh
-cargo test --workspace      # 473 tests
+cargo test --workspace      # 476 tests
 cargo clippy --workspace --all-targets
 ```
 

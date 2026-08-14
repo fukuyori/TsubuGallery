@@ -343,6 +343,42 @@ fn blend_state(blend: BlendMode) -> wgpu::BlendState {
             },
             alpha,
         },
+        // 差分と除外。`上 + 下 - 2*上*下`。どちらかが 0 か 1 なら
+        // 差分そのものになる。白い図形を黒地に重ねる使い方はここに入る。
+        BlendMode::Difference | BlendMode::Exclusion => BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::OneMinusDst,
+                dst_factor: BlendFactor::OneMinusSrc,
+                operation: BlendOperation::Add,
+            },
+            alpha,
+        },
+        BlendMode::Darkest => BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Min,
+            },
+            alpha,
+        },
+        BlendMode::Lightest => BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Max,
+            },
+            alpha,
+        },
+        // 下から上を引く。
+        BlendMode::Subtract => BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::SrcAlpha,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::ReverseSubtract,
+            },
+            alpha,
+        },
+        BlendMode::Replace => BlendState::REPLACE,
         // 乗算。重なるほど暗くなる。
         BlendMode::Multiply => BlendState {
             color: BlendComponent {

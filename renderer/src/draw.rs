@@ -60,6 +60,22 @@ pub enum BlendMode {
     Multiply,
     /// スクリーン。加算より穏やかに明るくなる。
     Screen,
+    /// 差分。重なると反転する。白の上では色が抜ける。
+    ///
+    /// 本来は `|下 - 上|` だが、GPU の合成は引き算の符号を選べない。
+    /// ここでは除外 (`上 + 下 - 2*上*下`) で近似する。どちらかが 0 か 1 の
+    /// ときは完全に一致し、白い図形を黒地に重ねる使い方では差が出ない。
+    Difference,
+    /// 除外。差分より中間調がやわらかい。
+    Exclusion,
+    /// 暗いほうを採る。
+    Darkest,
+    /// 明るいほうを採る。
+    Lightest,
+    /// 下から上を引く。
+    Subtract,
+    /// 混ぜずに置き換える。
+    Replace,
 }
 
 /// 同じ合成方法で続けて描ける区間。
@@ -160,6 +176,20 @@ impl ShapeMode {
         let (x, y, w, h) = self.to_corner(a, b, c, d);
         (x + w * 0.5, y + h * 0.5, w, h)
     }
+}
+
+/// `arc()` の閉じ方。
+///
+/// 塗りの形と縁取りの引き方が変わる。既定は `Open`。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArcMode {
+    /// 弦で閉じて塗り、縁は弧だけ。Processing と p5.js の既定。
+    #[default]
+    Open,
+    /// 弦で閉じて塗り、縁も弦まで引く。
+    Chord,
+    /// 中心まで閉じて扇形に塗り、縁も中心まで引く。
+    Pie,
 }
 
 /// `textAlign()` の指定。
@@ -1764,6 +1794,21 @@ impl Graphics {
     ///
     /// 塗りは中心を含む扇形、線は弧そのもの。Processing の既定 (`OPEN`) と同じ。
     pub fn arc(&mut self, cx: f32, cy: f32, w: f32, h: f32, start: f32, stop: f32) {
+        self.arc_mode(cx, cy, w, h, start, stop, ArcMode::default());
+    }
+
+    /// 閉じ方を指定する `arc()`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn arc_mode(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        w: f32,
+        h: f32,
+        start: f32,
+        stop: f32,
+        mode: ArcMode,
+    ) {
         let (rx, ry) = (w * 0.5, h * 0.5);
         let sweep = stop - start;
         if sweep.abs() < 1e-6 {
@@ -1780,9 +1825,11 @@ impl Graphics {
         };
 
         if let Some(c) = self.fill {
-            let center = self.pt(cx, cy);
+            // 扇形は中心から、弦で閉じるものは弧の始点から扇状に張る。
+            let hub = if mode == ArcMode::Pie { (cx, cy) } else { at(0) };
+            let hub = self.pt(hub.0, hub.1);
             let base = self.list.vertices.len() as u32;
-            self.push_vertex(center, c);
+            self.push_vertex(hub, c);
             for i in 0..=segments {
                 let (x, y) = at(i);
                 let p = self.pt(x, y);
@@ -1799,6 +1846,16 @@ impl Graphics {
                 let next = at(i);
                 self.line(prev.0, prev.1, next.0, next.1);
                 prev = next;
+            }
+            // 閉じ方によって、戻りの線が要る。
+            let (first, last) = (at(0), at(segments));
+            match mode {
+                ArcMode::Open => {}
+                ArcMode::Chord => self.line(last.0, last.1, first.0, first.1),
+                ArcMode::Pie => {
+                    self.line(last.0, last.1, cx, cy);
+                    self.line(cx, cy, first.0, first.1);
+                }
             }
         }
     }

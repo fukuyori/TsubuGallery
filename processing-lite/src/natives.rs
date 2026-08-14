@@ -62,6 +62,19 @@ pub enum BuiltinVar {
     P2d,
     P3d,
     WebGl,
+
+    // arc() の閉じ方。
+    Open,
+    Chord,
+    Pie,
+
+    // blendMode() の追加ぶん。
+    Difference,
+    Exclusion,
+    Darkest,
+    Lightest,
+    Subtract,
+    Replace,
 }
 
 impl BuiltinVar {
@@ -107,6 +120,15 @@ impl BuiltinVar {
             "P2D" | "JAVA2D" => BuiltinVar::P2d,
             "P3D" | "OPENGL" => BuiltinVar::P3d,
             "WEBGL" => BuiltinVar::WebGl,
+            "OPEN" => BuiltinVar::Open,
+            "CHORD" => BuiltinVar::Chord,
+            "PIE" => BuiltinVar::Pie,
+            "DIFFERENCE" => BuiltinVar::Difference,
+            "EXCLUSION" => BuiltinVar::Exclusion,
+            "DARKEST" => BuiltinVar::Darkest,
+            "LIGHTEST" => BuiltinVar::Lightest,
+            "SUBTRACT" => BuiltinVar::Subtract,
+            "REPLACE" => BuiltinVar::Replace,
             _ => return None,
         })
     }
@@ -159,6 +181,15 @@ impl BuiltinVar {
             BuiltinVar::P2d => Value::Float(40.0),
             BuiltinVar::P3d => Value::Float(41.0),
             BuiltinVar::WebGl => Value::Float(42.0),
+            BuiltinVar::Open => Value::Float(50.0),
+            BuiltinVar::Chord => Value::Float(51.0),
+            BuiltinVar::Pie => Value::Float(52.0),
+            BuiltinVar::Difference => Value::Float(4.0),
+            BuiltinVar::Exclusion => Value::Float(5.0),
+            BuiltinVar::Darkest => Value::Float(6.0),
+            BuiltinVar::Lightest => Value::Float(7.0),
+            BuiltinVar::Subtract => Value::Float(8.0),
+            BuiltinVar::Replace => Value::Float(9.0),
         }
     }
 }
@@ -337,7 +368,7 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "beginShape", native: Native::BeginShape, arities: &[0, 1] },
     Signature { name: "vertex", native: Native::Vertex, arities: &[2] },
     Signature { name: "endShape", native: Native::EndShape, arities: &[0, 1] },
-    Signature { name: "arc", native: Native::Arc, arities: &[6] },
+    Signature { name: "arc", native: Native::Arc, arities: &[6, 7] },
     Signature { name: "quad", native: Native::Quad, arities: &[8] },
     Signature { name: "square", native: Native::SquareShape, arities: &[3] },
     Signature { name: "resetMatrix", native: Native::ResetMatrix, arities: &[0] },
@@ -596,8 +627,13 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
             Value::Void
         }
         Native::Arc => {
-            // 角度は angleMode() の単位。
-            g.arc(f(0), f(1), f(2), f(3), g.to_radians(f(4)), g.to_radians(f(5)));
+            // 7 つめは閉じ方。角度は angleMode() の単位。
+            let mode = match args.get(6).map(|v| v.as_f32() as i32) {
+                Some(51) => tsubu_renderer::ArcMode::Chord,
+                Some(52) => tsubu_renderer::ArcMode::Pie,
+                _ => tsubu_renderer::ArcMode::Open,
+            };
+            g.arc_mode(f(0), f(1), f(2), f(3), g.to_radians(f(4)), g.to_radians(f(5)), mode);
             Value::Void
         }
         Native::Quad => {
@@ -939,6 +975,12 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
                 1 => tsubu_renderer::BlendMode::Add,
                 2 => tsubu_renderer::BlendMode::Multiply,
                 3 => tsubu_renderer::BlendMode::Screen,
+                4 => tsubu_renderer::BlendMode::Difference,
+                5 => tsubu_renderer::BlendMode::Exclusion,
+                6 => tsubu_renderer::BlendMode::Darkest,
+                7 => tsubu_renderer::BlendMode::Lightest,
+                8 => tsubu_renderer::BlendMode::Subtract,
+                9 => tsubu_renderer::BlendMode::Replace,
                 _ => tsubu_renderer::BlendMode::Blend,
             };
             g.blend_mode(mode);

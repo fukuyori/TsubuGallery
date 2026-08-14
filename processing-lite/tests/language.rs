@@ -1488,3 +1488,78 @@ fn creating_the_canvas_again_puts_the_paint_back_to_default() {
     let quiet = triangles("draw=_=>{createCanvas(400,400);noStroke();rect(0,0,50,50)}");
     assert_eq!(quiet, 2, "線が復活しています");
 }
+
+
+/// `arc()` の 7 つめは閉じ方。
+///
+/// `PIE` は中心まで閉じた扇形、`CHORD` と `OPEN` は弦で閉じる。
+/// 受け取らずに弾いていたので、`arc(..., PIE)` と書いた作品が動かなかった。
+#[test]
+fn arc_takes_a_closing_mode() {
+    // 浅く切ると差がはっきりする。90 度では外接矩形が同じになってしまう。
+    let shallow = "createCanvas(400,400);noStroke();fill(255);\
+                   arc(200,200,200,200,0,PI/6";
+    // 扇形は中心を含む。弦で閉じたものは含まない。
+    let pie = bounds(&format!("draw=_=>{{{shallow},PIE)}}"));
+    let chord = bounds(&format!("draw=_=>{{{shallow},CHORD)}}"));
+    assert!((pie.0 - 200.0).abs() < 0.5, "扇形が中心から始まりません: {pie:?}");
+    assert!(chord.0 > pie.0 + 50.0, "弦で閉じていません: {chord:?} と {pie:?}");
+
+    // 既定は OPEN。弦で閉じるのは Processing も p5.js も同じ。
+    let plain = bounds(&format!("draw=_=>{{{shallow})}}"));
+    assert_eq!(plain, chord, "既定が OPEN ではありません");
+
+    // 縁取りは閉じ方で変わる。扇形は中心まで引く。
+    let outline = |mode: &str| {
+        triangles(&format!(
+            "draw=_=>{{createCanvas(400,400);noFill();stroke(0);strokeWeight(2);\
+             arc(200,200,200,200,0,PI/6{mode})}}"
+        ))
+    };
+    assert!(outline(",PIE") > outline("") + 2, "扇形の縁が閉じていません");
+    assert!(outline(",CHORD") > outline(""), "弦の縁が引かれていません");
+}
+
+/// `blendMode()` の指定がひととおり通る。
+///
+/// `DIFFERENCE` は定数として存在せず、暗黙のグローバル (0 = BLEND) に
+/// なっていた。差分合成だけで成り立っている作品が真っ白になる。
+#[test]
+fn every_blend_mode_has_its_own_value() {
+    let names =
+        ["BLEND", "ADD", "MULTIPLY", "SCREEN", "DIFFERENCE", "EXCLUSION", "DARKEST", "LIGHTEST",
+         "SUBTRACT", "REPLACE"];
+    let value_of = |name: &str| {
+        let (_, _, x1, _) = bounds(&format!(
+            "draw=_=>{{createCanvas(400,400);noStroke();rect(0,0,10+{name},10)}}"
+        ));
+        x1
+    };
+    let mut seen: Vec<f32> = Vec::new();
+    for name in names {
+        let v = value_of(name);
+        assert!(!seen.contains(&v), "{name} が他と同じ値です ({v})");
+        seen.push(v);
+    }
+}
+
+/// 差分合成が、重なったところを反転させる。
+#[test]
+fn difference_inverts_where_shapes_overlap() {
+    let src = "draw=_=>{createCanvas(400,400);background(0);noStroke();fill(255);\
+               blendMode(DIFFERENCE);rect(0,0,200,200);rect(100,0,200,200)}";
+    let mut s = VmSketch::compile(src, 1).expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    g.frame_count = 1;
+    s.draw(&mut g);
+    assert!(s.error().is_none(), "{:?}", s.error());
+    // 通常合成とは別の区間になる。同じなら指定が効いていない。
+    let modes: Vec<_> = g.draw_list().batches.iter().map(|b| b.blend).collect();
+    assert!(
+        modes.contains(&tsubu_renderer::BlendMode::Difference),
+        "差分の区間がありません: {modes:?}"
+    );
+}
