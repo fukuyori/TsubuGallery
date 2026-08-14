@@ -249,6 +249,7 @@ cargo run --release -- --capture-all ./out
 |---|---|
 | `TSUBU_DATA_DIR` | データ領域の差し替え |
 | `TSUBU_START_SCREEN` | 起動画面を上書き: `gallery` / `viewer` / `editor` / `settings`。指定が無ければ設定に従う |
+| `RUST_LOG` | ログの詳しさ。既定は `warn` (下記「ログ」) |
 
 ```text
 <data>/
@@ -257,6 +258,55 @@ cargo run --release -- --capture-all ./out
   library.sqlite3    メタデータ (お気に入り / タグ / コレクション / 設定)
   instance.lock      起動中の印 (下記「多重起動の防止」)
   cache/             Bytecode キャッシュ (未使用。下記「保留した最適化」を参照)
+  logs/tsubu.log     実行ログ (下記「ログ」)
+```
+
+### ログ
+
+`<data>/logs/tsubu.log` に追記する。同じ内容は標準エラーにも出る。
+1 MiB を超えたら `tsubu.log.1` … `tsubu.log.3` へ送り、古いものから捨てる。
+消してもアプリの動作には影響しない。
+
+読み手は人だけではない。**エディタや外部のエージェントが読んで直しどころを
+見つけられる**ように、1 行 1 件で、行の頭は必ず `時刻 レベル 種別` にしてある。
+作品にまつわる行 (種別 `sketch`) は続けて `鍵=値` を並べる。値に空白や引用符が
+混じるときだけ `"..."` で囲む。
+
+```text
+2026-08-14T12:23:27.795Z ERROR sketch id=broken phase=compile dialect=p5.js line=2 column=7 file=D:/data/sketches/broken.pde message="rotate は引数 1 か 2 か 4 個で呼びます (3 個渡されています)"
+```
+
+| 鍵 | 意味 |
+|---|---|
+| `id` | 作品の識別子。`.pde` のファイル名 |
+| `phase` | `compile` (読み込み時) / `run` (再生中に止まった) / `thumbnail` (サムネイル生成) |
+| `dialect` | `Processing` か `p5.js`。コンパイルに失敗した行では見立て |
+| `line` `column` | ソースの位置。分かるときだけ |
+| `file` | 直す対象のファイル。区切りは `/` に寄せてある |
+| `message` | 理由 |
+
+時刻は UTC。パスの区切りが `/` なのは、`\` を書くと引用符の中でエスケープが
+要って読みにくいため。Windows でもそのまま開ける。
+
+**レベルの決め方**は、読む側が `ERROR` だけ拾えば済むように分けてある。
+
+| レベル | 意味 |
+|---|---|
+| `error` | 求められたことができなかった。**直す先がある** — 作品のコンパイル失敗、実行の打ち切り、サムネイルを作れない、作品ファイルを読めない |
+| `warn` | 続けられるが本来の姿ではない。フォントが無い、設定を読めず既定値にした |
+| `info` | 順調な進行。**既定では出さない** |
+| `debug` | 追跡用の細かい記録 |
+
+既定が `warn` なので、ログに何か出ていればそれは手を入れる先がある。
+順調なときの記録まで見たいときは `RUST_LOG=info`、作品ごとの命令数まで
+見たいときは `RUST_LOG=tsubugallery=debug` を指定する。
+
+パニックも `ERROR panic` として残る。落ちた場所と理由がファイルに残るので、
+再現しなくても追える。
+
+```sh
+# 直す先だけを拾う
+grep 'ERROR sketch' ~/.local/share/TsubuGallery/logs/tsubu.log
 ```
 
 ### 多重起動の防止
@@ -581,7 +631,7 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
 | 分類 | 関数・変数 |
 |---|---|
 | 画面 | `size()` / `createCanvas()` (宣言したキャンバスを表示領域へ収める)、`width` `height` `frameCount` |
-| 基本描画 | `point() line() rect() ellipse() circle() triangle()`。`rect()` は 5 個目以降の引数で角が丸くなる。`point()` は丸い点で、太い線の端も丸い (どちらの本家もそう) |
+| 基本描画 | `point() line() rect() ellipse() circle() triangle()`。`rect()` は 5 個目以降の引数で角が丸くなり、p5 のように高さを省いた `rect(x, y, w)` は正方形になる。`point()` は丸い点で、太い線の端も丸い (どちらの本家もそう) |
 | 自由な形 | `beginShape() vertex() curveVertex() bezierVertex() endShape()`、`arc() quad() bezier() curve()` |
 | 文字 | `text() textSize() textAlign() textWidth()`、`str() nf()`、`String.fromCodePoint()` |
 | 形の指定 | `rectMode() ellipseMode() angleMode()`、`square()` |
@@ -589,8 +639,9 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
 | 進行 | `noLoop() loop()` `clear()` |
 | 色の値 | `color() lerpColor()`、成分の取り出し `red() green() blue() alpha() hue() saturation() brightness()` |
 | 色と線 | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
-| 座標変換 | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`。`translate()` と `scale()` は 3 引数、`rotate()` は `(角度, x, y, z)` も取る |
-| 3D | `size(w, h, P3D)`、`box() sphere() sphereDetail() rotateX() rotateY() rotateZ() lights() noLights()` |
+| 座標変換 | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`。`translate()` と `scale()` は 3 引数、`rotate()` は `(角度, x, y, z)` と、p5 の `(角度, [x, y, z])` も取る |
+| 3D | `size(w, h, P3D)`、`box() sphere() sphereDetail() rotateX() rotateY() rotateZ() lights() noLights()`。`sphere(半径, 経度, 緯度)` はその 1 個だけ分割数を変える |
+| 受けるだけ | `smooth() noSmooth()`。Renderer は常になめらかに描くので、指示は受けて何もしない |
 | 数学 | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
 | 乱数・ノイズ | `random() randomGaussian() noise() randomSeed() millis()` |
 | 入力 | `mouseX` `mouseY` `mousePressed` `keyPressed` |
@@ -644,8 +695,18 @@ Processing の規則を当てると、`stroke(500)` が `0x0001F4` — alpha が
 原点まわりに立体を並べる書き方がそのまま使える。つぶやき系の作品はこれを
 よく使う。
 
-`lights()` は Processing の既定と同じで、環境光 128 と、視点から差す平行光
-128。陰影は面ごとに 1 色。`box()` / `sphere()` は `noStroke()` を書かない限り
+明かりは `lights()` / `ambientLight()` / `directionalLight()` / `pointLight()` の
+4 つ。**色はそのまま面に乗る** ので、黄色い明かりを当てた白い立体は黄色くなる。
+`lights()` は Processing の既定と同じで、環境光 128 と、視点から差す平行光 128
+(= `ambientLight(128)` と `directionalLight(128, 128, 128, 0, 0, -1)` を置くのと
+同じ)。1 フレームに置けるのは 5 つまでで、p5.js と同じく毎フレーム消える。
+
+明かりの位置と向きに掛けるのは**カメラの分だけ**で、作品が積んだ `rotate()` や
+`translate()` は掛けない。p5.js の陰影のシェーダが `uViewMatrix` しか掛けない
+のに合わせている — 作品は `rotate()` してから明かりを置くことがあり、そこで
+一緒に回ると、当たってほしい面が真っ暗になる。
+
+陰影は面ごとに 1 色。`box()` / `sphere()` は `noStroke()` を書かない限り
 いまの線の色で縁取られ、隠れる稜線は深度バッファが落とす。
 
 変換はすべて CPU で行い、2D と同じ三角形の列にして GPU へ渡す。GPU 側に
@@ -669,8 +730,8 @@ Processing の規則を当てると、`stroke(500)` が `0x0001F4` — alpha が
 
 まだ無いもの: `camera()`、`perspective()`、`ortho()`、立方体と球以外の立体
 (`cylinder` / `cone` / `torus` / `plane`)、`texture()`、`z` つきの `vertex()`。
-`ambientLight()` / `directionalLight()` / `pointLight()` は受け付けるが、
-既定の明かりを点けるだけ。
+明かりの当たり方は面ごとの
+1 色で、距離による減衰と鏡面反射 (`specularMaterial()`) は無い。
 
 ### 文字 (`text()`)
 
@@ -732,7 +793,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 
 | 分類 | 対応 |
 |---|---|
-| 変数 | 型を書かない代入、`let` / `const` / `var` |
+| 変数 | 型を書かない代入、`let` / `const` / `var` (その関数の中で閉じていればローカル) |
 | 関数 | アロー関数 (`=>` `⇒` `→`)、`function` 宣言、関数を値として持つ (`B=blendMode`) |
 | 配列 | リテラル、添字の読み書き、`length`、`Array(n)` |
 | 配列のメソッド | `push pop shift unshift at slice splice concat reverse fill flat join indexOf lastIndexOf includes sort keys entries`、コールバックを取る `map forEach filter flatMap find findLast findIndex some every reduce` |
@@ -740,7 +801,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | 文字列 | `"..."` `'...'` `` `...` ``、`${}` の展開、`+` で連結、`length charAt substring indexOf split repeat toUpperCase toLowerCase trim` |
 | 分割代入 | `[a,b]=[1,2]`、入れ替え `[a,b]=[b,a]`、`[o.x,v[0]]=…` |
 | オブジェクト | リテラル (`{x:1}`、略記 `{x}`)、`p.x` の読み書き、`p.x+=v` |
-| 式 | 代入は式、カンマ演算子、三項演算子、短絡評価、`++` / `--` の前置と後置 |
+| 式 | 代入は式、カンマ演算子、三項演算子、短絡評価、`++` / `--` の前置と後置、べき乗 `**` と `**=` (`*` より強く、右から結ぶ) |
 | ビット演算 | `& \| ^ ~ << >> >>>`、複合代入 (`&=` `<<=` など) |
 | 制御 | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
 | リテラル | 10 進、16 進 (`0xFF6B35`)、指数 |
@@ -750,6 +811,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | `push` / `pop` | p5 と同じく座標変換**と**見た目の両方を退避する。座標変換だけの Processing の `pushMatrix()` とは違う。`pushStyle()` / `popStyle()` もある |
 | `Math` | `Math.sin` などを組み込みへ読み替える。`Math.PI` `Math.hypot` `Math.sign` も。`S=Math.sin` と値で持てる |
 | 可変長 | `min()` / `max()` は引数をいくつでも取る |
+| 余った引数 | JavaScript と同じく捨てる。ただし評価はする — `noFill(H = W / 2)` のように、呼び出しを代入の置き場にする書き方があるため |
 
 数値は JavaScript と同じく 1 種類だけ (`7/2` は `3.5`)。
 
@@ -767,7 +829,9 @@ for(i of [...Array(120).keys()]){
 ### まだできないこと
 
 - **クロージャ**。アロー関数から見えるのは自分の引数とグローバルだけ。
-  関数の引数以外はすべてグローバルとして扱う
+  ローカルになるのは引数と、その関数の中だけで使われる `let` / `const` / `var`。
+  入れ子の関数や別の関数から触られる名前はグローバルのままなので、
+  「グローバルをクロージャの代わりに使う」書き方はそのまま動く
 - `class` / `new` / `async`
 
 対応していないものを使っているコードは、エディタが行番号つきで挙げる (下記)。
@@ -823,6 +887,13 @@ VM は 1 フレームあたりの命令数に上限を持つ (既定 2,000 万�
 Viewer へ制御を返し、3 フレーム続けて超えた作品は停止してエラー表示に切り替える。
 無限ループを書いても Gallery 全体は止まらない。
 
+**図形の量にも上限がある。** 1 フレームぶんの三角形は GPU の 1 本のバッファに
+載せるので、載る量は決まっている (頂点 4,194,304 個 = `point()` なら約 105 万個)。
+命令数が予算内でも、これは超えられる — 例えば 1 フレームに `circle()` を 5 万個
+描くと届く (円 1 個で 82 頂点)。超えたらそこから先の図形は捨て、作品を止めて
+理由を出す。**上限を超えた確保を GPU へ頼まない**のが肝心で、頼むとデバイスが
+検証で撥ね、wgpu の既定の扱いではプロセスごと落ちる。
+
 ### エラー表示
 
 コンパイルエラーは位置つきで出る。
@@ -851,7 +922,7 @@ cargo build --release
 
 ```sh
 tsubugallery --help       # 使い方
-tsubugallery --version    # 版
+tsubugallery --version    # 版とログの置き場
 ```
 
 ### 対応プラットフォーム

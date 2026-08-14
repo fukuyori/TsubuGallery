@@ -274,7 +274,16 @@ pub enum Native {
     SphereDetail,
     Lights,
     NoLights,
+    /// `ambientLight()`。向きに関係なく乗る明かり。
+    AmbientLight,
+    /// `directionalLight()`。色と、光の進む向き。
+    DirectionalLight,
+    /// `pointLight()`。色と、光源の位置。
+    PointLight,
     PopMatrix,
+
+    /// 呼べるが何もしない API。描画結果が変わらないものをここへ集める。
+    Ignored,
 
     Sin,
     Cos,
@@ -362,7 +371,8 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "strokeWeight", native: Native::StrokeWeight, arities: &[1] },
     Signature { name: "point", native: Native::Point, arities: &[2] },
     Signature { name: "line", native: Native::Line, arities: &[4] },
-    Signature { name: "rect", native: Native::Rect, arities: &[4, 5, 6, 7, 8] },
+    // 3 個なら正方形。p5.js の rect() は高さを省ける。
+    Signature { name: "rect", native: Native::Rect, arities: &[3, 4, 5, 6, 7, 8] },
     Signature { name: "ellipse", native: Native::Ellipse, arities: &[4] },
     Signature { name: "circle", native: Native::Circle, arities: &[3] },
     Signature { name: "triangle", native: Native::Triangle, arities: &[6] },
@@ -394,21 +404,27 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "brightness", native: Native::Brightness, arities: &[1] },
     Signature { name: "randomGaussian", native: Native::RandomGaussian, arities: &[0] },
     Signature { name: "translate", native: Native::Translate, arities: &[2, 3] },
-    Signature { name: "rotate", native: Native::Rotate, arities: &[1, 4] },
+    // 2 個目は軸。p5.js は `rotate(a, [x, y, z])` のように配列で渡す。
+    Signature { name: "rotate", native: Native::Rotate, arities: &[1, 2, 4] },
     Signature { name: "scale", native: Native::Scale, arities: &[1, 2, 3] },
     Signature { name: "box", native: Native::Box, arities: &[1, 3] },
-    Signature { name: "sphere", native: Native::Sphere, arities: &[1] },
+    // 2 個目からは分割数。p5.js の sphere(r, detailX, detailY)。
+    Signature { name: "sphere", native: Native::Sphere, arities: &[1, 2, 3] },
     Signature { name: "sphereDetail", native: Native::SphereDetail, arities: &[1, 2] },
     Signature { name: "rotateX", native: Native::RotateX, arities: &[1] },
     Signature { name: "rotateY", native: Native::RotateY, arities: &[1] },
     Signature { name: "rotateZ", native: Native::RotateZ, arities: &[1] },
     Signature { name: "lights", native: Native::Lights, arities: &[0] },
     Signature { name: "noLights", native: Native::NoLights, arities: &[0] },
-    // 光源を細かく置く API。向きや色までは再現しないので、既定の明かりを
-    // 点けるだけにする。真っ黒よりは作品の姿が伝わる。
-    Signature { name: "ambientLight", native: Native::Lights, arities: &[1, 2, 3, 4] },
-    Signature { name: "directionalLight", native: Native::Lights, arities: &[6] },
-    Signature { name: "pointLight", native: Native::Lights, arities: &[6] },
+    // 縁のなめらかさは Renderer が常に入れているので、指示は受けるだけ。
+    // 無いと「関数ではない」で止まってしまう。
+    Signature { name: "smooth", native: Native::Ignored, arities: &[0, 1] },
+    Signature { name: "noSmooth", native: Native::Ignored, arities: &[0] },
+    // 光源。色は成分ごとに面へ掛かるので、黄色い明かりは黄色く出る。
+    // 4 引数は「色ひとつ + 向き / 位置」の書き方 (p5.js)。
+    Signature { name: "ambientLight", native: Native::AmbientLight, arities: &[1, 2, 3, 4] },
+    Signature { name: "directionalLight", native: Native::DirectionalLight, arities: &[4, 6] },
+    Signature { name: "pointLight", native: Native::PointLight, arities: &[4, 6] },
     Signature { name: "pushMatrix", native: Native::PushMatrix, arities: &[0] },
     Signature { name: "popMatrix", native: Native::PopMatrix, arities: &[0] },
     Signature { name: "sin", native: Native::Sin, arities: &[1] },
@@ -487,6 +503,25 @@ pub fn accepted_arities(name: &str) -> Vec<u8> {
         .find(|s| s.name == name)
         .map(|s| s.arities.to_vec())
         .unwrap_or_default()
+}
+
+/// 回転軸として渡された値を `[x, y, z]` にする。
+///
+/// p5.js の `rotate(angle, axis)` は配列でも `createVector()` でも受ける。
+/// 軸にならない値 (数値など) は `None` を返し、呼び出し側が 2D の回転に倒す。
+fn axis_of(value: &Value) -> Option<[f32; 3]> {
+    match value {
+        Value::Array(items) => {
+            let items = items.borrow();
+            Some([
+                items.first().map_or(0.0, Value::as_f32),
+                items.get(1).map_or(0.0, Value::as_f32),
+                items.get(2).map_or(0.0, Value::as_f32),
+            ])
+        }
+        Value::Vector(v) => Some(*v.borrow()),
+        _ => None,
+    }
 }
 
 /// `drawingContext` の影が乗る図形。
@@ -597,6 +632,8 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
             // 5 個目からは角の丸み。1 個なら 4 隅とも同じ、4 個なら左上から
             // 時計回りに指定する (Processing と同じ)。
             match args.len() {
+                // 高さを省いたら幅と同じ。p5.js の rect(x, y, w) と同じ扱い。
+                3 => g.rect(f(0), f(1), f(2), f(2)),
                 0..=4 => g.rect(f(0), f(1), f(2), f(3)),
                 5 => g.rect_rounded(f(0), f(1), f(2), f(3), [f(4); 4]),
                 6 => g.rect_rounded(f(0), f(1), f(2), f(3), [f(4), f(5), f(5), f(5)]),
@@ -733,8 +770,11 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
         }
         Native::Rotate => {
             // 4 引数は軸まわりの回転。Processing の 3D の書き方。
+            // 2 引数なら 2 つめが軸そのもの。p5.js はこちらで書く。
             if args.len() >= 4 {
                 g.rotate_axis(g.to_radians(f(0)), [f(1), f(2), f(3)]);
+            } else if let Some(axis) = args.get(1).and_then(axis_of) {
+                g.rotate_axis(g.to_radians(f(0)), axis);
             } else {
                 g.rotate(g.to_radians(f(0)));
             }
@@ -766,7 +806,18 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
             Value::Void
         }
         Native::Sphere => {
-            g.sphere(f(0));
+            // 分割数を渡されたら、その 1 個ぶんだけ細かさを変える。
+            // sphereDetail() と同じ状態を触るので、描いたあとに戻す。
+            if args.len() >= 2 {
+                let previous = g.sphere_detail();
+                let longitude = f(1) as usize;
+                let latitude = if args.len() >= 3 { f(2) as usize } else { longitude };
+                g.set_sphere_detail(longitude, latitude);
+                g.sphere(f(0));
+                g.set_sphere_detail(previous.0, previous.1);
+            } else {
+                g.sphere(f(0));
+            }
             Value::Void
         }
         Native::SphereDetail => {
@@ -796,6 +847,24 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
             g.lights(false);
             Value::Void
         }
+        Native::AmbientLight => {
+            g.ambient_light(resolve_color(args, g));
+            Value::Void
+        }
+        // 色のあとに向き (または位置) が 3 つ。色を 1 つで書いた 4 引数の
+        // 書き方もあるので、後ろから 3 つを向きとして取る。
+        Native::DirectionalLight | Native::PointLight => {
+            let split = args.len().saturating_sub(3);
+            let color = resolve_color(&args[..split], g);
+            let vector = [f(split), f(split + 1), f(split + 2)];
+            if native == Native::DirectionalLight {
+                g.directional_light(color, vector);
+            } else {
+                g.point_light(color, vector);
+            }
+            Value::Void
+        }
+        Native::Ignored => Value::Void,
         Native::PushMatrix => {
             g.push_matrix();
             Value::Void
@@ -1182,7 +1251,7 @@ mod tests {
         assert_eq!(resolve("fill", 1), Some(Native::Fill));
         assert_eq!(resolve("fill", 3), Some(Native::Fill));
         assert_eq!(resolve("fill", 5), None);
-        assert_eq!(resolve("rect", 3), None);
+        assert_eq!(resolve("rect", 2), None);
         assert_eq!(resolve("rect", 4), Some(Native::Rect));
     }
 
@@ -1195,7 +1264,7 @@ mod tests {
     #[test]
     fn known_name_with_wrong_arity_can_be_reported() {
         assert!(is_native("rect"));
-        assert_eq!(accepted_arities("rect"), vec![4, 5, 6, 7, 8]);
+        assert_eq!(accepted_arities("rect"), vec![3, 4, 5, 6, 7, 8]);
         assert_eq!(accepted_arities("fill"), vec![1, 2, 3, 4]);
     }
 

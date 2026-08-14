@@ -7,6 +7,8 @@ pub enum BinaryOp {
     Mul,
     Div,
     Rem,
+    /// `**`。右結合で、単項演算より強く結びつく。
+    Pow,
     Eq,
     Ne,
     Lt,
@@ -44,6 +46,7 @@ pub enum AssignOp {
     Mul,
     Div,
     Rem,
+    Pow,
     BitAnd,
     BitOr,
     BitXor,
@@ -177,6 +180,9 @@ pub enum Stmt {
     /// `for (v of xs)`。配列を順に回す。
     ForOf {
         name: String,
+        /// `let` / `const` / `var` が書いてあったか。書いてなければ、
+        /// JavaScript と同じくグローバルへの代入になる。
+        declared: bool,
         iterable: Expr,
         body: Box<Stmt>,
     },

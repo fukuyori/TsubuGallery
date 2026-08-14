@@ -2,9 +2,14 @@
 //!
 //! # 変数のあつかい
 //!
-//! **関数の引数だけがローカルで、それ以外はすべてグローバル**にする。
-//! つぶやき作品はほぼ全部の変数をグローバルに置くので、これで足りる。
-//! 代わりに、アロー関数はローカル変数を閉じ込められない (クロージャは無い)。
+//! **引数と、その関数の中でしか使われない `let` / `const` / `var` がローカル**で、
+//! それ以外はすべてグローバル。つぶやき作品はほぼ全部の変数をグローバルに置くので、
+//! これで足りる。クロージャは無い — 入れ子の関数から見えるのは、自分の引数と
+//! グローバルだけ。
+//!
+//! `let` をローカルにするのは、再帰する関数がループ変数を壊さないようにするため。
+//! 外から見える名前 (入れ子の関数や別の関数が触る名前) はグローバルのままにして、
+//! 「グローバルをクロージャの代わりに使う」書き方が動き続けるようにしている。
 //!
 //! # `draw` の呼び方
 //!
@@ -24,6 +29,29 @@ pub fn compile(script: &Script) -> Result<Program, CompileError> {
     Compiler::new().run(script)
 }
 
+/// 途中の値の置き場。関数の中はローカル、トップレベルはグローバル。
+#[derive(Clone, Copy)]
+enum Slot {
+    Local(u16),
+    Global(u16),
+}
+
+impl Slot {
+    fn load(self) -> Op {
+        match self {
+            Slot::Local(slot) => Op::LoadLocal(slot),
+            Slot::Global(slot) => Op::LoadGlobal(slot),
+        }
+    }
+
+    fn store(self) -> Op {
+        match self {
+            Slot::Local(slot) => Op::StoreLocal(slot),
+            Slot::Global(slot) => Op::StoreGlobal(slot),
+        }
+    }
+}
+
 /// コンパイル中のループ 1 つ分。飛び先はループを組み終えてから埋める。
 #[derive(Default)]
 struct LoopCtx {
@@ -36,8 +64,15 @@ struct Compiler {
     keys: HashMap<String, u16>,
     functions: Vec<CompiledFunction>,
 
-    /// 現在の関数の引数。ここに無い名前はグローバル。
+    /// 現在の関数のローカル。引数と、この関数の外に出ない `let` が入る。
+    /// ここに無い名前はグローバル。
     params: HashMap<String, u16>,
+    /// 名前がプログラム全体で何回現れるか。ローカルにしてよいかの判定に使う。
+    uses: HashMap<String, usize>,
+    /// いま関数の本体を組んでいるか。トップレベルなら false。
+    in_function: bool,
+    /// 現在の関数が使うローカルの数。隠し変数を足すたびに増える。
+    local_slots: u16,
     code: Vec<Op>,
     /// 文字列リテラルの表。
     strings: Vec<String>,
@@ -54,6 +89,9 @@ impl Compiler {
             keys: HashMap::new(),
             functions: Vec::new(),
             params: HashMap::new(),
+            uses: HashMap::new(),
+            in_function: false,
+            local_slots: 0,
             code: Vec::new(),
             strings: Vec::new(),
             hidden: 0,
@@ -62,6 +100,12 @@ impl Compiler {
     }
 
     fn run(mut self, script: &Script) -> Result<Program, CompileError> {
+        // どの名前がどこまで届いているかを先に数える。関数の中で閉じている
+        // 名前だけをローカルにするための材料。
+        let mut names = Names::new(true);
+        names.statements(&script.statements);
+        self.uses = names.counts;
+
         // トップレベルは 1 つの関数にまとめ、グローバルの初期化として実行する。
         self.params.clear();
         self.code = Vec::new();
@@ -104,12 +148,21 @@ impl Compiler {
     }
 
     fn push_function(&mut self, name: &str, arity: u8, code: Vec<Op>) -> u16 {
+        self.push_function_with_locals(name, arity, arity as u16, code)
+    }
+
+    fn push_function_with_locals(
+        &mut self,
+        name: &str,
+        arity: u8,
+        local_count: u16,
+        code: Vec<Op>,
+    ) -> u16 {
         let index = self.functions.len() as u16;
         self.functions.push(CompiledFunction {
             name: name.to_string(),
             arity,
-            // 引数だけがローカル。
-            local_count: arity as u16,
+            local_count,
             return_type: crate::ast::Type::Float,
             code,
         });
@@ -132,6 +185,20 @@ impl Compiler {
         self.hidden += 1;
         let name = format!("${what}.{}", self.hidden);
         self.global(&name)
+    }
+
+    /// 途中の値を置く場所を 1 つ作る。
+    ///
+    /// 関数の中ならローカルに取る。グローバルに置くと、退避してから読み直す
+    /// までのあいだに同じ関数が再帰で入ってきたとき、上書きされてしまう
+    /// (`for...of` の走査位置がその典型)。
+    fn hidden_slot(&mut self, what: &str) -> Slot {
+        if !self.in_function {
+            return Slot::Global(self.hidden_global(what));
+        }
+        let slot = self.local_slots;
+        self.local_slots += 1;
+        Slot::Local(slot)
     }
 
     fn global(&mut self, name: &str) -> u16 {
@@ -272,27 +339,28 @@ impl Compiler {
             }
 
             // `for (v of xs)`。配列と添字を隠し変数に置いて回す。
-            Stmt::ForOf { name, iterable, body } => {
-                let array = self.hidden_global("forof.array");
-                let index = self.hidden_global("forof.index");
-                let value = self.global(name);
+            Stmt::ForOf { name, declared: _, iterable, body } => {
+                let array = self.hidden_slot("forof.array");
+                let index = self.hidden_slot("forof.index");
 
                 self.expression(iterable)?;
-                self.code.push(Op::StoreGlobal(array));
+                self.code.push(array.store());
                 self.code.push(Op::ConstInt(0));
-                self.code.push(Op::StoreGlobal(index));
+                self.code.push(index.store());
 
                 let start = self.code.len() as u32;
-                self.code.push(Op::LoadGlobal(index));
-                self.code.push(Op::LoadGlobal(array));
+                self.code.push(index.load());
+                self.code.push(array.load());
                 self.code.push(Op::ArrayLen);
                 self.code.push(Op::Lt);
                 let jump_end = self.emit_jump(Op::JumpIfFalse(0));
 
-                self.code.push(Op::LoadGlobal(array));
-                self.code.push(Op::LoadGlobal(index));
+                self.code.push(array.load());
+                self.code.push(index.load());
                 self.code.push(Op::GetIndex);
-                self.code.push(Op::StoreGlobal(value));
+                // `let` で作られた名前ならローカルへ書く。store() が見分ける。
+                self.store(name);
+                self.code.push(Op::Pop);
 
                 self.loops.push(LoopCtx::default());
                 self.statement(body)?;
@@ -302,10 +370,10 @@ impl Compiler {
                 for at in ctx.continues {
                     self.patch_to(at, update_at);
                 }
-                self.code.push(Op::LoadGlobal(index));
+                self.code.push(index.load());
                 self.code.push(Op::ConstInt(1));
                 self.code.push(Op::Add);
-                self.code.push(Op::StoreGlobal(index));
+                self.code.push(index.store());
                 self.code.push(Op::Jump(start));
 
                 self.patch(jump_end);
@@ -344,9 +412,18 @@ impl Compiler {
     ) -> Result<u16, CompileError> {
         let outer_params = std::mem::take(&mut self.params);
         let outer_code = std::mem::take(&mut self.code);
+        let outer_slots = self.local_slots;
+        let outer_in_function = self.in_function;
+        self.in_function = true;
 
         for (slot, param) in params.iter().enumerate() {
             self.params.insert(param.name.clone(), slot as u16);
+        }
+
+        self.local_slots = params.len() as u16;
+        for local in self.locals_of(body) {
+            self.params.insert(local, self.local_slots);
+            self.local_slots += 1;
         }
 
         // 既定値。渡されなかった引数だけを埋める。
@@ -369,7 +446,32 @@ impl Compiler {
 
         let code = std::mem::replace(&mut self.code, outer_code);
         self.params = outer_params;
-        Ok(self.push_function(name, params.len() as u8, code))
+        let slots = std::mem::replace(&mut self.local_slots, outer_slots);
+        self.in_function = outer_in_function;
+        Ok(self.push_function_with_locals(name, params.len() as u8, slots, code))
+    }
+
+    /// この関数の中で閉じている宣言を選ぶ。
+    ///
+    /// `let` で作られ、かつプログラムのどこからも外から触られない名前だけを
+    /// ローカルにする。判定はとても素朴で、名前の現れる回数が「この関数が
+    /// 自分で書いている数」と「プログラム全体の数」で一致するかどうかを見る。
+    /// 入れ子の関数から見えている名前は数が合わないので、グローバルに残る。
+    fn locals_of(&self, body: &[Stmt]) -> Vec<String> {
+        let mut names = Names::new(false);
+        names.statements(body);
+
+        let mut locals = Vec::new();
+        for name in &names.declared {
+            // 引数と同じ名前は引数のまま。JavaScript でも同じ変数になる。
+            if self.params.contains_key(name) || locals.contains(name) {
+                continue;
+            }
+            if names.counts.get(name) == self.uses.get(name) {
+                locals.push(name.clone());
+            }
+        }
+        locals
     }
 
     // ---- 式 -------------------------------------------------------------
@@ -510,20 +612,20 @@ impl Compiler {
             // `[a, b] = xs`。右辺を隠し変数へ置いてから、順に取り出す。
             // `[a, b] = [b, a]` の入れ替えが期待どおり動くのはこのため。
             Target::Destructure(targets) => {
-                let temp = self.hidden_global("destructure");
+                let temp = self.hidden_slot("destructure");
                 self.expression(value)?;
-                self.code.push(Op::StoreGlobal(temp));
+                self.code.push(temp.store());
 
                 for (index, slot) in targets.iter().enumerate() {
                     let Some(slot) = slot else { continue };
-                    self.code.push(Op::LoadGlobal(temp));
+                    self.code.push(temp.load());
                     self.code.push(Op::ConstInt(index as i32));
                     self.code.push(Op::GetIndex);
                     self.store_top(slot)?;
                     self.code.push(Op::Pop);
                 }
                 // 代入は式なので、右辺そのものを残す。
-                self.code.push(Op::LoadGlobal(temp));
+                self.code.push(temp.load());
             }
             Target::Var(name) => {
                 if op != AssignOp::Set {
@@ -569,6 +671,7 @@ impl Compiler {
             AssignOp::Mul => BinaryOp::Mul,
             AssignOp::Div => BinaryOp::Div,
             AssignOp::Rem => BinaryOp::Rem,
+            AssignOp::Pow => BinaryOp::Pow,
             AssignOp::BitAnd => BinaryOp::BitAnd,
             AssignOp::BitOr => BinaryOp::BitOr,
             AssignOp::BitXor => BinaryOp::BitXor,
@@ -602,18 +705,18 @@ impl Compiler {
                 let key = self.key(name);
                 // `[obj, value]` の順に積む必要があるので、値を退避してから
                 // オブジェクトを積み直す。
-                let temp = self.hidden_global("store");
-                self.code.push(Op::StoreGlobal(temp));
+                let temp = self.hidden_slot("store");
+                self.code.push(temp.store());
                 self.expression(object)?;
-                self.code.push(Op::LoadGlobal(temp));
+                self.code.push(temp.load());
                 self.code.push(Op::SetProp(key));
             }
             Target::Index(object, index) => {
-                let temp = self.hidden_global("store");
-                self.code.push(Op::StoreGlobal(temp));
+                let temp = self.hidden_slot("store");
+                self.code.push(temp.store());
                 self.expression(object)?;
                 self.expression(index)?;
-                self.code.push(Op::LoadGlobal(temp));
+                self.code.push(temp.load());
                 self.code.push(Op::SetIndex);
             }
             Target::Destructure(_) => {
@@ -769,6 +872,22 @@ impl Compiler {
                 self.code.push(Op::CallNative(native, argc));
                 return Ok(());
             }
+            // 多すぎる引数は捨てる。JavaScript は余った引数を無視するので、
+            // `noFill(H = W / 2)` のように、呼び出しを代入の置き場にした
+            // つぶやき作品がある。評価だけはしないと代入が起きない。
+            if let Some(&max) = natives::accepted_arities(name).iter().max()
+                && argc > max
+                && let Some(native) = natives::resolve(name, max)
+            {
+                for arg in args {
+                    self.expression(arg)?;
+                }
+                for _ in max..argc {
+                    self.code.push(Op::Pop);
+                }
+                self.code.push(Op::CallNative(native, max));
+                return Ok(());
+            }
             if natives::is_native(name) && !natives::is_variadic(name) {
                 let arities = natives::accepted_arities(name)
                     .iter()
@@ -878,6 +997,7 @@ fn binary_op(op: BinaryOp) -> Op {
         BinaryOp::Mul => Op::Mul,
         BinaryOp::Div => Op::Div,
         BinaryOp::Rem => Op::Rem,
+        BinaryOp::Pow => Op::Pow,
         BinaryOp::Eq => Op::Eq,
         BinaryOp::Ne => Op::Ne,
         BinaryOp::Lt => Op::Lt,
@@ -893,3 +1013,189 @@ fn binary_op(op: BinaryOp) -> Op {
     }
 }
 
+
+/// 構文木に現れる名前を数える。
+///
+/// 同じ数え方で「関数が自分で書いている数」と「プログラム全体の数」を取り、
+/// 一致すればその名前はその関数の外へ出ていない、と判断する
+/// ([`Compiler::locals_of`])。両者で数え方がずれると判断も狂うので、
+/// 歩き方の違いは [`Self::into_functions`] だけにしてある。
+struct Names {
+    /// 入れ子の関数の中まで数えるか。
+    into_functions: bool,
+    counts: HashMap<String, usize>,
+    /// `let` / `const` / `var` と `for (let v of ...)` が作った名前。
+    declared: Vec<String>,
+}
+
+impl Names {
+    fn new(into_functions: bool) -> Self {
+        Self { into_functions, counts: HashMap::new(), declared: Vec::new() }
+    }
+
+    fn see(&mut self, name: &str) {
+        *self.counts.entry(name.to_string()).or_default() += 1;
+    }
+
+    fn declare(&mut self, name: &str) {
+        self.see(name);
+        self.declared.push(name.to_string());
+    }
+
+    fn statements(&mut self, statements: &[Stmt]) {
+        for stmt in statements {
+            self.statement(stmt);
+        }
+    }
+
+    fn statement(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Expr(e) => self.expression(e),
+            Stmt::Declare(bindings) => {
+                for (name, value) in bindings {
+                    self.declare(name);
+                    if let Some(value) = value {
+                        self.expression(value);
+                    }
+                }
+            }
+            Stmt::If { cond, then, otherwise } => {
+                self.expression(cond);
+                self.statement(then);
+                if let Some(otherwise) = otherwise {
+                    self.statement(otherwise);
+                }
+            }
+            Stmt::For { init, cond, update, body } => {
+                if let Some(init) = init {
+                    self.statement(init);
+                }
+                if let Some(cond) = cond {
+                    self.expression(cond);
+                }
+                if let Some(update) = update {
+                    self.expression(update);
+                }
+                self.statement(body);
+            }
+            Stmt::While { cond, body } => {
+                self.expression(cond);
+                self.statement(body);
+            }
+            Stmt::ForOf { name, declared, iterable, body } => {
+                // `for (v of xs)` は宣言ではない。JavaScript でもグローバルを書く。
+                if *declared {
+                    self.declare(name);
+                } else {
+                    self.see(name);
+                }
+                self.expression(iterable);
+                self.statement(body);
+            }
+            Stmt::Return(value) => {
+                if let Some(value) = value {
+                    self.expression(value);
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Block(statements) => self.statements(statements),
+            Stmt::Function { name, params, body, .. } => {
+                // 名前はこの場所へ書かれる。中身は入れ子の関数のもの。
+                self.see(name);
+                if self.into_functions {
+                    self.function(params, body);
+                }
+            }
+        }
+    }
+
+    fn function(&mut self, params: &[Param], body: &[Stmt]) {
+        for param in params {
+            if let Some(default) = &param.default {
+                self.expression(default);
+            }
+        }
+        self.statements(body);
+    }
+
+    fn expression(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Str(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Undefined => {}
+            Expr::Ident(name) => self.see(name),
+            Expr::Array(items) => {
+                for item in items {
+                    match item {
+                        ArrayElem::Item(e) | ArrayElem::Spread(e) => self.expression(e),
+                    }
+                }
+            }
+            Expr::Object(fields) => {
+                for (_, value) in fields {
+                    self.expression(value);
+                }
+            }
+            Expr::Arrow { params, body } => {
+                if self.into_functions {
+                    match body.as_ref() {
+                        ArrowBody::Expr(e) => {
+                            for param in params {
+                                if let Some(default) = &param.default {
+                                    self.expression(default);
+                                }
+                            }
+                            self.expression(e);
+                        }
+                        ArrowBody::Block(statements) => self.function(params, statements),
+                    }
+                }
+            }
+            Expr::Unary { operand, .. } => self.expression(operand),
+            Expr::Binary { lhs, rhs, .. } | Expr::Logical { lhs, rhs, .. } => {
+                self.expression(lhs);
+                self.expression(rhs);
+            }
+            Expr::Ternary { cond, then, other } => {
+                self.expression(cond);
+                self.expression(then);
+                self.expression(other);
+            }
+            Expr::Assign { target, value, .. } => {
+                self.target(target);
+                self.expression(value);
+            }
+            Expr::Update { target, .. } => self.target(target),
+            Expr::Spread(e) => self.expression(e),
+            Expr::Call { callee, args, .. } => {
+                self.expression(callee);
+                for arg in args {
+                    self.expression(arg);
+                }
+            }
+            Expr::Member { object, .. } => self.expression(object),
+            Expr::Index { object, index } => {
+                self.expression(object);
+                self.expression(index);
+            }
+            Expr::Sequence(a, b) => {
+                self.expression(a);
+                self.expression(b);
+            }
+        }
+    }
+
+    fn target(&mut self, target: &Target) {
+        match target {
+            Target::Var(name) => self.see(name),
+            Target::Member(object, _) => self.expression(object),
+            Target::Index(object, index) => {
+                self.expression(object);
+                self.expression(index);
+            }
+            Target::Destructure(parts) => {
+                for part in parts.iter().flatten() {
+                    self.target(part);
+                }
+            }
+        }
+    }
+}

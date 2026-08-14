@@ -1165,8 +1165,8 @@ mod tests {
         let e = compile_source("void draw() { circle(1, 2); }").unwrap_err();
         assert!(e.message.contains("引数 3 個"), "{e}");
         // 受け付ける数が複数あるときは全部並べる。
-        let e = compile_source("void draw() { rect(1, 2, 3); }").unwrap_err();
-        assert!(e.message.contains("4 か 5"), "{e}");
+        let e = compile_source("void draw() { rect(1, 2); }").unwrap_err();
+        assert!(e.message.contains("3 か 4 か 5"), "{e}");
     }
 
     #[test]

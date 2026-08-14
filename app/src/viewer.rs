@@ -10,6 +10,11 @@ use tsubu_processing_lite::LoadedSketch;
 use tsubu_processing_lite::math::Rng;
 use tsubu_renderer::{Graphics, GraphicsState};
 
+/// 1 フレームに積める図形の量を超えた作品に出す理由。
+///
+/// 予算超過 (§21.1) と同じく、作品を止めたうえで Gallery と Viewer に出す。
+pub const TOO_MUCH_GEOMETRY: &str = "1 フレームの図形が多すぎて描けません";
+
 /// 直近フレームの計測値。HUD が表示する。
 /// 表示用にならす。跳ねた値をそのまま出すと読めない。
 fn smooth(previous: f32, now: f32) -> f32 {
@@ -56,6 +61,10 @@ pub struct Viewer {
     /// 地の色ごと失われる。`background()` を最初の 1 回だけ呼ぶ書き方が
     /// あり、そういう作品は白い画面のままになる。
     leans_on_the_canvas: Vec<bool>,
+    /// 1 フレームに積める量を超えた作品。描き切れないので止める。
+    ///
+    /// 作品ごとの状態なので、他の並びと同じ添字で持つ。
+    overflowed: Vec<bool>,
 
     paused: bool,
     started: Instant,
@@ -85,9 +94,11 @@ impl Viewer {
         let frame_counts = vec![0; sketches.len()];
         let states = vec![None; sketches.len()];
         let leans_on_the_canvas = vec![false; sketches.len()];
+        let overflowed = vec![false; sketches.len()];
         Self {
             states,
             leans_on_the_canvas,
+            overflowed,
             sketches,
             frame_counts,
             current: 0,
@@ -176,6 +187,9 @@ impl Viewer {
 
     /// 表示中の作品が動かない理由。コンパイルエラーや実行の打ち切り。
     pub fn current_error(&self) -> Option<&str> {
+        if self.overflowed.get(self.current).copied().unwrap_or(false) {
+            return Some(TOO_MUCH_GEOMETRY);
+        }
         self.sketches.get(self.current)?.error()
     }
 
@@ -191,6 +205,7 @@ impl Viewer {
             self.frame_counts[index] = 0;
             self.states[index] = None;
             self.leans_on_the_canvas[index] = false;
+            self.overflowed[index] = false;
             self.graphics.reset_state();
             self.epoch += 1;
         }
@@ -203,6 +218,7 @@ impl Viewer {
         self.frame_counts.insert(index, 0);
         self.states.insert(index, None);
         self.leans_on_the_canvas.insert(index, false);
+        self.overflowed.insert(index, false);
         if self.current >= index && self.sketches.len() > 1 {
             self.current += 1;
         }
@@ -217,6 +233,7 @@ impl Viewer {
         self.frame_counts.remove(index);
         self.states.remove(index);
         self.leans_on_the_canvas.remove(index);
+        self.overflowed.remove(index);
         // 手前が消えたぶん、見ている位置も繰り上がる。そうしないと
         // 別の作品を指したままになる。
         if self.current > index {
@@ -308,9 +325,15 @@ impl Viewer {
         }
         // `noLoop()` を呼んだ作品はフレームを進めない。進めると、乱数を使う
         // 作品が毎フレーム違う絵になってちらつく。
+        // 描き切れなかった作品はもう進めない。同じ絵をもう一度組み立てても
+        // 同じところで溢れるだけで、そのあいだ画面は止まったままになる。
+        let stopped = self.overflowed[self.current];
         let looping = self.graphics.is_looping();
-        if !self.paused && due && looping {
+        if !self.paused && due && looping && !stopped {
             self.frame_counts[self.current] += 1;
+        }
+        if stopped {
+            return Some(&self.graphics);
         }
 
         self.graphics.begin_frame(width, height);
@@ -319,6 +342,9 @@ impl Viewer {
         let t0 = Instant::now();
         self.sketches[self.current].step(&mut self.graphics);
         self.sketch_ms = smooth(self.sketch_ms, t0.elapsed().as_secs_f32() * 1000.0);
+        if self.graphics.overflowed() {
+            self.overflowed[self.current] = true;
+        }
         // このフレームで画面を消したか。消していなければ、次に開くときは
         // 頭から動かし直す。
         self.leans_on_the_canvas[self.current] = self.graphics.draw_list().clear.is_none();
@@ -336,6 +362,9 @@ impl Viewer {
             self.frame_counts[self.current] = 0;
             self.states[self.current] = None;
             self.leans_on_the_canvas[self.current] = false;
+            // 動かし直せば、また最初のフレームから試させる。作品を直したあとの
+            // 保存でここへ来るので、直っていれば動く。
+            self.overflowed[self.current] = false;
             self.graphics.reset_state();
             self.epoch += 1;
         }
@@ -445,6 +474,11 @@ impl Viewer {
             self.warmup.begin_frame(self.width, self.height);
             self.warmup.frame_count = self.frame_counts[index];
             self.sketches[index].step(&mut self.warmup);
+            // 温めた時点で溢れたなら、開いても描けない。ここで印を付けておくと、
+            // 切り替えた瞬間に理由が出る。
+            if self.warmup.overflowed() {
+                self.overflowed[index] = true;
+            }
             // `setup()` はこの warmup 側で走ってしまった。結果を預けておかないと、
             // 切り替えたときに `setup()` で決めた色や大きさが失われる。
             self.states[index] = Some(self.warmup.state());

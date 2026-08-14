@@ -248,6 +248,12 @@ impl Vm {
                         self.stack.push(arithmetic(op, lhs, rhs)?);
                     }
                 }
+                // `**` は整数どうしでも浮動小数で返す。JavaScript と同じ。
+                Op::Pow => {
+                    let rhs = self.pop()?;
+                    let lhs = self.pop()?;
+                    self.stack.push(Value::Float(lhs.as_f32().powf(rhs.as_f32())));
+                }
                 Op::Neg => {
                     let v = self.pop()?;
                     self.stack.push(match v {

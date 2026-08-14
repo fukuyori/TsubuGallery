@@ -5,6 +5,8 @@
 
 use tsubu_core::DataPaths;
 use tsubu_core::library;
+use tsubu_core::logging::{self, SketchRecord};
+use tsubu_processing_lite::dialect;
 use tsubu_processing_lite::examples::{DEFAULT_THUMBNAIL_FRAME, EXAMPLES};
 use tsubu_processing_lite::{BrokenSketch, LoadedSketch, SketchInfo, VmSketch};
 
@@ -68,10 +70,10 @@ pub fn load_library(paths: &DataPaths) -> Vec<LoadOutcome> {
 
             match source.instantiate() {
                 Ok(sketch) => {
-                    log::debug!(
-                        "{} をコンパイルしました ({} 命令)",
-                        info.id,
-                        sketch.instruction_count()
+                    logging::sketch_loaded(
+                        &info.id,
+                        Some(sketch.dialect().label()),
+                        sketch.instruction_count(),
                     );
                     LoadOutcome {
                         sketch: LoadedSketch::new(info, Box::new(sketch)),
@@ -80,8 +82,19 @@ pub fn load_library(paths: &DataPaths) -> Vec<LoadOutcome> {
                     }
                 }
                 Err(e) => {
+                    // 動かない作品は利用者にとってのエラー。直す先 (ファイルと
+                    // 行・列) まで残して、あとから機械でも拾えるようにする。
+                    logging::sketch_failed(&SketchRecord {
+                        id: &info.id,
+                        phase: "compile",
+                        // 通らなかったので方言は決まっていない。見立てを書く。
+                        dialect: Some(dialect::diagnose(&source.text).dialect.label()),
+                        line: Some(e.line),
+                        column: Some(e.column),
+                        source: Some(&file.path),
+                        message: &e.message,
+                    });
                     let message = e.to_string();
-                    log::warn!("{} をコンパイルできません: {message}", info.id);
                     LoadOutcome {
                         sketch: LoadedSketch::new(
                             info,

@@ -261,7 +261,7 @@ impl Parser {
             let iterable = self.expression()?;
             self.expect(&Tok::RParen, "`)`")?;
             let body = Box::new(self.statement()?);
-            return Ok(Stmt::ForOf { name, iterable, body });
+            return Ok(Stmt::ForOf { name, declared, iterable, body });
         }
 
         let init = if self.eat(&Tok::Semicolon) {
@@ -311,6 +311,7 @@ impl Parser {
             Tok::PlusAssign => AssignOp::Add,
             Tok::MinusAssign => AssignOp::Sub,
             Tok::StarAssign => AssignOp::Mul,
+            Tok::StarStarAssign => AssignOp::Pow,
             Tok::SlashAssign => AssignOp::Div,
             Tok::PercentAssign => AssignOp::Rem,
             Tok::AmpAssign => AssignOp::BitAnd,
@@ -450,7 +451,7 @@ impl Parser {
     }
 
     fn multiplicative(&mut self) -> Result<Expr, CompileError> {
-        let mut lhs = self.unary()?;
+        let mut lhs = self.exponent()?;
         loop {
             let op = match self.peek() {
                 Tok::Star => BinaryOp::Mul,
@@ -459,9 +460,22 @@ impl Parser {
                 _ => return Ok(lhs),
             };
             self.advance();
-            let rhs = self.unary()?;
+            let rhs = self.exponent()?;
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
+    }
+
+    /// `a ** b`。右結合なので、右辺はもう一度この段から読む。
+    ///
+    /// 右辺だけは単項演算を許す (`2 ** -1`)。左辺の `-2 ** 2` は JavaScript では
+    /// 構文エラーだが、ここでは書かれたとおり `(-2) ** 2` として読む。
+    fn exponent(&mut self) -> Result<Expr, CompileError> {
+        let lhs = self.unary()?;
+        if !self.eat(&Tok::StarStar) {
+            return Ok(lhs);
+        }
+        let rhs = self.exponent()?;
+        Ok(Expr::Binary { op: BinaryOp::Pow, lhs: Box::new(lhs), rhs: Box::new(rhs) })
     }
 
     fn unary(&mut self) -> Result<Expr, CompileError> {

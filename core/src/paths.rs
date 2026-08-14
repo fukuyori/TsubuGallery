@@ -51,6 +51,11 @@ impl DataPaths {
         self.root.join("cache")
     }
 
+    /// 実行ログ。消しても動作に影響しない。
+    pub fn logs(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
     /// メタデータ DB (設計書 §19)。
     pub fn database(&self) -> PathBuf {
         self.root.join("library.sqlite3")
@@ -62,7 +67,7 @@ impl DataPaths {
 
     /// 必要なサブディレクトリをまとめて作る。
     pub fn ensure(&self) -> std::io::Result<()> {
-        for dir in [self.sketches(), self.thumbnails(), self.cache()] {
+        for dir in [self.sketches(), self.thumbnails(), self.cache(), self.logs()] {
             std::fs::create_dir_all(dir)?;
         }
         Ok(())
@@ -79,6 +84,7 @@ mod tests {
         assert!(p.sketches().ends_with("sketches"));
         assert!(p.thumbnails().ends_with("thumbnails"));
         assert!(p.cache().ends_with("cache"));
+        assert!(p.logs().ends_with("logs"));
         assert_eq!(p.thumbnail_for("spiral").file_name().unwrap(), "spiral.png");
         assert_eq!(p.database().file_name().unwrap(), "library.sqlite3");
     }

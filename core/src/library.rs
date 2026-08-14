@@ -57,7 +57,8 @@ pub fn load_all(dir: &Path) -> Vec<SketchFile> {
             let source = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::warn!("{} を読めませんでした: {e}", path.display());
+                    // 一覧から静かに消えてしまうので、理由は必ず残す。
+                    log::error!("{} を読めないので一覧に出しません: {e}", path.display());
                     return None;
                 }
             };

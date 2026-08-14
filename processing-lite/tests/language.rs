@@ -1638,3 +1638,132 @@ fn only_processing_reads_a_lone_int_as_a_packed_colour() {
     let grey = colour("void setup(){size(400,400);}\nvoid draw(){noStroke();fill(128);rect(0,0,9,9);}");
     assert!((grey[0] - 128.0 / 255.0).abs() < 0.01, "{grey:?}");
 }
+
+/// `**` は JavaScript と同じ強さと結び方で読む。
+///
+/// `#つぶやきProcessing` は 1 文字でも短くするので、`pow()` ではなく `**` で
+/// 書かれる。`*` より強く、右から結ぶ。取り違えると絵がまるごと変わる。
+#[test]
+fn exponentiation_matches_javascript() {
+    let probe = |expr: &str| -> i32 {
+        let src = format!("draw=_=>{{createCanvas(400,400);fill({expr},0,0);rect(0,0,10,10)}}");
+        let mut s = VmSketch::compile(&src, 1).expect("コンパイルできる");
+        let mut g = Graphics::new();
+        g.begin_frame(400.0, 400.0);
+        s.setup(&mut g);
+        g.begin_frame(400.0, 400.0);
+        s.draw(&mut g);
+        assert!(s.error().is_none(), "{:?} / {src}", s.error());
+        (g.draw_list().vertices[0].color[0] * 255.0).round() as i32
+    };
+
+    assert_eq!(probe("2 ** 5"), 32);
+    // `*` より強い。弱ければ 4 ** 50 になって振り切れる。
+    assert_eq!(probe("4 ** .5 * 100"), 200);
+    // 右から結ぶ。左からなら (2**2)**3 / 2 = 32。
+    assert_eq!(probe("(2 ** 2 ** 3) / 2"), 128);
+    // 右辺の単項マイナス。
+    assert_eq!(probe("2 ** -1 * 200"), 100);
+    // 累乗代入。
+    assert_eq!(probe("(v = 3, v **= 4, v / 3)"), 27);
+}
+
+/// p5.js の引数の渡し方をそのまま受ける。
+///
+/// つぶやき作品は p5.js のリファレンスどおりに書かれているので、省略できる
+/// 引数を省いてくる。ここで弾くと、作品はコンパイルの時点で開けない。
+#[test]
+fn p5_argument_shapes_are_accepted() {
+    let render = |src: &str| {
+        let mut s = VmSketch::compile(src, 1).expect("コンパイルできる");
+        let mut g = Graphics::new();
+        g.begin_frame(400.0, 400.0);
+        s.setup(&mut g);
+        g.begin_frame(400.0, 400.0);
+        g.frame_count = 1;
+        s.draw(&mut g);
+        assert!(s.error().is_none(), "{:?} / {src}", s.error());
+        g.draw_list().vertices.iter().map(|v| v.pos).collect::<Vec<_>>()
+    };
+
+    // 高さを省いた rect は正方形。
+    assert_eq!(
+        render("draw=_=>{createCanvas(400,400);rect(10,20,30)}"),
+        render("draw=_=>{createCanvas(400,400);rect(10,20,30,30)}"),
+    );
+
+    // 余った引数は捨てる。呼び出しを代入の置き場にする書き方が動く。
+    // ここでは noFill() のついでに H を作り、その値で四角を描いている。
+    let dropped = render("draw=_=>{createCanvas(400,400);noFill(H=30);rect(10,20,H)}");
+    assert_eq!(dropped, render("draw=_=>{createCanvas(400,400);noFill();rect(10,20,30,30)}"));
+
+    // rotate(角度, 軸)。軸まわりに回すので、2D の回転とは別の絵になる。
+    let axis = render("draw=_=>{createCanvas(400,400,WEBGL);rotate(2.2,[1,1,0]);box(40)}");
+    let flat = render("draw=_=>{createCanvas(400,400,WEBGL);rotate(2.2);box(40)}");
+    assert!(!axis.is_empty() && axis != flat, "軸が効いていません");
+
+    // sphere(半径, 分割数)。粗くすると頂点が減る。
+    let coarse = render("draw=_=>{createCanvas(400,400,WEBGL);sphere(50,4,3)}");
+    let fine = render("draw=_=>{createCanvas(400,400,WEBGL);sphere(50)}");
+    assert!(coarse.len() < fine.len(), "分割数が効いていません: {} / {}", coarse.len(), fine.len());
+
+    // 分割数は一度きり。次の sphere() は元の細かさへ戻る。
+    let after = render("draw=_=>{createCanvas(400,400,WEBGL);sphere(50,4,3);sphere(50)}");
+    assert_eq!(after.len(), coarse.len() + fine.len(), "分割数が残っています");
+
+    // smooth() / noSmooth() は受けるだけ。Renderer は常になめらかに描く。
+    render("draw=_=>{createCanvas(400,400);smooth();noSmooth();circle(0,0,10)}");
+}
+
+/// 再帰する関数の `let` は、呼ばれた先に壊されない。
+///
+/// `#つぶやきProcessing` の再帰は、ループ変数を `let` で作って自分を呼ぶ形が
+/// 定番。ここがグローバルだと、内側の呼び出しが外側のループ変数を書き換えて
+/// 図形が数個しか出ない。
+#[test]
+fn a_recursive_function_keeps_its_own_let() {
+    let one = "draw=_=>{createCanvas(400,400);circle(0,0,4)}";
+    let src = "n=0
+r = l => {
+  if (l < 5) { n++ }
+  else { for (let x of [-l, l]) { for (let y of [-l, l]) { r(l / 2) } } }
+}
+draw = _ => {
+  createCanvas(400,400)
+  n = 0
+  r(20)
+  for (i = 0; i < n; i++) circle(0, 0, 4)
+}";
+    // 20 → 10 → 5 → 2.5 の 3 段。各段 4 方向へ分かれて 4³ = 64 個。
+    assert_eq!(count(src, one), 64);
+}
+
+/// 外から見える名前はグローバルのまま。クロージャの代わりに使える。
+///
+/// ローカルにできるのは、その関数の中で閉じている名前だけ。入れ子の関数や
+/// 別の関数が触る名前まで動かすと、いまある作品が壊れる。
+#[test]
+fn a_name_seen_from_outside_stays_global() {
+    let colour = |src: &str| {
+        let mut s = VmSketch::compile(src, 1).expect("コンパイルできる");
+        let mut g = Graphics::new();
+        g.begin_frame(400.0, 400.0);
+        s.setup(&mut g);
+        g.begin_frame(400.0, 400.0);
+        g.frame_count = 1;
+        s.draw(&mut g);
+        assert!(s.error().is_none(), "{:?} / {src}", s.error());
+        (g.draw_list().vertices[0].color[0] * 255.0).round() as i32
+    };
+
+    // 入れ子のアロー関数から読む。
+    assert_eq!(
+        colour("draw=_=>{createCanvas(400,400);let c=200;[1].map(v=>fill(c,0,0));rect(0,0,9,9)}"),
+        200
+    );
+    // 別の関数から読む。
+    assert_eq!(
+        colour("setup=_=>{createCanvas(400,400);let W=120}\ndraw=_=>{fill(W,0,0);rect(0,0,9,9)}"),
+        120
+    );
+}

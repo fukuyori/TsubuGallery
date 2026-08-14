@@ -29,10 +29,13 @@ pub enum Tok {
     Star,
     Slash,
     Percent,
+    /// べき乗 `**`。`d ** 2` のように、つぶやきでは `pow()` より短いのでよく出る。
+    StarStar,
     Assign,
     PlusAssign,
     MinusAssign,
     StarAssign,
+    StarStarAssign,
     SlashAssign,
     PercentAssign,
     Increment,
@@ -400,6 +403,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, CompileError> {
 
         let three_char = match three.as_str() {
             "..." => Some(Tok::Spread),
+            "**=" => Some(Tok::StarStarAssign),
             ">>>" => Some(Tok::UShr),
             "<<=" => Some(Tok::ShlAssign),
             ">>=" => Some(Tok::ShrAssign),
@@ -419,6 +423,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, CompileError> {
             ">=" => Some(Tok::Ge),
             "&&" => Some(Tok::AndAnd),
             "||" => Some(Tok::OrOr),
+            "**" => Some(Tok::StarStar),
             "++" => Some(Tok::Increment),
             "--" => Some(Tok::Decrement),
             "+=" => Some(Tok::PlusAssign),

@@ -48,6 +48,8 @@ pub fn capture_all(
     let mut written = Vec::new();
 
     for outcome in loader::load_library(paths) {
+        // コンパイルで転んだものは読み込みのときに記録済み。二度書かない。
+        let reported = outcome.error.is_some();
         let mut loaded = outcome.sketch;
         let frame = if loaded.info.thumbnail_frame > 0 {
             loaded.info.thumbnail_frame
@@ -60,19 +62,38 @@ pub fn capture_all(
         graphics.begin_frame(width as f32, height as f32);
         loaded.step(&mut graphics);
         capturer.draw(&device, &queue, &mut batch, &graphics, width, height);
+        // 1 フレームに積める量を超えた時点で打ち切る。絵は途中までしか無く、
+        // 続けても同じところで溢れる。
+        let mut overflowed = graphics.overflowed();
 
         // 作品は frameCount から絵を決めるので、目標フレームまで進めてから撮る。
         // 1 枚ずつ積むのは、残像を使う作品を本物と同じ絵にするため。
         for f in 1..=frame {
+            if overflowed {
+                break;
+            }
             graphics.begin_frame(width as f32, height as f32);
             graphics.frame_count = f;
             graphics.time = f as f32 / 60.0;
             loaded.step(&mut graphics);
+            overflowed = graphics.overflowed();
             capturer.draw(&device, &queue, &mut batch, &graphics, width, height);
         }
 
-        if let Some(error) = loaded.error() {
-            log::error!("{} は実行できません: {error}", loaded.info.id);
+        let too_much = overflowed.then_some(crate::viewer::TOO_MUCH_GEOMETRY);
+        if let Some(error) = loaded.error().or(too_much) {
+            if reported {
+                continue;
+            }
+            tsubu_core::logging::sketch_failed(&tsubu_core::logging::SketchRecord {
+                id: &loaded.info.id,
+                phase: "thumbnail",
+                dialect: loaded.dialect().map(|d| d.label()),
+                line: None,
+                column: None,
+                source: Some(&tsubu_core::library::path_for(&paths.sketches(), &loaded.info.id)),
+                message: error,
+            });
             continue;
         }
 

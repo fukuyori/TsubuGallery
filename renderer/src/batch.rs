@@ -13,6 +13,24 @@ use crate::draw::{Batch, BlendMode, DrawList, Vertex};
 /// 全レンダーターゲットで共通のサンプル数。
 pub const SAMPLE_COUNT: u32 = 4;
 
+/// 1 本のバッファに入れられる大きさ。
+///
+/// `wgpu::Limits::downlevel_defaults()` の `max_buffer_size` と同じ値。app は
+/// この上限でデバイスを作るので、ここを超える確保はデバイス側で弾かれる。
+/// **弾かれ方がパニック**なので (wgpu の既定のエラー処理)、超えそうなら
+/// 頼む前に諦める必要がある。
+pub const MAX_BUFFER_BYTES: u64 = 256 << 20;
+
+/// 1 フレームに積める頂点の数。
+///
+/// 容量は 2 のべき乗で取る ([`BatchRenderer::prepare`]) ので、上限に収まる
+/// 最大の 2 のべき乗がそのまま頂点数の上限になる。256 MiB に入る頂点は
+/// 745 万個だが、その手前の 2 のべき乗である 419 万個で頭打ちになる。
+pub const MAX_VERTICES: usize = 1 << 22;
+
+/// 1 フレームに積める添字の数。考え方は [`MAX_VERTICES`] と同じ。
+pub const MAX_INDICES: usize = 1 << 26;
+
 /// 深度バッファの形式。3D の作品だけが書き込む。
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -215,6 +233,20 @@ impl BatchRenderer {
         }
 
         if list.indices.is_empty() {
+            self.pending = Some(Pending { format, samples, batches: Vec::new() });
+            return;
+        }
+
+        // 入りきらない量は、確保を頼む前に断る。頼むとデバイスが検証で撥ね、
+        // wgpu の既定の扱いではプロセスごと落ちる。ここへ来るのは
+        // [`Graphics`] の上限をすり抜けたときだけなので、記録も残す。
+        if list.vertices.len() > MAX_VERTICES || list.indices.len() > MAX_INDICES {
+            log::error!(
+                "1 フレームの図形が多すぎるので描けません (頂点 {} / 上限 {MAX_VERTICES}、\
+                 添字 {} / 上限 {MAX_INDICES})",
+                list.vertices.len(),
+                list.indices.len(),
+            );
             self.pending = Some(Pending { format, samples, batches: Vec::new() });
             return;
         }

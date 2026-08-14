@@ -227,6 +227,8 @@ pub enum Op {
     Mul,
     Div,
     Rem,
+    /// べき乗 `a ** b`。JavaScript と同じく、いつも浮動小数で返す。
+    Pow,
     Neg,
     Not,
 

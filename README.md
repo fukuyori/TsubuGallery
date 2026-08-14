@@ -264,6 +264,7 @@ cargo run --release -- --capture-all ./out
 |---|---|
 | `TSUBU_DATA_DIR` | Use a different data directory |
 | `TSUBU_START_SCREEN` | Override the start screen: `gallery` / `viewer` / `editor` / `settings`. Without it, the setting is used |
+| `RUST_LOG` | How much to log. `warn` by default (see "Logs") |
 
 ```text
 <data>/
@@ -272,6 +273,56 @@ cargo run --release -- --capture-all ./out
   library.sqlite3    metadata (favourites / tags / collections / settings)
   instance.lock      running marker (see "Single instance" below)
   cache/             bytecode cache (unused; see "Deferred optimisation")
+  logs/tsubu.log     run log (see "Logs")
+```
+
+### Logs
+
+Appended to `<data>/logs/tsubu.log`; the same records go to stderr. Past 1 MiB
+the file moves to `tsubu.log.1` … `tsubu.log.3` and the oldest is dropped.
+Deleting the logs changes nothing about how the app runs.
+
+People are not the only readers. So that **an editor or an outside agent can
+read it and find what to fix**, there is one record per line, every line starts
+with `time level kind`, and lines about a sketch (kind `sketch`) carry
+`key=value` pairs. A value is quoted only when it contains a space or a quote.
+
+```text
+2026-08-14T12:23:27.795Z ERROR sketch id=broken phase=compile dialect=p5.js line=2 column=7 file=D:/data/sketches/broken.pde message="rotate は引数 1 か 2 か 4 個で呼びます (3 個渡されています)"
+```
+
+| Key | Meaning |
+|---|---|
+| `id` | The sketch identifier, which is also its `.pde` file name |
+| `phase` | `compile` (at load) / `run` (stopped while playing) / `thumbnail` |
+| `dialect` | `Processing` or `p5.js`; a guess on lines where compiling failed |
+| `line` `column` | Where in the source, when known |
+| `file` | The file to fix. Separators are normalised to `/` |
+| `message` | Why |
+
+Times are UTC. Paths use `/` because `\` would need escaping inside quotes and
+reads badly; Windows opens either.
+
+**Levels** are chosen so that a reader can take `ERROR` alone and have the work
+list.
+
+| Level | Meaning |
+|---|---|
+| `error` | Something asked for did not happen and **there is a place to fix** — a sketch that will not compile, a run cut short, a thumbnail that could not be made, a sketch file that could not be read |
+| `warn` | Usable but not as intended: a font is missing, a setting could not be read and the default was used |
+| `info` | Ordinary progress. **Not emitted by default** |
+| `debug` | Fine-grained tracing |
+
+Because the default is `warn`, anything in the log is something to look at. For
+ordinary progress use `RUST_LOG=info`, and for per-sketch instruction counts
+`RUST_LOG=tsubugallery=debug`.
+
+Panics land in the log too, as `ERROR panic`, with the location and the reason —
+so a crash can be followed up without reproducing it.
+
+```sh
+# just the things to fix
+grep 'ERROR sketch' ~/.local/share/TsubuGallery/logs/tsubu.log
 ```
 
 ### Single instance
@@ -619,7 +670,7 @@ default black stroke and would be invisible.
 | Category | Functions and variables |
 |---|---|
 | Screen | `size()` / `createCanvas()` (the declared canvas is scaled to fit), `width` `height` `frameCount` |
-| Basic shapes | `point() line() rect() ellipse() circle() triangle()`. A 5th argument onwards rounds `rect()` corners. `point()` is a round dot and thick lines get round ends, as in both originals |
+| Basic shapes | `point() line() rect() ellipse() circle() triangle()`. A 5th argument onwards rounds `rect()` corners, and `rect(x, y, w)` is a square as in p5. `point()` is a round dot and thick lines get round ends, as in both originals |
 | Free-form shapes | `beginShape() vertex() curveVertex() bezierVertex() endShape()`, `arc() quad() bezier() curve()` |
 | Text | `text() textSize() textAlign() textWidth()`, `str() nf()`, `String.fromCodePoint()` |
 | Shape modes | `rectMode() ellipseMode() angleMode()`, `square()` |
@@ -627,8 +678,9 @@ default black stroke and would be invisible.
 | Looping | `noLoop() loop()` `clear()` |
 | Colour values | `color() lerpColor()`, components `red() green() blue() alpha() hue() saturation() brightness()` |
 | Colour and stroke | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
-| Transforms | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`. `translate()` and `scale()` also take 3 arguments, `rotate()` takes `(angle, x, y, z)` |
-| 3D | `size(w, h, P3D)`, `box() sphere() sphereDetail() rotateX() rotateY() rotateZ() lights() noLights()` |
+| Transforms | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`. `translate()` and `scale()` also take 3 arguments, `rotate()` takes `(angle, x, y, z)` and p5's `(angle, [x, y, z])` |
+| 3D | `size(w, h, P3D)`, `box() sphere() sphereDetail() rotateX() rotateY() rotateZ() lights() noLights()`. `sphere(r, longitude, latitude)` changes the detail for that one sphere |
+| Accepted, ignored | `smooth() noSmooth()`. The renderer always antialiases, so the call is taken and does nothing |
 | Maths | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
 | Random and noise | `random() randomGaussian() noise() randomSeed() millis()` |
 | Input | `mouseX` `mouseY` `mousePressed` `keyPressed` |
@@ -688,8 +740,20 @@ sits at the centre of the canvas rather than the top-left.
 at the world origin looking down `-Z`. Sketches that build a grid around the
 origin rely on this.
 
-`lights()` gives the Processing default: ambient 128 plus a directional light of
-128 shining from the eye. Faces are flat-shaded — one colour per face — and
+Lighting is `lights()`, `ambientLight()`, `directionalLight()` and
+`pointLight()`. **A light's colour lands on the surface**, so a white solid under
+a yellow light comes out yellow. `lights()` is the Processing default: ambient
+128 plus a directional light of 128 shining from the eye (the same as
+`ambientLight(128)` plus `directionalLight(128, 128, 128, 0, 0, -1)`). Up to five
+lights per frame, and like p5 they are cleared every frame.
+
+A light's position and direction are transformed by the camera alone — never by
+the `rotate()` and `translate()` the sketch has stacked up. This matches p5's
+lighting shader, which applies only `uViewMatrix`: a sketch may place its light
+after a rotation, and turning the light with the model leaves the faces that
+should catch it black.
+
+Faces are flat-shaded — one colour per face — and
 `box()` / `sphere()` are outlined with the current stroke unless `noStroke()` is
 set. Hidden edges are removed by the depth buffer.
 
@@ -720,8 +784,8 @@ the geometry.
 
 Not there yet: `camera()`, `perspective()`, `ortho()`, solids beyond box and
 sphere (`cylinder` / `cone` / `torus` / `plane`), `texture()`, and `vertex()`
-with a `z`. `ambientLight()` / `directionalLight()` / `pointLight()` are
-accepted but only turn the default lights on.
+with a `z`. Lighting is one colour per face, with no distance falloff and no
+specular term (`specularMaterial()`).
 
 ### Text (`text()`)
 
@@ -790,7 +854,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 
 | Category | Supported |
 |---|---|
-| Variables | Assignment without a type, `let` / `const` / `var` |
+| Variables | Assignment without a type, `let` / `const` / `var` (local when the name stays inside that function) |
 | Functions | Arrow functions (`=>` `⇒` `→`), `function` declarations, functions as values (`B=blendMode`) |
 | Arrays | Literals, indexed read/write, `length`, `Array(n)` |
 | Array methods | `push pop shift unshift at slice splice concat reverse fill flat join indexOf lastIndexOf includes sort keys entries`, and the callback ones `map forEach filter flatMap find findLast findIndex some every reduce` |
@@ -798,7 +862,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | Strings | `"..."` `'...'` `` `...` ``, `${}` interpolation, `+` concatenation, `length charAt substring indexOf split repeat toUpperCase toLowerCase trim` |
 | Destructuring | `[a,b]=[1,2]`, swapping `[a,b]=[b,a]`, `[o.x,v[0]]=…` |
 | Objects | Literals (`{x:1}`, shorthand `{x}`), reading and writing `p.x`, `p.x+=v` |
-| Expressions | Assignment as an expression, comma operator, ternary, short-circuit, prefix and postfix `++` / `--` |
+| Expressions | Assignment as an expression, comma operator, ternary, short-circuit, prefix and postfix `++` / `--`, exponentiation `**` and `**=` (binds tighter than `*`, groups to the right) |
 | Bitwise | `& \| ^ ~ << >> >>>`, compound assignment (`&=`, `<<=`, …) |
 | Control flow | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
 | Literals | decimal, hex (`0xFF6B35`), exponent |
@@ -808,6 +872,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | `push` / `pop` | Save and restore the transform **and** the style, as p5 does — unlike Processing's `pushMatrix()`, which is the transform alone. `pushStyle()` / `popStyle()` are there too |
 | `Math` | `Math.sin` and friends map to the built-ins. `Math.PI` `Math.hypot` `Math.sign` too, and `S=Math.sin` works as a value |
 | Variadic | `min()` and `max()` take any number of arguments |
+| Extra arguments | Dropped, as in JavaScript — but still evaluated, because a call is a handy place to put an assignment (`noFill(H = W / 2)`) |
 
 There is one number type, as in JavaScript (`7/2` is `3.5`).
 
@@ -824,8 +889,10 @@ for(i of [...Array(120).keys()]){
 
 ### What is not there yet
 
-- **Closures.** An arrow function sees its own parameters and globals only;
-  anything that is not a parameter is treated as global
+- **Closures.** An arrow function sees its own parameters and globals only.
+  Locals are the parameters plus any `let` / `const` / `var` used nowhere but
+  inside that function; a name a nested or sibling function touches stays
+  global, so using a global in place of a closure keeps working
 - `class` / `new` / `async`
 
 Code using something unsupported is listed line by line by the editor (above).
@@ -888,6 +955,15 @@ that exceeds it is cut off and control returns to the viewer; a sketch that
 exceeds it three frames running is stopped and shows an error instead. An
 infinite loop cannot take the gallery down with it.
 
+**Geometry is capped too.** A frame's triangles go into a single GPU buffer, so
+there is a fixed amount that fits: 4,194,304 vertices, about 1.05 million
+`point()` calls. A sketch can reach that while staying inside the instruction
+budget — 50,000 `circle()` calls in one frame get there, since a circle is 82
+vertices. Past the cap the remaining shapes are dropped, the sketch is stopped
+and the reason is shown. What matters is that **an allocation over the limit is
+never requested**: the device rejects it in validation, and wgpu's default
+handling of that takes the whole process down.
+
 ### Errors
 
 Compile errors come with a position.
@@ -917,7 +993,7 @@ working directory is.
 
 ```sh
 tsubugallery --help       # usage
-tsubugallery --version    # version
+tsubugallery --version    # version and where the log lives
 ```
 
 ### Platforms

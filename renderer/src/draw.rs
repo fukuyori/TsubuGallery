@@ -420,9 +420,43 @@ struct Space {
     /// 消える、というのがそのまま「原点が画面の中央に来る」書き方になる。
     model: Mat4,
     stack: Vec<Mat4>,
-    /// `lights()` が呼ばれたか。フレームごとに消える。
-    lights: bool,
+    /// そのフレームの明かり。`background()` と同じくフレームごとに消える。
+    lighting: Lighting,
 }
+
+/// 明かり 1 つ。
+///
+/// 位置も向きも視点座標で持つ。掛けるのは**カメラの分だけ**で、作品が積んだ
+/// `rotate()` や `translate()` はかけない。p5.js の陰影のシェーダが
+/// `uViewMatrix` しか掛けないのに合わせている — 作品は `rotate()` してから
+/// 明かりを置くことがあり、そこで一緒に回ると、当たってほしい面が暗くなる。
+#[derive(Clone, Copy, Debug)]
+struct Light {
+    color: [f32; 3],
+    /// 点光源なら光源の位置。平行光なら面から光源へ向かう単位ベクトル。
+    at: [f32; 3],
+    point: bool,
+}
+
+/// そのフレームに置かれた明かり。
+#[derive(Clone, Debug, Default)]
+struct Lighting {
+    /// 環境光。向きに関係なく、どの面にも同じだけ乗る。
+    ambient: [f32; 3],
+    lights: Vec<Light>,
+}
+
+impl Lighting {
+    /// 明かりが 1 つも無ければ、色をそのまま出す (Processing と同じ)。
+    fn is_lit(&self) -> bool {
+        self.ambient != [0.0; 3] || !self.lights.is_empty()
+    }
+}
+
+/// 1 フレームに置ける明かりの数。p5.js の上限と同じ。
+///
+/// 面ごとに全部なめるので、際限なく増えると重い。
+const MAX_LIGHTS: usize = 5;
 
 /// 立体の縁をどこまで引くか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -514,6 +548,13 @@ pub struct Graphics {
     angle_mode: AngleMode,
     /// `noLoop()` が呼ばれたら false。Viewer がこれを見てフレームを止める。
     looping: bool,
+    /// このフレームで積める量を超えたか。超えたらそこから先は捨てる。
+    ///
+    /// 1 フレームぶんの三角形は GPU の 1 本のバッファに載せるので、載せられる
+    /// 量に上限がある ([`crate::batch::MAX_VERTICES`])。超えた絵をそのまま
+    /// 渡すとバッファの確保が失敗し、wgpu の既定の扱いではプロセスごと落ちる。
+    /// 呼び出し側は 1 フレーム進めたあとにここを見て、作品を止める。
+    overflow: bool,
 
     /// `width`
     pub width: f32,
@@ -572,6 +613,7 @@ impl Graphics {
             ellipse_mode: ShapeMode::Center,
             angle_mode: AngleMode::Radians,
             looping: true,
+            overflow: false,
             width: 0.0,
             height: 0.0,
             frame_count: 0,
@@ -596,10 +638,11 @@ impl Graphics {
         // 次のフレームの頂点まで巻き込んで巨大な形になるのを防ぐ。
         self.shape = None;
         self.list.reset();
+        self.overflow = false;
         self.stack.clear();
         self.viewport = (width, height);
         if let Some(space) = &mut self.space {
-            space.lights = false;
+            space.lighting = Lighting::default();
         }
         self.apply_canvas();
     }
@@ -809,6 +852,15 @@ impl Graphics {
     /// フレームを進めてよいか。`noLoop()` のあいだは false。
     pub fn is_looping(&self) -> bool {
         self.looping
+    }
+
+    /// このフレームで積める量を超えたか。
+    ///
+    /// 超えた時点から先の図形は捨ててあるので、絵は途中までしかない。
+    /// 1 フレーム進めるたびに見て、真なら作品を止める。次のフレームでも
+    /// 同じ量を描こうとするので、続けても同じ結果にしかならない。
+    pub fn overflowed(&self) -> bool {
+        self.overflow
     }
 
     // ---- 色と線 ---------------------------------------------------------
@@ -1045,7 +1097,12 @@ impl Graphics {
         }
         let camera = Camera::new(self.width, self.height, origin);
         self.space =
-            Some(Space { model: camera.modelview(), camera, stack: Vec::new(), lights: false });
+            Some(Space {
+                model: camera.modelview(),
+                camera,
+                stack: Vec::new(),
+                lighting: Lighting::default(),
+            });
     }
 
     pub fn is_3d(&self) -> bool {
@@ -1063,11 +1120,65 @@ impl Graphics {
     }
 
     /// `lights()`。既定の環境光と、視点から差す平行光を入れる。
+    ///
+    /// p5.js の `lights()` は `ambientLight(128)` と
+    /// `directionalLight(128, 128, 128, 0, 0, -1)` を置くのと同じ。
     pub fn lights(&mut self, on: bool) {
         self.ensure_3d();
-        if let Some(space) = &mut self.space {
-            space.lights = on;
+        let Some(space) = &mut self.space else { return };
+        space.lighting = Lighting::default();
+        if !on {
+            return;
         }
+        const LEVEL: f32 = 128.0 / 255.0;
+        space.lighting.ambient = [LEVEL; 3];
+        space.lighting.lights.push(Light {
+            color: [LEVEL; 3],
+            // 視点から差す。面が正面を向くほど明るい。
+            at: [0.0, 0.0, 1.0],
+            point: false,
+        });
+    }
+
+    /// `ambientLight()`。向きに関係なく乗る明かり。
+    pub fn ambient_light(&mut self, color: Color) {
+        self.ensure_3d();
+        if let Some(space) = &mut self.space {
+            let a = &mut space.lighting.ambient;
+            // 重ねて置ける。p5.js と同じく足し合わせる。
+            *a = [a[0] + color.r, a[1] + color.g, a[2] + color.b];
+        }
+    }
+
+    /// `directionalLight()`。`dir` は**光の進む向き**で、p5.js と同じ。
+    pub fn directional_light(&mut self, color: Color, dir: [f32; 3]) {
+        self.ensure_3d();
+        let Some(space) = &mut self.space else { return };
+        if space.lighting.lights.len() >= MAX_LIGHTS {
+            return;
+        }
+        // 面から光源へ向かう向きに直しておく。陰影の計算はこの向きで済む。
+        let towards = crate::mat4::normalize(space.camera.modelview().direction(dir));
+        space.lighting.lights.push(Light {
+            color: [color.r, color.g, color.b],
+            at: [-towards[0], -towards[1], -towards[2]],
+            point: false,
+        });
+    }
+
+    /// `pointLight()`。`at` は光源の位置。
+    pub fn point_light(&mut self, color: Color, at: [f32; 3]) {
+        self.ensure_3d();
+        let Some(space) = &mut self.space else { return };
+        if space.lighting.lights.len() >= MAX_LIGHTS {
+            return;
+        }
+        space.lighting.lights.push(Light {
+            color: [color.r, color.g, color.b],
+            // カメラの分だけ掛けて視点座標へ。
+            at: space.camera.modelview().point(at),
+            point: true,
+        });
     }
 
     /// ローカル座標をキャンバス上の位置と深さへ直す。
@@ -1147,17 +1258,40 @@ impl Graphics {
         self.emit(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
-    /// 面の向きから明るさを決める。`lights()` を呼んでいなければ素の色。
-    fn shade(&self, color: Color, normal: [f32; 3]) -> Color {
+    /// 面の向きから明るさを決める。明かりが無ければ素の色。
+    ///
+    /// 環境光に、明かりごとの「面の向きと光の向きの一致ぐあい」を足す。
+    /// 色は成分ごとに掛けるので、黄色い明かりを当てた白い面は黄色くなる。
+    /// `center` は面の中心 (視点座標)。点光源の向きをここから測る。
+    fn shade(&self, color: Color, normal: [f32; 3], center: [f32; 3]) -> Color {
         let Some(space) = &self.space else { return color };
-        if !space.lights {
+        let lighting = &space.lighting;
+        if !lighting.is_lit() {
             return color;
         }
-        // 既定の lights() は環境光 128 と、視点から差す平行光 128。
-        const LEVEL: f32 = 128.0 / 255.0;
         let n = crate::mat4::normalize(space.model.direction(normal));
-        let level = (LEVEL + LEVEL * n[2].max(0.0)).min(1.0);
-        Color { r: color.r * level, g: color.g * level, b: color.b * level, a: color.a }
+        let mut level = lighting.ambient;
+        for light in &lighting.lights {
+            let towards = if light.point {
+                crate::mat4::normalize([
+                    light.at[0] - center[0],
+                    light.at[1] - center[1],
+                    light.at[2] - center[2],
+                ])
+            } else {
+                light.at
+            };
+            let facing = (n[0] * towards[0] + n[1] * towards[1] + n[2] * towards[2]).max(0.0);
+            for (channel, light) in level.iter_mut().zip(light.color) {
+                *channel += light * facing;
+            }
+        }
+        Color {
+            r: color.r * level[0].min(1.0),
+            g: color.g * level[1].min(1.0),
+            b: color.b * level[2].min(1.0),
+            a: color.a,
+        }
     }
 
     /// `box()`。
@@ -1193,6 +1327,11 @@ impl Graphics {
     /// はっきり見えてしまう。
     pub fn set_sphere_detail(&mut self, longitude: usize, latitude: usize) {
         self.sphere_detail = (longitude.clamp(3, 64), latitude.clamp(2, 64));
+    }
+
+    /// いまの分割数。`sphere(r, detail)` が一時的に変えて戻すのに使う。
+    pub fn sphere_detail(&self) -> (usize, usize) {
+        self.sphere_detail
     }
 
     /// `sphere()`。緯度と経度で分ける。
@@ -1238,8 +1377,13 @@ impl Graphics {
 
         if let Some(fill) = self.fill {
             for (quad, normal) in faces {
-                let color = self.shade(fill, *normal);
                 let eye = quad.map(|p| model.point(p));
+                let center = [
+                    (eye[0][0] + eye[1][0] + eye[2][0] + eye[3][0]) * 0.25,
+                    (eye[0][1] + eye[1][1] + eye[2][1] + eye[3][1]) * 0.25,
+                    (eye[0][2] + eye[1][2] + eye[2][2] + eye[3][2]) * 0.25,
+                ];
+                let color = self.shade(fill, *normal, center);
                 self.face([eye[0], eye[1], eye[2]], color);
                 self.face([eye[0], eye[2], eye[3]], color);
             }
@@ -2023,6 +2167,15 @@ impl Graphics {
 
     /// 三角形を足す。いまの合成方法の区間へ入れる。
     fn emit(&mut self, indices: &[u32]) {
+        // 頂点を積めなかった図形の三角形は出さない。無い頂点を指す添字を
+        // 渡すと、絵が壊れるどころか GPU 側の検証で落ちる。
+        if self.overflow {
+            return;
+        }
+        if self.list.indices.len() + indices.len() > crate::batch::MAX_INDICES {
+            self.overflow = true;
+            return;
+        }
         let start = self.list.indices.len() as u32;
         self.list.indices.extend_from_slice(indices);
         let end = self.list.indices.len() as u32;
@@ -2047,14 +2200,16 @@ impl Graphics {
 
     fn push_vertex(&mut self, pos: [f32; 3], color: Color) {
         // 図形はアトラスの白い点を指す。文字と同じ経路で描けるようにするため。
-        self.list.vertices.push(Vertex {
-            pos,
-            color: color.to_array(),
-            uv: crate::font::FontAtlas::white_uv(),
-        });
+        self.push_textured(pos, color, crate::font::FontAtlas::white_uv());
     }
 
     fn push_textured(&mut self, pos: [f32; 3], color: Color, uv: [f32; 2]) {
+        // 積める上限まで来たら、そこから先は捨てる。ここで止めないと、
+        // 1 フレームぶんの頂点が GPU のバッファに収まらなくなる。
+        if self.list.vertices.len() >= crate::batch::MAX_VERTICES {
+            self.overflow = true;
+            return;
+        }
         self.list.vertices.push(Vertex { pos, color: color.to_array(), uv });
     }
 }
@@ -2548,5 +2703,136 @@ mod tests {
             (large - small * 4.0).abs() < 0.5,
             "線の太さが一緒に拡大されていません: {small} と {large}"
         );
+    }
+
+    /// 1 フレームに積める量には上限がある。
+    ///
+    /// 上限は GPU の 1 本のバッファに載る量から決まる。超えたぶんを黙って
+    /// 渡すとバッファの確保が失敗し、wgpu の既定の扱いではプロセスごと
+    /// 落ちるので、こちら側で止めておく必要がある。
+    #[test]
+    fn a_frame_stops_taking_shapes_at_the_limit() {
+        let mut g = Graphics::new();
+        g.begin_frame(400.0, 400.0);
+        assert!(!g.overflowed());
+
+        // point() 1 個が頂点 4 個。上限の少し先まで描く。
+        for _ in 0..(crate::batch::MAX_VERTICES / 4 + 16) {
+            g.point(1.0, 1.0);
+        }
+
+        assert!(g.overflowed(), "上限を超えたのに気づいていません");
+        let list = g.draw_list();
+        assert!(
+            list.vertices.len() <= crate::batch::MAX_VERTICES,
+            "頂点が上限を超えました: {}",
+            list.vertices.len()
+        );
+        assert!(list.indices.len() <= crate::batch::MAX_INDICES);
+
+        // 捨てた図形の添字を出していないこと。無い頂点を指すと GPU 側で落ちる。
+        let highest = list.indices.iter().copied().max().unwrap_or(0) as usize;
+        assert!(
+            highest < list.vertices.len(),
+            "{highest} 番の頂点は積まれていません (頂点は {} 個)",
+            list.vertices.len()
+        );
+
+        // 次のフレームでは元に戻る。溢れたのはあくまで 1 フレームの話。
+        g.begin_frame(400.0, 400.0);
+        assert!(!g.overflowed());
+        assert!(g.draw_list().vertices.is_empty());
+    }
+
+    /// 明かりの色が面に乗る。
+    ///
+    /// `pointLight(255, 255, 99, ...)` を白い立体に当てれば黄色くなる。
+    /// 色を捨てて明るさだけにすると、作品の姿がまるごと変わってしまう。
+    #[test]
+    fn a_light_paints_the_faces_with_its_own_colour() {
+        let mut g = lit_box(|g| {
+            g.point_light(Color::rgba(1.0, 1.0, 0.4, 1.0), [0.0, 0.0, 330.0]);
+        });
+
+        let (brightest, darkest) = extremes(&mut g);
+        // 光源の側を向いた面は明かりの色そのもの。地の色は白。
+        assert!((brightest[0] - 1.0).abs() < 0.02, "{brightest:?}");
+        assert!((brightest[1] - 1.0).abs() < 0.02, "{brightest:?}");
+        assert!((brightest[2] - 0.4).abs() < 0.02, "青が乗りすぎです: {brightest:?}");
+        // 背を向けた面は暗い。環境光を置いていないので落ちきる。
+        assert!(darkest.iter().take(3).all(|v| *v < 0.02), "{darkest:?}");
+    }
+
+    /// 明かりは置いた場所に留まる。作品が積んだ回転では動かない。
+    ///
+    /// p5.js の陰影はカメラ行列しか掛けない。`rotate()` してから
+    /// `pointLight()` を置く作品があり、一緒に回すと当たるはずの面が
+    /// 真っ暗になる。
+    #[test]
+    fn a_light_does_not_turn_with_the_model() {
+        let colour = Color::rgba(1.0, 1.0, 0.4, 1.0);
+        let axis = [1.0, 1.0, 0.0];
+
+        // 同じ場面を、明かりを置く順だけ変えて 2 通り作る。
+        let mut before = lit_box(|g| {
+            g.point_light(colour, [0.0, 0.0, 330.0]);
+            g.rotate_axis(2.2, axis);
+        });
+        let mut after = lit_box(|g| {
+            g.rotate_axis(2.2, axis);
+            g.point_light(colour, [0.0, 0.0, 330.0]);
+        });
+
+        assert_eq!(
+            extremes(&mut before),
+            extremes(&mut after),
+            "回してから置いた明かりが一緒に回っています"
+        );
+        // 手前を向いた面には届いている。回ってしまうと、ここが真っ暗になる。
+        let (brightest, _) = extremes(&mut after);
+        assert!(brightest[0] > 0.3, "手前を向いた面が暗いままです: {brightest:?}");
+    }
+
+    /// `lights()` は環境光 128 と、視点から差す平行光 128。
+    #[test]
+    fn the_default_lights_are_ambient_plus_one_from_the_viewer() {
+        let mut g = lit_box(|g| g.lights(true));
+
+        let (brightest, darkest) = extremes(&mut g);
+        // 正面の面は環境光 0.5 + 平行光 0.5 で白。
+        assert!(brightest.iter().take(3).all(|v| (*v - 1.0).abs() < 0.02), "{brightest:?}");
+        // 横や裏の面は環境光だけ。
+        assert!(darkest.iter().take(3).all(|v| (*v - 0.5).abs() < 0.02), "{darkest:?}");
+    }
+
+    /// 白い箱を 1 つ置いた 3D の場面を作る。`place` で明かりを置く。
+    fn lit_box(place: impl FnOnce(&mut Graphics)) -> Graphics {
+        let mut g = Graphics::new();
+        g.begin_frame(400.0, 400.0);
+        g.set_canvas(400.0, 400.0);
+        g.enable_3d(Origin::Center);
+        g.no_stroke();
+        g.fill_color(Color::WHITE);
+        place(&mut g);
+        g.draw_box(120.0, 120.0, 120.0);
+        g
+    }
+
+    /// 一番明るい頂点と一番暗い頂点の色。
+    fn extremes(g: &mut Graphics) -> ([f32; 4], [f32; 4]) {
+        let vertices = &g.draw_list().vertices;
+        assert!(!vertices.is_empty(), "何も描かれていません");
+        let level = |c: &[f32; 4]| c[0] + c[1] + c[2];
+        let brightest = vertices
+            .iter()
+            .max_by(|a, b| level(&a.color).total_cmp(&level(&b.color)))
+            .expect("ある")
+            .color;
+        let darkest = vertices
+            .iter()
+            .min_by(|a, b| level(&a.color).total_cmp(&level(&b.color)))
+            .expect("ある")
+            .color;
+        (brightest, darkest)
     }
 }

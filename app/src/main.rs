@@ -68,14 +68,22 @@ TsubuGallery — 短い Processing / p5.js 作品のギャラリー
 同じデータ領域を 2 つ同時には開けません。並べて動かすには TSUBU_DATA_DIR を
 分けてください。
 
+ログ
+  <データ領域>/logs/tsubu.log に、直す先のある出来事だけを 1 行 1 件で残します。
+  動かない作品は `ERROR sketch` の行に、ファイルと行・列まで入ります。
+
 環境変数
   TSUBU_DATA_DIR       データ領域の場所
   TSUBU_START_SCREEN   起動画面を上書き: gallery / viewer / editor / settings
-  RUST_LOG             ログの詳しさ (info / debug)
+  RUST_LOG             ログの詳しさ (既定 warn。info / debug で増やす)
 ";
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let paths = DataPaths::resolve();
+    // ログの置き場は作っておく。ここで失敗しても、標準エラーには出せる。
+    let _ = std::fs::create_dir_all(paths.logs());
+    let log_file = tsubu_core::logging::init(&paths);
+    tsubu_core::logging::install_panic_hook();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -84,10 +92,12 @@ fn main() {
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("tsubugallery {}", env!("CARGO_PKG_VERSION"));
+        match log_file {
+            Some(path) => println!("ログ: {}", path.display()),
+            None => println!("ログ: ファイルへは書けません"),
+        }
         return;
     }
-
-    let paths = DataPaths::resolve();
 
     // 同じデータ領域を 2 つ動かさない。SQLite の書き込みが競り、サムネイルの
     // 生成も二重になる。ロックは終了時に OS が外すので、落ちても残らない。
@@ -103,7 +113,7 @@ fn main() {
             }
             eprintln!("{message}");
             eprintln!("{}", locales.t("app.already_running.hint"));
-            log::warn!("{} は使用中です", paths.root().display());
+            log::error!("{} は使用中なので起動できません", paths.root().display());
             std::process::exit(1);
         }
         Err(e) => {
@@ -1181,7 +1191,15 @@ impl App {
                     }
                 }
                 Err((id, message)) => {
-                    log::warn!("{message}");
+                    tsubu_core::logging::sketch_failed(&tsubu_core::logging::SketchRecord {
+                        id: &id,
+                        phase: "thumbnail",
+                        dialect: None,
+                        line: None,
+                        column: None,
+                        source: Some(&self.paths.thumbnail_for(&id)),
+                        message: &message,
+                    });
                     if let Some(index) = self.gallery.index_of(&id) {
                         self.gallery.set_thumbnail_state(index, ThumbnailState::Failed(message));
                     }
@@ -1285,6 +1303,10 @@ impl App {
         }
         if let Some(error) = sketch.error() {
             return Err(error.to_string());
+        }
+        // 描き切れなかった絵は途中までしかない。撮っても本物と違う。
+        if g.overflowed() {
+            return Err(viewer::TOO_MUCH_GEOMETRY.to_string());
         }
 
         let image =
@@ -1564,7 +1586,7 @@ impl App {
         match tsubu_core::open::open(url) {
             Ok(()) => log::info!("リンクを開きました: {url}"),
             Err(e) => {
-                log::warn!("リンクを開けませんでした: {e}");
+                log::error!("リンクを開けませんでした: {e} ({url})");
                 if let Some(ui) = self.ui.as_mut() {
                     ui.toast(format!("{}: {e}", self.locales.t("app.link_failed")));
                 }
@@ -1634,10 +1656,21 @@ impl App {
             .get(index)
             .is_some_and(|item| item.status == SketchStatus::Error(error.clone()));
         if !already_marked {
-            log::warn!(
-                "{} の実行を止めました: {error}",
-                self.viewer.current_title().unwrap_or("?")
-            );
+            let id = self
+                .gallery
+                .items()
+                .get(index)
+                .map(|item| item.id.clone())
+                .unwrap_or_default();
+            tsubu_core::logging::sketch_failed(&tsubu_core::logging::SketchRecord {
+                id: &id,
+                phase: "run",
+                dialect: self.viewer.current_dialect().map(|d| d.label()),
+                line: None,
+                column: None,
+                source: Some(&tsubu_core::library::path_for(&self.paths.sketches(), &id)),
+                message: &error,
+            });
             self.gallery.set_status(index, SketchStatus::Error(error));
         }
     }
