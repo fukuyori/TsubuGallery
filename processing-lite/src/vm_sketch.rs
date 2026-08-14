@@ -93,12 +93,10 @@ impl Sketch for VmSketch {
     }
 
     fn setup(&mut self, g: &mut Graphics) {
-        // p5.js の text() は塗りと線の両方で描く。Processing は塗りだけ。
-        g.set_text_stroked(self.dialect == Dialect::P5);
-        // 下地。Processing は灰 204、p5.js のキャンバスは透明でページの白が透ける。
-        g.set_default_background(match self.dialect {
-            Dialect::P5 => tsubu_renderer::Color::WHITE,
-            Dialect::Processing => tsubu_renderer::Color::DEFAULT_BACKGROUND,
+        // 地の色、text() の線、int ひとつの読み方が方言で違う。
+        g.set_flavour(match self.dialect {
+            Dialect::P5 => tsubu_renderer::Flavour::P5,
+            Dialect::Processing => tsubu_renderer::Flavour::Processing,
         });
         let result = self.vm.init_globals(&self.program, g, self.budget);
         if let Err(trap) = result {

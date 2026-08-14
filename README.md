@@ -417,6 +417,15 @@ So each sketch's state is parked (`GraphicsState`) when you switch away and put
 back when you return, and the preloader parks what it warmed up. Only the
 per-frame scratch — the matrix stack, an unfinished `beginShape()` — is dropped.
 
+The canvas itself is another matter: switching and resizing both throw the
+accumulated image away, and there is only one of it to go around. A sketch that
+clears every frame does not care. One that leans on what is already there does —
+static-mode sketches, and the `f++ || background(0)` idiom that paints the
+ground on the very first frame and never again. Those are run from the top when
+the canvas goes, because otherwise they carry on drawing white lines onto a
+white page. Whether a sketch leans on the canvas is not guessed from its source:
+it is simply whether its last frame cleared.
+
 ### The canvas persists across frames
 
 If `draw()` does not call `background()`, the previous frame stays on screen,
@@ -619,16 +628,21 @@ default black stroke and would be invisible.
 | Colour values | `color() lerpColor()`, components `red() green() blue() alpha() hue() saturation() brightness()` |
 | Colour and stroke | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
 | Transforms | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`. `translate()` and `scale()` also take 3 arguments, `rotate()` takes `(angle, x, y, z)` |
-| 3D | `size(w, h, P3D)`, `box() sphere() rotateX() rotateY() rotateZ() lights() noLights()` |
+| 3D | `size(w, h, P3D)`, `box() sphere() sphereDetail() rotateX() rotateY() rotateZ() lights() noLights()` |
 | Maths | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
 | Random and noise | `random() randomGaussian() noise() randomSeed() millis()` |
 | Input | `mouseX` `mouseY` `mousePressed` `keyPressed` |
 | Constants | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
 
 `background()`, `fill()` and `stroke()` switch on argument count exactly as
-Processing does. **A single `int` argument is read as a packed colour**
-(`0xAARRGGBB`), so `stroke(-1)` is opaque white. Processing decides this by type,
-and so does this — `fill(128.0)` is still a grey level.
+Processing does. **In Processing a single `int` argument is read as a packed
+colour** (`0xAARRGGBB`), so `stroke(-1)` is opaque white. Processing decides this
+by type, and so does this — `fill(128.0)` is still a grey level.
+
+p5.js has no such rule, so the reading depends on the dialect. There, a lone
+number is always a grey level and is clamped: `stroke(500)` is white and
+`stroke(-1)` is black. Applying Processing's rule to a p5 sketch turns
+`stroke(500)` into `0x0001F4` — alpha zero, and nothing is drawn at all.
 
 `clear()` discards what has been drawn. Processing makes the canvas transparent;
 here it is filled with black instead, because a transparent thumbnail would show
@@ -690,6 +704,19 @@ limits worth knowing:
   a solid can vanish when the camera is inside it
 - Normals use the upper 3x3 of the model matrix, so shading is slightly off
   under non-uniform `scale()`
+
+A solid's edges are as thick as `strokeWeight()` says in *canvas* units, so they
+grow with the canvas when it is scaled to fit the window. Pinning them to screen
+pixels — which is what the first version did — makes the mesh thin out as the
+window grows, and a sketch drawn entirely in wireframe comes out paler than the
+original.
+
+`sphere()` is divided 24 by 16, p5's default, regardless of radius, and
+`sphereDetail()` changes it. The division is visible whenever a sketch strokes
+its spheres — the mesh *is* the picture — so deciding it from the radius, as this
+used to, made small spheres come out coarse and wrong. Edges shared between
+neighbouring quads are drawn once rather than twice; on a sphere that is half
+the geometry.
 
 Not there yet: `camera()`, `perspective()`, `ortho()`, solids beyond box and
 sphere (`cylinder` / `cone` / `torus` / `plane`), `texture()`, and `vertex()`
@@ -984,7 +1011,7 @@ it.
 ## Development
 
 ```sh
-cargo test --workspace      # 476 tests
+cargo test --workspace      # 485 tests
 cargo clippy --workspace --all-targets
 ```
 

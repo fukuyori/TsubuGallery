@@ -1563,3 +1563,78 @@ fn difference_inverts_where_shapes_overlap() {
         "差分の区間がありません: {modes:?}"
     );
 }
+
+
+/// 球の分割数は p5.js の既定 (経度 24 x 緯度 16) に合わせる。
+///
+/// 半径から決めていたので、小さい球が粗い網目になり、線で描く作品の
+/// 見た目が本家と大きく違った。
+#[test]
+fn a_sphere_is_divided_as_finely_as_p5_does() {
+    // 面は 24 x 16 枚、1 枚あたり三角形 2 つ。
+    let fill_only = "void setup(){size(400,400,P3D);}\n\
+                     void draw(){noStroke();translate(200,200,0);sphere(50);}";
+    assert_eq!(triangles(fill_only), 24 * 16 * 2, "分割数が違います");
+
+    // 大きさを変えても分割数は変わらない。
+    let small = "void setup(){size(400,400,P3D);}\n\
+                 void draw(){noStroke();translate(200,200,0);sphere(3);}";
+    assert_eq!(triangles(small), triangles(fill_only), "半径で分割数が変わっています");
+
+    // sphereDetail() で粗くできる。
+    let coarse = "void setup(){size(400,400,P3D);}\n\
+                  void draw(){noStroke();sphereDetail(6);translate(200,200,0);sphere(50);}";
+    assert_eq!(triangles(coarse), 6 * 6 * 2, "sphereDetail() が効いていません");
+}
+
+/// 格子の辺は 1 本ずつ。隣の面と二度引きしない。
+///
+/// 球は面が数百枚あるので、ここが倍の差になる。
+#[test]
+fn a_sphere_does_not_draw_its_shared_edges_twice() {
+    let src = "void setup(){size(400,400,P3D);}\n\
+               void draw(){noFill();stroke(0);sphereDetail(8,8);translate(200,200,0);sphere(50);}";
+    // 面 64 枚 x 辺 2 本 x 三角形 2 つ。4 本引けばこの倍になる。
+    // 極では 4 隅がつぶれるので、その分だけ少し下回る。
+    let drawn = triangles(src);
+    let shared = 8 * 8 * 2 * 2;
+    assert!(drawn <= shared, "辺を引きすぎています: {drawn} (共有すれば {shared})");
+    assert!(drawn > shared - 20, "引けていません: {drawn}");
+}
+
+
+/// int ひとつを詰めた色として読むのは Processing だけ。
+///
+/// `stroke(-1)` が不透明の白になるのは Processing の決まり。p5.js に
+/// この解釈は無く、`stroke(500)` はただの明度で 255 へ丸まる。取り違えると
+/// alpha が 0 になって何も描かれない。
+#[test]
+fn only_processing_reads_a_lone_int_as_a_packed_colour() {
+    let colour = |src: &str| {
+        let mut s = VmSketch::compile(src, 1).expect("コンパイルできる");
+        let mut g = Graphics::new();
+        g.begin_frame(400.0, 400.0);
+        s.setup(&mut g);
+        g.begin_frame(400.0, 400.0);
+        g.frame_count = 1;
+        s.draw(&mut g);
+        assert!(s.error().is_none(), "{:?} / {src}", s.error());
+        g.draw_list().vertices.first().expect("描かれる").color
+    };
+
+    // Processing: -1 は 0xFFFFFFFF。不透明の白。
+    let java = colour("void setup(){size(400,400);}\nvoid draw(){noStroke();fill(-1);rect(0,0,9,9);}");
+    assert_eq!((java[0], java[3]), (1.0, 1.0), "Processing の詰めた色が効きません: {java:?}");
+
+    // p5: 500 は明度。255 へ丸めて不透明の白。
+    let p5 = colour("draw=_=>{createCanvas(400,400);noStroke();fill(500);rect(0,0,9,9)}");
+    assert_eq!((p5[0], p5[3]), (1.0, 1.0), "p5 で透明になりました: {p5:?}");
+
+    // p5 の -1 は明度 -1。0 へ丸めて黒。
+    let dark = colour("draw=_=>{createCanvas(400,400);noStroke();fill(-1);rect(0,0,9,9)}");
+    assert_eq!((dark[0], dark[3]), (0.0, 1.0), "p5 の -1 が黒になりません: {dark:?}");
+
+    // 0..255 はどちらでも明度のまま。
+    let grey = colour("void setup(){size(400,400);}\nvoid draw(){noStroke();fill(128);rect(0,0,9,9);}");
+    assert!((grey[0] - 128.0 / 255.0).abs() < 0.01, "{grey:?}");
+}

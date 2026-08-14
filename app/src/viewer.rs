@@ -49,6 +49,13 @@ pub struct Viewer {
     warmup: Graphics,
     /// 作品ごとの描画状態。切り替えても `setup()` の結果を失わないため。
     states: Vec<Option<GraphicsState>>,
+    /// 直前のフレームで画面を消さなかった作品。
+    ///
+    /// 消さない作品は、すでにキャンバスに載っているものを当てにしている。
+    /// 切り替えや大きさ変更でキャンバスを捨てたら、頭から動かし直さないと
+    /// 地の色ごと失われる。`background()` を最初の 1 回だけ呼ぶ書き方が
+    /// あり、そういう作品は白い画面のままになる。
+    leans_on_the_canvas: Vec<bool>,
 
     paused: bool,
     started: Instant,
@@ -77,8 +84,10 @@ impl Viewer {
     pub fn new(sketches: Vec<LoadedSketch>) -> Self {
         let frame_counts = vec![0; sketches.len()];
         let states = vec![None; sketches.len()];
+        let leans_on_the_canvas = vec![false; sketches.len()];
         Self {
             states,
+            leans_on_the_canvas,
             sketches,
             frame_counts,
             current: 0,
@@ -107,6 +116,15 @@ impl Viewer {
     pub fn set_fonts(&mut self, fonts: Vec<Vec<u8>>) {
         self.graphics.font.set_fonts(fonts.clone());
         self.warmup.font.set_fonts(fonts);
+    }
+
+    /// キャンバスを捨てたら、この作品は動かし直す必要があるか。
+    ///
+    /// 毎フレーム `background()` で塗り直す作品は要らない。溜めた絵や
+    /// 一度きりの地塗りを当てにしている作品だけが対象。
+    fn leans_on_the_canvas(&self, index: usize) -> bool {
+        self.sketches.get(index).is_some_and(LoadedSketch::draws_once)
+            || self.leans_on_the_canvas.get(index).copied().unwrap_or(false)
     }
 
     /// 設定の当てはめ方を描画側の型へ。
@@ -172,6 +190,7 @@ impl Viewer {
             *slot = sketch;
             self.frame_counts[index] = 0;
             self.states[index] = None;
+            self.leans_on_the_canvas[index] = false;
             self.graphics.reset_state();
             self.epoch += 1;
         }
@@ -183,6 +202,7 @@ impl Viewer {
         self.sketches.insert(index, sketch);
         self.frame_counts.insert(index, 0);
         self.states.insert(index, None);
+        self.leans_on_the_canvas.insert(index, false);
         if self.current >= index && self.sketches.len() > 1 {
             self.current += 1;
         }
@@ -196,6 +216,12 @@ impl Viewer {
         self.sketches.remove(index);
         self.frame_counts.remove(index);
         self.states.remove(index);
+        self.leans_on_the_canvas.remove(index);
+        // 手前が消えたぶん、見ている位置も繰り上がる。そうしないと
+        // 別の作品を指したままになる。
+        if self.current > index {
+            self.current -= 1;
+        }
         self.current = self.current.min(self.sketches.len().saturating_sub(1));
         self.graphics.reset_state();
         self.epoch += 1;
@@ -258,7 +284,7 @@ impl Viewer {
         if self.sketches.is_empty() {
             return None;
         }
-        if resized && self.sketches[self.current].draws_once() {
+        if resized && self.leans_on_the_canvas(self.current) {
             self.sketches[self.current].restart();
             self.graphics.reset_state();
         }
@@ -293,6 +319,9 @@ impl Viewer {
         let t0 = Instant::now();
         self.sketches[self.current].step(&mut self.graphics);
         self.sketch_ms = smooth(self.sketch_ms, t0.elapsed().as_secs_f32() * 1000.0);
+        // このフレームで画面を消したか。消していなければ、次に開くときは
+        // 頭から動かし直す。
+        self.leans_on_the_canvas[self.current] = self.graphics.draw_list().clear.is_none();
         Some(&self.graphics)
     }
 
@@ -306,6 +335,7 @@ impl Viewer {
             sketch.restart();
             self.frame_counts[self.current] = 0;
             self.states[self.current] = None;
+            self.leans_on_the_canvas[self.current] = false;
             self.graphics.reset_state();
             self.epoch += 1;
         }
@@ -381,9 +411,9 @@ impl Viewer {
             Some(state) => self.graphics.set_state(state),
             None => self.graphics.reset_state(),
         }
-        // 切り替えると溜めた絵は捨てられる。`setup()` の中だけで描く作品は
+        // 切り替えると溜めた絵は捨てられる。それを当てにしている作品は
         // 描き直す者がいないので、ここで最初から動かし直す。
-        if self.sketches[index].draws_once() {
+        if self.leans_on_the_canvas(index) {
             self.sketches[index].restart();
             self.states[index] = None;
             self.graphics.reset_state();
@@ -408,7 +438,7 @@ impl Viewer {
         for index in neighbours {
             // `setup()` の中だけで描く作品を温めても、絵は warmup 側の
             // キャンバスへ行って消える。切り替えのときに動かし直す。
-            if self.sketches[index].initialized || self.sketches[index].draws_once() {
+            if self.sketches[index].initialized || self.leans_on_the_canvas(index) {
                 continue;
             }
             self.warmup.reset_state();
@@ -679,5 +709,88 @@ mod tests {
             viewer.note_frame_work(std::time::Duration::from_micros(40_000));
         }
         assert!((viewer.stats().load - 1.0).abs() < 0.001, "{}", viewer.stats().load);
+    }
+
+    /// 手前の作品を消したら、見ている位置も繰り上がる。
+    ///
+    /// 繰り上げないと別の作品を指したままになる。そのあと新しい作品を
+    /// 足して開こうとしたとき、位置がたまたま一致すると
+    /// 「もう見ている」と判断されて切り替わらない。
+    #[test]
+    fn removing_an_earlier_sketch_keeps_pointing_at_the_same_one() {
+        let mut viewer = viewer_of(5);
+        viewer.switch_to(3);
+        viewer.remove(1);
+        assert_eq!(viewer.current_index(), 2, "指す先がずれました");
+
+        // 後ろを消しても動かない。
+        viewer.remove(3);
+        assert_eq!(viewer.current_index(), 2);
+
+        // 見ているものを消したら、その位置に繰り上がってきたものを見る。
+        viewer.remove(2);
+        assert_eq!(viewer.current_index(), 2.min(viewer.len().saturating_sub(1)));
+    }
+
+    /// 地を一度しか塗らない作品も、戻ってきたら描き直す。
+    ///
+    /// `f++ || background(0)` のように最初の 1 フレームだけ塗る書き方がある。
+    /// 切り替えでキャンバスを捨てたあと、そのまま続きを描くと、白い地に
+    /// 白い線を引くことになって何も見えない。
+    #[test]
+    fn a_sketch_that_paints_its_ground_once_is_run_again_when_shown_again() {
+        use tsubu_processing_lite::VmSketch;
+
+        let sketch = |id: &str, src: &str| {
+            LoadedSketch::new(
+                SketchInfo { id: id.into(), title: id.into(), thumbnail_frame: 1 },
+                Box::new(VmSketch::compile(src, 1).expect("コンパイルできる")),
+            )
+        };
+        let mut viewer = Viewer::new(vec![
+            sketch(
+                "once",
+                "f=0\ndraw=_=>{f++||background(0);stroke(255);line(0,0,50,50)}",
+            ),
+            sketch("other", "void draw(){ background(0); circle(50, 50, 10); }"),
+        ]);
+
+        // 1 フレーム目は地を塗る。2 フレーム目からは塗らない。
+        assert!(viewer.render_frame(200.0, 100.0).expect("描かれる").draw_list().clear.is_some());
+        assert!(viewer.render_frame(200.0, 100.0).expect("描かれる").draw_list().clear.is_none());
+
+        viewer.switch_to(1);
+        viewer.render_frame(200.0, 100.0);
+        viewer.switch_to(0);
+
+        // 戻ってきたら、また地から塗り直す。
+        let g = viewer.render_frame(200.0, 100.0).expect("描かれる");
+        assert!(g.draw_list().clear.is_some(), "地を塗り直していません。白いままになります");
+    }
+
+    /// 毎フレーム塗り直す作品は、切り替えても動かし直さない。
+    ///
+    /// 続きから見せるのが本来 (設計書 §18)。動かし直す必要があるのは、
+    /// すでにキャンバスに載っているものを当てにしている作品だけ。
+    #[test]
+    fn a_sketch_that_clears_every_frame_keeps_running() {
+        use tsubu_processing_lite::VmSketch;
+
+        let sketch = |id: &str, src: &str| {
+            LoadedSketch::new(
+                SketchInfo { id: id.into(), title: id.into(), thumbnail_frame: 1 },
+                Box::new(VmSketch::compile(src, 1).expect("コンパイルできる")),
+            )
+        };
+        let mut viewer = Viewer::new(vec![
+            sketch("clears", "c=0\ndraw=_=>{background(0);c++;circle(c,50,10)}"),
+            sketch("other", "void draw(){ background(0); circle(50, 50, 10); }"),
+        ]);
+        viewer.render_frame(200.0, 100.0);
+        viewer.switch_to(1);
+        viewer.render_frame(200.0, 100.0);
+        viewer.switch_to(0);
+        // 動かし直されていない = `setup()` から走り直さない。
+        assert!(viewer.sketches[0].initialized, "続きから見せるはずが、頭へ戻りました");
     }
 }

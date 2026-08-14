@@ -271,6 +271,7 @@ pub enum Native {
     RotateX,
     RotateY,
     RotateZ,
+    SphereDetail,
     Lights,
     NoLights,
     PopMatrix,
@@ -397,6 +398,7 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "scale", native: Native::Scale, arities: &[1, 2, 3] },
     Signature { name: "box", native: Native::Box, arities: &[1, 3] },
     Signature { name: "sphere", native: Native::Sphere, arities: &[1] },
+    Signature { name: "sphereDetail", native: Native::SphereDetail, arities: &[1, 2] },
     Signature { name: "rotateX", native: Native::RotateX, arities: &[1] },
     Signature { name: "rotateY", native: Native::RotateY, arities: &[1] },
     Signature { name: "rotateZ", native: Native::RotateZ, arities: &[1] },
@@ -767,6 +769,13 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
             g.sphere(f(0));
             Value::Void
         }
+        Native::SphereDetail => {
+            // 1 つだけなら経度・緯度とも同じ。Processing と同じ扱い。
+            let longitude = f(0) as usize;
+            let latitude = if args.len() >= 2 { f(1) as usize } else { longitude };
+            g.set_sphere_detail(longitude, latitude);
+            Value::Void
+        }
         Native::RotateX => {
             g.rotate_axis(g.to_radians(f(0)), [1.0, 0.0, 0.0]);
             Value::Void
@@ -1049,8 +1058,12 @@ fn resolve_color(args: &[Value], g: &Graphics) -> Color {
     // `stroke(-1)` のように int をひとつ渡す書き方は、詰めた色 (0xAARRGGBB)。
     // Processing は型で見分けるので、こちらも int のときだけそう読む。
     // float の `fill(128.0)` は今までどおり明度。
+    //
+    // p5.js にこの解釈は無い。`stroke(500)` はただの明度で、255 へ丸まって
+    // 白になる。詰めた色として読むと alpha が 0 になり、何も描かれない。
     if let (1, Some(Value::Int(packed))) = (args.len(), args.first())
         && !(0..=255).contains(packed)
+        && g.flavour().packs_ints_into_colors()
     {
         let v = *packed as u32;
         return Color::rgba(

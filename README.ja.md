@@ -389,6 +389,14 @@ Viewer は切り替えで何も作り直さずに済むよう、全作品をイ�
 復す。先読みも、温めた結果を預けておく。捨てるのは 1 フレーム限りのもの —
 座標変換のスタックや、閉じ忘れた `beginShape()` — だけ。
 
+キャンバスそのものは別の話。切り替えでも大きさ変更でも溜めた絵は捨てられ、
+しかも 1 枚しかない。毎フレーム塗り直す作品は困らない。困るのは、すでに
+載っているものを当てにしている作品 — 静的モードの作品と、`f++ || background(0)`
+のように最初の 1 フレームだけ地を塗ってあとは塗らない書き方。こういう作品は
+キャンバスが消えたら頭から動かし直す。そうしないと、白い地に白い線を引き続ける
+ことになる。どの作品が当てにしているかはソースから推し量らない。直前の
+フレームで画面を消したかどうか、それだけを見る。
+
 ### キャンバスはフレームをまたいで残る
 
 `draw()` の中で `background()` を呼ばなければ、前のフレームの絵がそのまま残る。
@@ -582,16 +590,21 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
 | 色の値 | `color() lerpColor()`、成分の取り出し `red() green() blue() alpha() hue() saturation() brightness()` |
 | 色と線 | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
 | 座標変換 | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`。`translate()` と `scale()` は 3 引数、`rotate()` は `(角度, x, y, z)` も取る |
-| 3D | `size(w, h, P3D)`、`box() sphere() rotateX() rotateY() rotateZ() lights() noLights()` |
+| 3D | `size(w, h, P3D)`、`box() sphere() sphereDetail() rotateX() rotateY() rotateZ() lights() noLights()` |
 | 数学 | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
 | 乱数・ノイズ | `random() randomGaussian() noise() randomSeed() millis()` |
 | 入力 | `mouseX` `mouseY` `mousePressed` `keyPressed` |
 | 定数 | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
 
 `background()` / `fill()` / `stroke()` は Processing と同じく引数の数で切り替わる。
-`stroke(-1)` のように **int をひとつ渡すと、詰めた色 (`0xAARRGGBB`) として読む**。
-`-1` は不透明な白。Processing は型で見分けるので、こちらも `int` のときだけそう
-読む (`fill(128.0)` は今までどおり明度)。
+**Processing では、`stroke(-1)` のように int をひとつ渡すと詰めた色
+(`0xAARRGGBB`) として読む**。`-1` は不透明な白。Processing は型で見分けるので、
+こちらも `int` のときだけそう読む (`fill(128.0)` は今までどおり明度)。
+
+p5.js にこの決まりは無いので、読み方は方言で分かれる。あちらでは数ひとつは
+つねに明度で、範囲へ丸める。`stroke(500)` は白、`stroke(-1)` は黒。p5 の作品に
+Processing の規則を当てると、`stroke(500)` が `0x0001F4` — alpha が 0 になり、
+何も描かれなくなる。
 
 `clear()` は積んだ絵を捨てる。Processing では透明になるが、ここでは黒で塗る。
 透明のままだと書き出したサムネイルが透けて、白い線の作品が見えなくなる。画面では
@@ -644,6 +657,15 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
   一部が消える
 - 法線はモデル行列の左上 3x3 で移すため、軸ごとに違う倍率の `scale()` を
   かけると陰影がわずかにずれる
+
+立体の稜線の太さは `strokeWeight()` の指す**キャンバスの単位**で、キャンバスを
+窓へ合わせて広げた分だけ一緒に太くなる。画面のピクセルで固定すると — 最初は
+そうしていた — 窓が大きいほど網目が細って、線だけで描く作品が本家より薄く出る。
+
+`sphere()` の分割は半径によらず 24 x 16 で、これは p5 の既定。`sphereDetail()`
+で変えられる。球に線を引く作品では網目そのものが絵なので、以前のように半径から
+分割数を決めると、小さい球が粗くなって別物になる。隣り合う面で共有する辺は
+1 本ぶんしか引かない。球では、それだけで形の量が半分になる。
 
 まだ無いもの: `camera()`、`perspective()`、`ortho()`、立方体と球以外の立体
 (`cylinder` / `cone` / `torus` / `plane`)、`texture()`、`z` つきの `vertex()`。
@@ -919,7 +941,7 @@ MSAA は 4x。Viewer もサムネイルも同じ `BatchRenderer` を通る。
 ## 開発
 
 ```sh
-cargo test --workspace      # 476 tests
+cargo test --workspace      # 485 tests
 cargo clippy --workspace --all-targets
 ```
 

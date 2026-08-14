@@ -16,7 +16,7 @@ pub use batch::{BatchRenderer, SAMPLE_COUNT};
 pub use canvas::Canvas;
 pub use capture::{CaptureError, CapturedImage, Capturer};
 pub use draw::{
-    Affine, AngleMode, ArcMode, Batch, BlendMode, CanvasFit, Color, ColorMode, DrawList, Graphics, GraphicsState, ShapeKind,
+    Affine, AngleMode, ArcMode, Batch, BlendMode, CanvasFit, Color, ColorMode, DrawList, Flavour, Graphics, GraphicsState, ShapeKind,
     Shadow, ShapeMode, TextAlign, Vertex,
 };
 pub use mat4::{Camera, Mat4, Origin};

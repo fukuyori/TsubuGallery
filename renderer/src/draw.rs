@@ -178,6 +178,47 @@ impl ShapeMode {
     }
 }
 
+/// 作品がどちらの方言で書かれているか。
+///
+/// 同じ関数でも既定値や解釈が違うところがある。方言ごとの分岐が増えたので、
+/// 旗を並べるのをやめてここに集めた。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Flavour {
+    #[default]
+    Processing,
+    P5,
+}
+
+impl Flavour {
+    /// `background()` を呼ばない作品の地。
+    ///
+    /// Processing のキャンバスは灰 204 で始まる。p5.js のキャンバスは透明で、
+    /// 後ろのページの白が透ける。半透明を塗り重ねる作品では、この地の色が
+    /// そのまま絵全体の明るさの土台になる。
+    pub fn ground(self) -> Color {
+        match self {
+            Flavour::Processing => Color::DEFAULT_BACKGROUND,
+            Flavour::P5 => Color::WHITE,
+        }
+    }
+
+    /// `text()` に線を付けるか。
+    ///
+    /// p5.js の `text()` は塗りと線の両方で描く。Processing は塗りだけ。
+    pub fn strokes_text(self) -> bool {
+        self == Flavour::P5
+    }
+
+    /// int ひとつを詰めた色 (`0xAARRGGBB`) として読むか。
+    ///
+    /// Processing の決まり。`stroke(-1)` が不透明の白になるのはこれ。
+    /// p5.js にこの解釈は無く、`stroke(500)` はただの明度 (255 へ丸める)。
+    /// 取り違えると、alpha が 0 になって何も描かれない。
+    pub fn packs_ints_into_colors(self) -> bool {
+        self == Flavour::Processing
+    }
+}
+
 /// `arc()` の閉じ方。
 ///
 /// 塗りの形と縁取りの引き方が変わる。既定は `Open`。
@@ -308,8 +349,8 @@ pub struct GraphicsState {
     space: Option<Space>,
     shadow: Option<Shadow>,
     styles: Vec<Style>,
-    text_stroked: bool,
-    default_background: Color,
+    sphere_detail: (usize, usize),
+    flavour: Flavour,
     text_size: f32,
     text_align: (TextAlign, TextAlign),
     rect_mode: ShapeMode,
@@ -331,8 +372,9 @@ impl Default for GraphicsState {
             space: None,
             shadow: None,
             styles: Vec::new(),
-            text_stroked: false,
-            default_background: Color::DEFAULT_BACKGROUND,
+            // p5.js の既定と同じ。
+            sphere_detail: (24, 16),
+            flavour: Flavour::default(),
             text_size: 12.0,
             text_align: (TextAlign::Start, TextAlign::Baseline),
             rect_mode: ShapeMode::Corner,
@@ -380,6 +422,15 @@ struct Space {
     stack: Vec<Mat4>,
     /// `lights()` が呼ばれたか。フレームごとに消える。
     lights: bool,
+}
+
+/// 立体の縁をどこまで引くか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outline {
+    /// 面ごとに 4 辺とも。箱のように面が独立しているとき。
+    All,
+    /// 面ごとに 2 辺だけ。格子で隣と辺を share しているとき。
+    Leading,
 }
 
 /// 視点より手前にある点の行き先。
@@ -443,10 +494,10 @@ pub struct Graphics {
     shadow_pass: Option<ShadowPass>,
     /// `pushStyle()` の退避先。
     styles: Vec<Style>,
-    /// `text()` に線を付けるか。p5.js の作品だけ真。
-    text_stroked: bool,
-    /// `background()` を一度も呼ばない作品の下地。
-    default_background: Color,
+    /// `sphere()` の分割数 (経度, 緯度)。
+    sphere_detail: (usize, usize),
+    /// 作品の方言。既定値の細かな違いがここから決まる。
+    flavour: Flavour,
     /// いま積んでいる三角形が深度バッファへ書くか。
     ///
     /// 2D だけの作品では一度も書かない。深さは全部 0 のままなので、
@@ -509,8 +560,9 @@ impl Graphics {
             shadow: None,
             shadow_pass: None,
             styles: Vec::new(),
-            text_stroked: false,
-            default_background: Color::DEFAULT_BACKGROUND,
+            // p5.js の既定と同じ。
+            sphere_detail: (24, 16),
+            flavour: Flavour::default(),
             depth_write: false,
             shape: None,
             font: crate::font::FontAtlas::new(),
@@ -577,7 +629,7 @@ impl Graphics {
         self.list.vertices.clear();
         self.list.indices.clear();
         self.list.batches.clear();
-        self.list.clear = Some(self.default_background);
+        self.list.clear = Some(self.flavour.ground());
         self.fill = self.fill.map(|_| Color::WHITE);
         self.stroke = self.stroke.map(|_| Color::BLACK);
         self.stroke_weight = 1.0;
@@ -677,8 +729,8 @@ impl Graphics {
             space: self.space.clone(),
             shadow: self.shadow,
             styles: self.styles.clone(),
-            text_stroked: self.text_stroked,
-            default_background: self.default_background,
+            sphere_detail: self.sphere_detail,
+            flavour: self.flavour,
             text_size: self.text_size,
             text_align: self.text_align,
             rect_mode: self.rect_mode,
@@ -700,8 +752,8 @@ impl Graphics {
         self.space = s.space;
         self.shadow = s.shadow;
         self.styles = s.styles;
-        self.text_stroked = s.text_stroked;
-        self.default_background = s.default_background;
+        self.sphere_detail = s.sphere_detail;
+        self.flavour = s.flavour;
         self.text_size = s.text_size;
         self.text_align = s.text_align;
         self.rect_mode = s.rect_mode;
@@ -1082,8 +1134,10 @@ impl Graphics {
         if len < 1e-6 {
             return;
         }
-        // 太さは画面上のピクセル。細い線は Processing も画面基準で引く。
-        let hw = (self.stroke_weight * 0.5).max(0.5);
+        // 太さはキャンバスの単位。キャンバスを表示領域へ広げた分だけ太くなる。
+        // ここを画面のピクセルで固定すると、大きな窓ほど線が細く見え、
+        // 網目で描く作品が本家より薄くなる。
+        let hw = (self.stroke_weight * 0.5 * self.base.scale_hint()).max(0.5);
         let (nx, ny) = (-dy / len * hw, dx / len * hw);
         let base = self.list.vertices.len() as u32;
         self.push_vertex([p0[0] + nx, p0[1] + ny, d0], color);
@@ -1130,7 +1184,15 @@ impl Graphics {
             ([0, 1, 3, 2], [0.0, 0.0, -1.0]),
             ([4, 6, 7, 5], [0.0, 0.0, 1.0]),
         ];
-        self.solid(&FACES.map(|(idx, n)| (idx.map(corner), n)));
+        self.solid(&FACES.map(|(idx, n)| (idx.map(corner), n)), Outline::All);
+    }
+
+    /// `sphereDetail()`。経度と緯度の分割数。
+    ///
+    /// 既定は p5.js と同じ 24 x 16。ここが粗いと、線で描く作品の網目が
+    /// はっきり見えてしまう。
+    pub fn set_sphere_detail(&mut self, longitude: usize, latitude: usize) {
+        self.sphere_detail = (longitude.clamp(3, 64), latitude.clamp(2, 64));
     }
 
     /// `sphere()`。緯度と経度で分ける。
@@ -1139,9 +1201,7 @@ impl Graphics {
         if radius <= 0.0 {
             return;
         }
-        // Processing の既定は 30 分割。小さい球にそこまでは要らない。
-        let rings = ((radius * 0.5) as usize).clamp(6, 24);
-        let segments = rings * 2;
+        let (segments, rings) = self.sphere_detail;
         let point = |ring: usize, seg: usize| {
             let phi = std::f32::consts::PI * ring as f32 / rings as f32;
             let theta = std::f32::consts::TAU * seg as f32 / segments as f32;
@@ -1166,11 +1226,12 @@ impl Graphics {
                 faces.push((quad.map(|p| [p[0] * radius, p[1] * radius, p[2] * radius]), n));
             }
         }
-        self.solid(&faces);
+        // 格子なので、隣の面と共有する辺は 1 本ぶんで足りる。
+        self.solid(&faces, Outline::Leading);
     }
 
     /// 面の並びを塗って縁取る。ローカル座標で受け取る。
-    fn solid(&mut self, faces: &[([[f32; 3]; 4], [f32; 3])]) {
+    fn solid(&mut self, faces: &[([[f32; 3]; 4], [f32; 3])], outline: Outline) {
         let Some(space) = &self.space else { return };
         let model = space.model;
         let was = std::mem::replace(&mut self.depth_write, true);
@@ -1184,9 +1245,15 @@ impl Graphics {
             }
         }
         if let Some(stroke) = self.stroke {
+            // 格子では、辺を 4 本とも引くと隣の面と二度引きになる。
+            // 球は面が数百枚あるので、ここが倍の差になる。
+            let count = match outline {
+                Outline::All => 4,
+                Outline::Leading => 2,
+            };
             for (quad, _) in faces {
                 let eye = quad.map(|p| model.point(p));
-                for i in 0..4 {
+                for i in 0..count {
                     self.edge(eye[i], eye[(i + 1) % 4], stroke);
                 }
             }
@@ -1673,24 +1740,18 @@ impl Graphics {
     // ---- 文字 (設計書 §14.2) --------------------------------------------
 
     /// `textSize()`。
-    /// `text()` に線を付けるか。p5.js は付け、Processing は付けない。
-    ///
-    /// 作品を読み込んだ側が方言に合わせて決める。
-    pub fn set_text_stroked(&mut self, on: bool) {
-        self.text_stroked = on;
+    /// 作品の方言を伝える。読み込んだ側が決める。
+    pub fn set_flavour(&mut self, flavour: Flavour) {
+        self.flavour = flavour;
     }
 
-    /// `background()` を一度も呼ばない作品の下地。
-    ///
-    /// Processing は灰 204 で始まる。p5.js のキャンバスは透明で、後ろの
-    /// ページの白が透ける。半透明を塗り重ねる作品では、この下地の色が
-    /// そのまま画面全体の明るさになる。
-    pub fn set_default_background(&mut self, color: Color) {
-        self.default_background = color;
+    pub fn flavour(&self) -> Flavour {
+        self.flavour
     }
 
+    /// `background()` を一度も呼ばない作品の地。
     pub fn default_background(&self) -> Color {
-        self.default_background
+        self.flavour.ground()
     }
 
     pub fn set_text_size(&mut self, size: f32) {
@@ -1721,7 +1782,7 @@ impl Graphics {
     pub fn text(&mut self, text: &str, x: f32, y: f32) {
         // p5.js の text() は塗りと線の両方を使う。線が付かないと、白い地に
         // 白い字を置く作品が消えてしまう。Processing の text() は塗りだけ。
-        if self.text_stroked
+        if self.flavour.strokes_text()
             && let Some(edge) = self.stroke
             && self.stroke_weight > 0.0
         {
@@ -1730,12 +1791,12 @@ impl Graphics {
             let r = self.stroke_weight * 0.5;
             let fill = self.fill.take();
             self.fill = Some(edge);
-            self.text_stroked = false;
+            let was = std::mem::replace(&mut self.flavour, Flavour::Processing);
             for i in 0..8 {
                 let a = std::f32::consts::TAU * i as f32 / 8.0;
                 self.text(text, x + a.cos() * r, y + a.sin() * r);
             }
-            self.text_stroked = true;
+            self.flavour = was;
             self.fill = fill;
         }
 
@@ -2458,5 +2519,34 @@ mod tests {
         g.rect(0.0, 0.0, 100.0, 100.0);
         let right = g.draw_list().vertices.iter().map(|p| p.pos[0]).fold(f32::MIN, f32::max);
         assert_eq!(right, 200.0, "切り替えが次のフレームまで効いていません");
+    }
+
+    /// 立体の稜線の太さも、キャンバスを広げた分だけ太くなる。
+    ///
+    /// `strokeWeight` はキャンバスの単位。画面のピクセルで固定すると、
+    /// 大きな窓ほど線が細く見え、網目で描く作品が本家より薄くなる。
+    #[test]
+    fn the_edges_of_a_solid_scale_with_the_canvas() {
+        // 同じ作品を等倍と 4 倍で描く。全体がきっちり 4 倍になるはず。
+        let extent = |view: f32| {
+            let mut g = Graphics::new();
+            g.begin_frame(view, view);
+            g.set_canvas(100.0, 100.0);
+            g.enable_3d(Origin::Center);
+            g.no_fill();
+            g.stroke(0.0);
+            g.stroke_weight(6.0);
+            g.draw_box(40.0, 40.0, 40.0);
+            let v = &g.draw_list().vertices;
+            let x0 = v.iter().map(|p| p.pos[0]).fold(f32::MAX, f32::min);
+            let x1 = v.iter().map(|p| p.pos[0]).fold(f32::MIN, f32::max);
+            x1 - x0
+        };
+        let small = extent(100.0);
+        let large = extent(400.0);
+        assert!(
+            (large - small * 4.0).abs() < 0.5,
+            "線の太さが一緒に拡大されていません: {small} と {large}"
+        );
     }
 }

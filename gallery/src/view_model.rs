@@ -348,7 +348,7 @@ mod tests {
 
     fn view(count: usize, columns: usize) -> GalleryView {
         let items = (0..count)
-            .map(|i| GalleryItem::new(format!("id{i}"), format!("Title {i}")))
+            .map(|i| GalleryItem::new(format!("id{i}"), format!("Title {i}"), 0))
             .collect();
         let mut v = GalleryView::new(items);
         v.set_columns(columns);
@@ -454,7 +454,7 @@ mod tests {
         v.select(1);
         let selected_id = v.selected_item().expect("ある").id.clone();
 
-        v.insert(0, GalleryItem::new("new", "New"));
+        v.insert(0, GalleryItem::new("new", "New", 0));
         assert_eq!(v.selected_item().expect("ある").id, selected_id);
     }
 
@@ -462,7 +462,7 @@ mod tests {
     fn inserting_after_the_selection_leaves_it_alone() {
         let mut v = view(3, 3);
         v.select(0);
-        v.insert(2, GalleryItem::new("new", "New"));
+        v.insert(2, GalleryItem::new("new", "New", 0));
         assert_eq!(v.selected_index(), 0);
     }
 
@@ -500,8 +500,8 @@ mod tests {
     #[test]
     fn text_filter_matches_title_and_id_case_insensitively() {
         let mut v = GalleryView::new(vec![
-            GalleryItem::new("spiral", "Spiral"),
-            GalleryItem::new("pulse-grid", "Pulse Grid"),
+            GalleryItem::new("spiral", "Spiral", 0),
+            GalleryItem::new("pulse-grid", "Pulse Grid", 0),
         ]);
         v.set_filter(Filter { text: "SPI".into(), ..Default::default() });
         assert_eq!(v.visible(), &[0]);
@@ -615,5 +615,35 @@ mod tests {
         assert_eq!(v.visible_len(), 0);
         assert!(v.selected().is_none());
         assert!(v.selected_item().is_none());
+    }
+
+    /// 作成日時は作るときに必ず渡す。
+    ///
+    /// 既定値のまま作れると入れ忘れる。忘れると 0 になり、
+    /// 「最近追加」でいちばん古い扱いで末尾へ落ちる。
+    #[test]
+    fn an_item_carries_the_time_it_was_made() {
+        let item = GalleryItem::new("a", "A", 1_234);
+        assert_eq!(item.created_at, 1_234);
+    }
+
+    /// 足したばかりの作品が「最近追加」の先頭に来る。
+    ///
+    /// 作成日時を入れずに差し込むと 0 になり、いちばん古い扱いで末尾へ
+    /// 落ちる。作った直後に見当たらないのは分かりにくい。
+    #[test]
+    fn a_freshly_added_sketch_comes_first_under_recently_added() {
+        let mut v = view(3, 3);
+        for (i, item) in v.items.iter_mut().enumerate() {
+            item.created_at = 100 + i as i64;
+        }
+        v.set_sort(SortOrder::RecentlyAdded);
+
+        let mut fresh = GalleryItem::new("new", "New", 0);
+        fresh.created_at = 999;
+        v.insert(1, fresh);
+
+        let first = v.visible().first().copied().expect("何かある");
+        assert_eq!(v.item(first).map(|i| i.id.as_str()), Some("new"), "先頭に来ません");
     }
 }

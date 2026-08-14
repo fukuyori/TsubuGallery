@@ -886,7 +886,7 @@ mod tests {
 
     fn view(count: usize) -> GalleryView {
         GalleryView::new(
-            (0..count).map(|i| GalleryItem::new(format!("id{i}"), format!("Title {i}"))).collect(),
+            (0..count).map(|i| GalleryItem::new(format!("id{i}"), format!("Title {i}"), 0)).collect(),
         )
     }
 
@@ -1037,7 +1037,7 @@ mod view_mode_tests {
     fn view_of(n: usize) -> GalleryView {
         GalleryView::new(
             (0..n)
-                .map(|i| GalleryItem::new(format!("sketch-{i}"), format!("Sketch {i}")))
+                .map(|i| GalleryItem::new(format!("sketch-{i}"), format!("Sketch {i}"), 0))
                 .collect(),
         )
     }
@@ -1136,7 +1136,7 @@ mod link_tests {
     use tsubu_gallery::GalleryItem;
 
     fn view_with(link: &str) -> GalleryView {
-        let mut item = GalleryItem::new("a", "A");
+        let mut item = GalleryItem::new("a", "A", 0);
         item.author = "だれか".into();
         item.link = link.to_string();
         GalleryView::new(vec![item])

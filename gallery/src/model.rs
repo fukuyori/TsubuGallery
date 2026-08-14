@@ -61,7 +61,12 @@ pub struct GalleryItem {
 }
 
 impl GalleryItem {
-    pub fn new(id: impl Into<String>, title: impl Into<String>) -> Self {
+    /// 作成日時は必ず渡す。
+    ///
+    /// 既定値のまま作れるようにしておくと、入れ忘れて 0 のまま並ぶ。
+    /// 「最近追加」でいちばん古い扱いになり、足したばかりの作品が
+    /// 末尾へ落ちる。忘れられないよう引数にしてある。
+    pub fn new(id: impl Into<String>, title: impl Into<String>, created_at: i64) -> Self {
         Self {
             id: id.into(),
             title: title.into(),
@@ -73,7 +78,7 @@ impl GalleryItem {
             thumbnail: ThumbnailState::default(),
             tags: BTreeSet::new(),
             collections: BTreeSet::new(),
-            created_at: 0,
+            created_at,
             last_opened_at: None,
         }
     }
@@ -141,7 +146,7 @@ mod collection_tests {
     use super::*;
 
     fn item_in(collections: &[&str]) -> GalleryItem {
-        let mut item = GalleryItem::new("a", "A");
+        let mut item = GalleryItem::new("a", "A", 0);
         item.collections = collections.iter().map(|c| c.to_string()).collect();
         item
     }

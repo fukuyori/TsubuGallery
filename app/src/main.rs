@@ -326,7 +326,8 @@ impl App {
         let mut sketches = Vec::with_capacity(outcomes.len());
         let mut sources = Vec::with_capacity(outcomes.len());
         for outcome in outcomes {
-            let mut item = GalleryItem::new(&outcome.sketch.info.id, &outcome.sketch.info.title);
+            // 作成日時はこのあと sync_metadata が DB から入れ直す。
+            let mut item = GalleryItem::new(&outcome.sketch.info.id, &outcome.sketch.info.title, 0);
             item.dialect = outcome.sketch.dialect().map(|d| d.label().to_string());
             if let Some(error) = outcome.error {
                 item.status = SketchStatus::Error(error);
@@ -907,7 +908,15 @@ impl App {
             thumbnail_frame: self.settings.capture_frame,
         };
 
-        let mut item = GalleryItem::new(&id, &title);
+        // 「最近追加」で先頭に来るように、その場で作成日時を入れる。DB へ
+        // 書くのは後だが、画面はいま並べ替える。同じ名前の行が残っていれば
+        // その日時を引き継ぐ (消して作り直したとき)。
+        let created_at = self
+            .repository
+            .as_ref()
+            .and_then(|repo| repo.get(&id).ok().flatten())
+            .map_or_else(repository::now, |meta| meta.created_at);
+        let mut item = GalleryItem::new(&id, &title, created_at);
         let sketch: Box<dyn tsubu_processing_lite::Sketch> = match compiled {
             Ok(sketch) => {
                 // VmSketch は必ずどちらかの方言で読めている。
@@ -1580,8 +1589,10 @@ impl App {
                         && ok
                     {
                         self.editor = None;
-                        self.viewer.restart_current();
+                        // 先に移ってから動かし直す。逆にすると、直前まで
+                        // 見ていた別の作品を動かし直すだけになる。
                         self.open_viewer(index);
+                        self.viewer.restart_current();
                     }
                 }
                 EditorAction::Expand => {
@@ -1856,7 +1867,7 @@ mod tests {
     use super::*;
 
     fn item(id: &str) -> GalleryItem {
-        GalleryItem::new(id, tsubu_core::library::title_from_id(id))
+        GalleryItem::new(id, tsubu_core::library::title_from_id(id), 0)
     }
 
     fn source(text: &str) -> loader::Source {

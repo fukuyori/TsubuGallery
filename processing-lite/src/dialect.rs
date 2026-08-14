@@ -69,7 +69,6 @@ const UNSUPPORTED_3D: &[&str] = &[
     "cone",
     "torus",
     "plane",
-    "sphereDetail",
     "texture",
     "createShape",
     "shininess",
