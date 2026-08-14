@@ -714,3 +714,380 @@ fn an_unknown_class_is_refused() {
         VmSketch::compile("class Thing{}\nvoid draw(){ Thing t = new Thing(); }", 1).is_ok()
     );
 }
+
+
+// ---- 8 周目: 静的モードと複数宣言 ------------------------------------------
+
+/// `setup()` も `draw()` も書かない書き方 (静的モード)。
+///
+/// Processing は関数の外に直接書いた文を `setup()` の中身として扱い、1 回だけ
+/// 描く。つぶやきの短いコードはこの形が多い。
+#[test]
+fn a_sketch_without_setup_or_draw_runs_once() {
+    // 静的モードは setup で描くので、setup を走らせた直後の枚数を数える。
+    let in_setup = |src: &str| -> usize {
+        let mut s = VmSketch::compile(src, 1).expect("コンパイルできる");
+        let mut g = Graphics::new();
+        g.begin_frame(400.0, 400.0);
+        s.setup(&mut g);
+        assert!(s.error().is_none(), "{:?} / {src}", s.error());
+        g.draw_list().indices.len()
+    };
+    let one = in_setup("circle(0,0,10);");
+    assert!(one > 0, "静的モードで何も描けていない");
+
+    assert_eq!(in_setup("size(400,400);\ncircle(0,0,10);"), one);
+    // ループも書ける。
+    assert_eq!(in_setup("for(int i=0;i<5;i++)circle(0,0,10);") / one, 5);
+    // 変数も宣言できる。
+    assert_eq!(
+        in_setup("float r = 3;\nfor(int i=0;i<3;i++){circle(0,0,10);r+=1;}") / one,
+        3
+    );
+    // ユーザーが setup を書いていれば、そちらが優先される。
+    assert_eq!(
+        in_setup("void setup(){ circle(0,0,10); circle(0,0,10); }\nvoid draw(){}") / one,
+        2
+    );
+}
+
+/// `float r, i, d;` のように 1 文で複数を宣言できる。
+#[test]
+fn several_variables_can_share_one_declaration() {
+    let v = |body: &str| probe(&format!("void draw(){{ {body} rect(0,0,9,9); }}"));
+
+    assert_eq!(v("float a, b; a = 3; b = 4; fill(a*b*10, 0, 0);"), 120);
+    // 初期値を混ぜられる。
+    assert_eq!(v("float a = 2, b, c = 5; b = 3; fill(a*b*c*4, 0, 0);"), 120);
+    // グローバルでも書ける。
+    assert_eq!(
+        probe("float a = 2, b = 3;\nvoid draw(){ fill(a*b*20, 0, 0); rect(0,0,9,9); }"),
+        120
+    );
+    // 配列型も並べられる。
+    assert_eq!(
+        probe("int[] a = {1,2}, b = {3};\nvoid draw(){ fill(a[1]*b[0]*20, 0, 0); rect(0,0,9,9); }"),
+        120
+    );
+}
+
+/// `TAU` と `resetMatrix()`。
+#[test]
+fn tau_and_reset_matrix_exist() {
+    let v = |body: &str| probe(&format!("void draw(){{ {body} rect(0,0,9,9); }}"));
+    // TAU は TWO_PI と同じ。
+    assert_eq!(v("fill(TAU*40, 0, 0);"), 251);
+    // resetMatrix() は積んだ変換を捨てる。
+    let b = bounds("void draw(){ noStroke(); translate(100,100); resetMatrix(); rect(0,0,20,20); }");
+    assert!(b.0 < 0.01 && b.1 < 0.01, "変換が残っています: {b:?}");
+}
+
+
+// ---- 9 周目: 式としての代入・clear()・詰めた色 -----------------------------
+
+/// 引数の中でも代入できる。`line(x, y, x += dx, y += dy)` の形。
+#[test]
+fn assignment_works_inside_an_expression() {
+    let v = |body: &str| probe(&format!("void draw(){{ {body} rect(0,0,9,9); }}"));
+
+    // 代入した値がそのまま式の値になる。
+    assert_eq!(v("float x = 1; fill((x += 2) * 40, 0, 0);"), 120);
+    // 書き込みも起きている。
+    assert_eq!(v("float x = 1; x += 2; fill(x * 40, 0, 0);"), 120);
+    // 単純代入。
+    assert_eq!(v("float x; fill((x = 5) * 30, 0, 0);"), 150);
+    // 引数の途中で書き換えても、あとの引数は新しい値を見る。
+    assert_eq!(v("float x = 1; fill((x += 1) * 20, (x += 1) * 20, 0);"), 40);
+    // 配列の要素へも書ける。
+    assert_eq!(v("float[] a = new float[2]; fill((a[0] += 3) * 40, 0, 0);"), 120);
+
+    // 実際の使い方。線を引きながら位置を進める。
+    let mut s = VmSketch::compile(
+        "float x,y;\nvoid draw(){ for(int i=0;i<4;i++) line(x,y,x+=10,y+=10); }",
+        1,
+    )
+    .expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    s.draw(&mut g);
+    assert!(s.error().is_none(), "{:?}", s.error());
+    // 線 1 本が四角 1 つ。4 本引く。
+    assert_eq!(g.draw_list().indices.len(), 4 * 6);
+}
+
+/// `clear()` は積んだ絵を捨てる。
+#[test]
+fn clear_wipes_the_canvas() {
+    let mut s = VmSketch::compile("void draw(){ circle(0,0,10); clear(); }", 1)
+        .expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    s.draw(&mut g);
+    assert!(s.error().is_none(), "{:?}", s.error());
+    assert!(g.draw_list().indices.is_empty(), "clear() で消えていません");
+    // 透明ではなく黒で塗る。透明だとサムネイルが透けてしまう。
+    assert_eq!(g.draw_list().clear, Some(tsubu_renderer::Color::BLACK));
+}
+
+/// `stroke(-1)` のように int をひとつ渡す書き方は、詰めた色 (0xAARRGGBB)。
+#[test]
+fn a_single_negative_int_is_a_packed_colour() {
+    let v = |body: &str| probe(&format!("void draw(){{ {body} rect(0,0,9,9); }}"));
+
+    // -1 は 0xFFFFFFFF、つまり不透明な白。
+    assert_eq!(v("fill(-1);"), 255);
+    // 0..255 はこれまでどおり明度。
+    assert_eq!(v("fill(128);"), 128);
+    assert_eq!(v("fill(0);"), 0);
+    // 詰めた色から赤を取り出せる。0xFFFF6B35 の R は 255。
+    assert_eq!(v("fill(0xFFFF6B35);"), 255);
+
+    // p5 の数値は 1 種類なので、この読み替えは起きない。
+    assert_eq!(
+        probe("draw=_=>{createCanvas(400,400);fill(128);rect(0,0,9,9)}"),
+        128
+    );
+}
+
+
+// ---- 10 周目: 前置増減・配列初期化子・色の成分 ------------------------------
+
+/// `++t` は増やしたあとの値、`t++` は増やす前の値。
+#[test]
+fn prefix_and_postfix_increment_differ() {
+    let v = |body: &str| probe(&format!("void draw(){{ {body} rect(0,0,9,9); }}"));
+
+    assert_eq!(v("int t = 1; fill(++t * 50, 0, 0);"), 100);
+    assert_eq!(v("int t = 1; fill(t++ * 50, 0, 0);"), 50);
+    // どちらも書き込みは起きる。
+    assert_eq!(v("int t = 1; t++; fill(t * 50, 0, 0);"), 100);
+    assert_eq!(v("int t = 3; fill(--t * 50, 0, 0);"), 100);
+    // 添字の中でも使える。
+    assert_eq!(
+        v("int[] a = new int[4]; int t = 0; a[++t] = 3; fill(a[1] * 50, 0, 0);"),
+        150
+    );
+}
+
+/// `new int[]{1, 2}` は中身の並びで大きさが決まる。
+#[test]
+fn an_array_can_be_created_from_a_list() {
+    let v = |body: &str| probe(&format!("void draw(){{ {body} rect(0,0,9,9); }}"));
+
+    assert_eq!(v("int[] a = new int[]{3, 4}; fill(a[0] * a[1] * 10, 0, 0);"), 120);
+    // 既存の書き方も残る。
+    assert_eq!(v("int[] a = {3, 4}; fill(a[0] * a[1] * 10, 0, 0);"), 120);
+    // 2 次元配列の行として入れられる。
+    assert_eq!(
+        v("int[][] p = new int[2][2]; p[1] = new int[]{6, 0}; fill(p[1][0] * 20, 0, 0);"),
+        120
+    );
+}
+
+/// 色の成分を取り出す。
+#[test]
+fn colour_components_can_be_read() {
+    let v = |body: &str| probe(&format!("void draw(){{ {body} rect(0,0,9,9); }}"));
+
+    assert_eq!(v("fill(red(color(200, 100, 50)), 0, 0);"), 200);
+    assert_eq!(v("fill(green(color(200, 100, 50)), 0, 0);"), 100);
+    assert_eq!(v("fill(blue(color(200, 100, 50)), 0, 0);"), 50);
+    assert_eq!(v("fill(alpha(color(200, 100, 50)), 0, 0);"), 255);
+    // 明度は最大の成分。既定では 0..255 で返る。
+    assert_eq!(v("fill(brightness(color(200, 100, 50)), 0, 0);"), 200);
+    assert_eq!(v("fill(brightness(color(0, 0, 0)) + 30, 0, 0);"), 30);
+    // 彩度。灰色は 0。
+    assert_eq!(v("fill(saturation(color(100, 100, 100)) + 40, 0, 0);"), 40);
+    assert_eq!(v("fill(saturation(color(255, 0, 0)), 0, 0);"), 255);
+    // 詰めた色からも読める。
+    assert_eq!(v("fill(red(0xFFC86432), 0, 0);"), 200);
+}
+
+/// `randomGaussian()` は平均 0 のあたりに散る。
+#[test]
+fn random_gaussian_is_centred() {
+    let mut s = VmSketch::compile(
+        "float sum, n;\nvoid draw(){ for(int i=0;i<400;i++){ sum += randomGaussian(); n++; } }",
+        1,
+    )
+    .expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    s.draw(&mut g);
+    assert!(s.error().is_none(), "{:?}", s.error());
+
+    // 400 個の平均。0 のまわりに集まる。
+    let sum = g.draw_list();
+    let _ = sum;
+    // 値そのものは色に載せて確かめる。
+    let mean = probe(
+        "float sum;\nvoid draw(){ for(int i=0;i<400;i++) sum += randomGaussian(); fill(abs(sum/400)*255, 0, 0); rect(0,0,9,9); }",
+    );
+    assert!(mean < 60, "平均が 0 から離れすぎています: {mean}");
+}
+
+
+// ---- 11 周目: 角丸・String・drawingContext ---------------------------------
+
+/// `rect()` は 5 個目以降の引数で角が丸くなる。
+#[test]
+fn rectangles_can_have_rounded_corners() {
+    let square = triangles("draw=_=>{createCanvas(400,400);noStroke();rect(0,0,40,40)}");
+    let round = triangles("draw=_=>{createCanvas(400,400);noStroke();rect(0,0,40,40,8)}");
+    assert_eq!(square, 2, "角のない四角は三角形 2 つ");
+    assert!(round > square, "角丸のほうが分割が多いはず: {round}");
+
+    // 4 隅それぞれ指定できる。
+    assert!(triangles("draw=_=>{createCanvas(400,400);noStroke();rect(0,0,40,40,2,4,6,8)}") > 2);
+    // 半径 0 なら元の四角に戻る。
+    assert_eq!(triangles("draw=_=>{createCanvas(400,400);noStroke();rect(0,0,40,40,0)}"), 2);
+
+    // 枠からはみ出さない。
+    let b = bounds("draw=_=>{createCanvas(400,400);noStroke();rect(10,10,40,40,8)}");
+    assert!(b.0 >= 9.99 && b.2 <= 50.01, "はみ出しています: {b:?}");
+}
+
+/// `String.fromCodePoint()` は番号から 1 文字を作る。
+#[test]
+fn string_from_code_point_builds_a_character() {
+    let v = |body: &str| probe(&format!("draw=_=>{{createCanvas(400,400);{body};rect(0,0,9,9)}}"));
+    assert_eq!(v("fill(String.fromCodePoint(65).length*200,0,0)"), 200);
+    // 麻雀牌のような範囲外の文字でも 1 文字。
+    assert_eq!(v("s=String.fromCodePoint(126976);fill(s.length*200,0,0)"), 200);
+    assert_eq!(v("fill((String.fromCodePoint(65)=='A')?200:0,0,0)"), 200);
+}
+
+/// `drawingContext` はブラウザのものなので効かないが、書いても止まらない。
+#[test]
+fn drawing_context_accepts_writes_without_failing() {
+    let mut s = VmSketch::compile(
+        "draw=_=>{createCanvas(400,400);D=drawingContext;D.shadowBlur=25;D.shadowColor=color(0);circle(1,1,1)}",
+        1,
+    )
+    .expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    s.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    s.draw(&mut g);
+    assert!(s.error().is_none(), "{:?}", s.error());
+    assert!(!g.draw_list().indices.is_empty(), "円が描かれていません");
+}
+
+
+/// 見つからない変数は、場所を添えて知らせる。
+///
+/// 位置が `0行0列` では直しようがない。
+#[test]
+fn an_unknown_variable_is_reported_with_its_place() {
+    for (src, line, column) in [
+        ("void draw(){ circle(nosuch, 1, 1); }", 1, 21),
+        ("void setup(){ size(720, 720, NOPE); }\nvoid draw(){}", 1, 30),
+        ("void draw(){ float a = 1; a += missing; }", 1, 32),
+    ] {
+        match VmSketch::compile(src, 1) {
+            Ok(_) => panic!("{src} は弾かれるはず"),
+            Err(e) => {
+                assert_eq!((e.line, e.column), (line, column), "{src} → {e}");
+                assert!(e.to_string().contains("見つかりません"), "{e}");
+            }
+        }
+    }
+}
+
+
+// ---- 3D (設計書 §14.2) --------------------------------------------------
+
+/// `size(w, h, P3D)` の作品が、遠近のついた立体を描く。
+#[test]
+fn a_box_is_drawn_in_perspective() {
+    // 6 面 × 2 枚の塗りと、12 本の稜線 × 2 枚。
+    let filled = "void setup(){size(400,400,P3D);}\n\
+                  void draw(){noStroke();translate(200,200,0);box(50);}";
+    assert_eq!(triangles(filled), 12, "面が 6 枚ぶんない");
+
+    // 手前の面は奥の面より大きく写る。それが遠近。
+    let (x0, _, x1, _) = bounds(filled);
+    let near = "void setup(){size(400,400,P3D);}\n\
+                void draw(){noStroke();translate(200,200,120);box(50);}";
+    let (nx0, _, nx1, _) = bounds(near);
+    assert!(nx1 - nx0 > (x1 - x0) * 1.3, "近づけても大きくなりません: {} → {}", x1 - x0, nx1 - nx0);
+}
+
+/// `z = 0` の平面は 2D と同じ座標で写る。
+///
+/// P3D と書いただけの作品が、2D のつもりで置いた図形をそのままの場所に
+/// 出せるということ。
+#[test]
+fn the_flat_plane_lands_where_2d_would_put_it() {
+    let flat = bounds("void setup(){size(400,400);}\nvoid draw(){noStroke();rect(100,120,40,20);}");
+    let deep =
+        bounds("void setup(){size(400,400,P3D);}\nvoid draw(){noStroke();rect(100,120,40,20);}");
+    for (a, b) in [(flat.0, deep.0), (flat.1, deep.1), (flat.2, deep.2), (flat.3, deep.3)] {
+        assert!((a - b).abs() < 0.5, "2D と 3D で場所が違います: {flat:?} と {deep:?}");
+    }
+}
+
+/// `resetMatrix()` は 3D ではカメラごと消える。
+///
+/// つぶやき系の作品が原点まわりに立体を並べるときの定石。これが効かないと
+/// ぜんぶ画面の左上へ寄ってしまう。
+#[test]
+fn resetting_the_matrix_moves_the_eye_to_the_origin() {
+    let (x0, y0, x1, y1) = bounds(
+        "void setup(){size(400,400,P3D);}\n\
+         void draw(){noStroke();resetMatrix();translate(0,0,-200);box(40);}",
+    );
+    let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    assert!((cx - 200.0).abs() < 1.0 && (cy - 200.0).abs() < 1.0, "中央に来ません: {cx}, {cy}");
+}
+
+/// p5.js の `WEBGL` は原点が画面の中央。
+#[test]
+fn webgl_starts_from_the_centre() {
+    let (x0, y0, x1, y1) =
+        bounds("function setup(){createCanvas(400,400,WEBGL);}\n\
+                function draw(){noStroke();box(40);}");
+    let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    assert!((cx - 200.0).abs() < 1.0 && (cy - 200.0).abs() < 1.0, "中央に来ません: {cx}, {cy}");
+}
+
+/// `box(0)` は何も描かない。
+///
+/// つぶやき系は `box(cond ? 6 : 0)` で立方体を間引く。0 で 1 枚でも
+/// 描いてしまうと、画面が立方体で埋まる。
+#[test]
+fn a_box_of_zero_size_draws_nothing() {
+    assert_eq!(
+        triangles("void setup(){size(400,400,P3D);}\nvoid draw(){translate(200,200,0);box(0);}"),
+        0
+    );
+}
+
+/// 3 次元のノイズは、奥行きの向きにも滑らかにつながる。
+///
+/// 2D のノイズを z でずらすやり方だと、切る位置ごとに別の模様になり、
+/// 立体の中身が砂嵐になる。
+#[test]
+fn noise_is_continuous_along_the_third_axis() {
+    let at = |z: f32| {
+        let src = format!(
+            "float v;\nvoid setup(){{size(400,400);}}\n\
+             void draw(){{ v = noise(1.5, 2.5, {z}); noStroke(); rect(0, 0, v * 100, 10); }}"
+        );
+        let (_, _, x1, _) = bounds(&src);
+        x1
+    };
+    let base = at(3.0);
+    // すぐ隣ならほとんど変わらない。
+    assert!((at(3.01) - base).abs() < 2.0, "隣が飛んでいます: {base} と {}", at(3.01));
+    // 遠ければ別の値になる。ずっと同じでは 3D になっていない。
+    let far: Vec<f32> = (1..8).map(|i| at(3.0 + i as f32)).collect();
+    assert!(far.iter().any(|v| (v - base).abs() > 2.0), "z を変えても同じです: {base}, {far:?}");
+}

@@ -1,5 +1,8 @@
 // ピクセル座標 (左上原点) を受け取り NDC へ変換するだけの最小シェーダ。
 // 頂点色は CPU 側で線形 RGB へ変換済み。
+//
+// z は奥行き。0 が手前、1 が奥。3D も CPU 側で画面座標まで落としてから
+// 来るので、ここでやることは 2D と変わらない。
 
 struct Uniforms {
     viewport: vec2<f32>,
@@ -23,7 +26,7 @@ struct VsOut {
 
 @vertex
 fn vs_main(
-    @location(0) pos: vec2<f32>,
+    @location(0) pos: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
 ) -> VsOut {
@@ -32,7 +35,7 @@ fn vs_main(
         pos.x / uniforms.viewport.x * 2.0 - 1.0,
         1.0 - pos.y / uniforms.viewport.y * 2.0,
     );
-    out.clip_position = vec4<f32>(ndc, 0.0, 1.0);
+    out.clip_position = vec4<f32>(ndc, pos.z, 1.0);
     out.color = color;
     out.uv = uv;
     return out;

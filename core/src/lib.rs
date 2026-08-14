@@ -7,6 +7,7 @@
 pub mod library;
 pub mod locale;
 pub mod lock;
+pub mod open;
 pub mod paths;
 pub mod repository;
 pub mod settings;

@@ -75,10 +75,10 @@ impl Viewer {
         }
     }
 
-    /// 作品の `text()` に使うフォントを渡す。
-    pub fn set_font(&mut self, bytes: Vec<u8>) {
-        self.graphics.font.set_font(bytes.clone());
-        self.warmup.font.set_font(bytes);
+    /// 作品の `text()` に使うフォントを渡す。前のものから順に字形を探す。
+    pub fn set_fonts(&mut self, fonts: Vec<Vec<u8>>) {
+        self.graphics.font.set_fonts(fonts.clone());
+        self.warmup.font.set_fonts(fonts);
     }
 
     /// 設定を反映する (設計書 §24)。

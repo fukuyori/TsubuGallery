@@ -9,6 +9,7 @@ pub mod canvas;
 pub mod capture;
 pub mod draw;
 pub mod font;
+pub mod mat4;
 pub mod texture;
 
 pub use batch::{BatchRenderer, SAMPLE_COUNT};
@@ -18,4 +19,5 @@ pub use draw::{
     Affine, AngleMode, Batch, BlendMode, Color, ColorMode, DrawList, Graphics, ShapeKind,
     ShapeMode, TextAlign, Vertex,
 };
+pub use mat4::{Camera, Mat4, Origin};
 pub use texture::MsaaTarget;

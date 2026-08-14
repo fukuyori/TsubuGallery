@@ -52,6 +52,7 @@ appear in the gallery. Drop more `.pde` files there to add your own.
 | `T` | Regenerate the selected thumbnail |
 | `V` | Cycle the view mode (grid → large cards → list) |
 | `C` | Add or remove the sketch from collections |
+| `O` / click ↗ | Open the link in a browser |
 | `P` | Start / stop the slideshow |
 | Search box | Substring match on title and id |
 | `F` / `F11` | Fullscreen |
@@ -70,7 +71,8 @@ appear in the gallery. Drop more `.pde` files there to add your own.
 | `R` | Random |
 | `T` | Update the thumbnail |
 | `E` | Edit this sketch |
-| `I` | Info overlay (fps / frameCount / switch time) |
+| `I` | Info overlay (author / link / fps / frameCount / switch time) |
+| `O` | Open the link in a browser |
 | `F` / `F11` | Fullscreen |
 | `L` | Switch the UI language |
 | `Esc` | Leave fullscreen, or go back to the gallery |
@@ -214,7 +216,7 @@ The top of the gallery filters and sorts.
 
 | Control | Effect |
 |---|---|
-| Search box | Substring match on title and id (case insensitive) |
+| Search box | Substring match on title, id and author (case insensitive) |
 | Favourites | Only starred sketches |
 | Errors | Only sketches that fail to compile |
 | Tags | Only sketches with the chosen tag |
@@ -222,6 +224,28 @@ The top of the gallery filters and sorts.
 
 Tags are typed comma-separated in the editor's **Tags** field. They show at the
 bottom right of the card and become filter choices.
+
+### Author and link
+
+Filled in from the editor's **Author** and **Link** fields. They are not in the
+table in design §19.1, but for tweet-sized work it matters whose post a sketch
+came from. The author shows at the bottom right of the card, in the list view and
+in the viewer's info overlay (`I`), and the search box matches it.
+
+`O`, or the ↗ button in the list view, opens the link in the default browser.
+
+**Only `http://` and `https://` are opened.** A link arrives together with the
+sketch and is handed to an external program, so allowing `file:` or `javascript:`
+would let whoever distributed the sketch make something happen on the machine of
+whoever received it. Links containing whitespace or control characters are
+refused too, so no argument boundary can be forged. Links that cannot be opened
+get no button.
+
+On Windows, `cmd /C start` is not used: cmd would interpret `&` in the URL
+itself. `rundll32 url.dll,FileProtocolHandler` is used instead.
+
+Sketch code cannot open a link. It only happens when you press the button
+(design §21's sandbox is untouched).
 
 Favourites, tags, creation time and last-opened time survive a restart.
 
@@ -430,13 +454,14 @@ void draw() {
 | Types | `int` `float` `boolean` `void` `String` `PVector`, 1-D arrays (`float[]` `int[]` `boolean[]` `String[]` `PVector[]`) |
 | Operators | `+ - * / %`, `== != < <= > >=`, `&& \|\|` (short-circuit), `!`, ternary |
 | Bitwise | `& \| ^ ~ << >> >>>` |
-| Assignment | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` `++` `--` |
+| Assignment | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` `++` `--` (prefix and postfix), usable inside expressions (`line(x, y, x += dx, y)`) |
 | Control flow | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `switch` |
-| Arrays | `new float[n]`, `new float[r][c]`, `{1,2,3}`, `a[i]`, `a[y][x]`, `a.length`, enhanced for (`for (int v : a)`) |
+| Arrays | `new float[n]`, `new float[r][c]`, `new int[]{1,2}`, `{1,2,3}`, `a[i]`, `a[y][x]`, `a.length`, enhanced for (`for (int v : a)`) |
 | Classes | `class P { ... }`, fields, constructor, methods, `this`, `new P(...)`, `P[]` |
 | Vectors | `new PVector(x, y)`, reading and writing `v.x`, methods like `v.add(u)` |
 | Casts | `(int)x` `(float)x` `(boolean)x` |
 | Literals | decimal, hex (`0xFF6B35`), exponent (`1e3`), `1.0f`, char (`'a'` = code point), string (`"..."`) |
+| Declarations | Several names in one statement, e.g. `float a = 1, b;` |
 | Other | User-defined functions (recursion allowed), globals, block scope |
 
 `int` arithmetic stays integral as in Java (`7 / 2` is `3`). Bitwise operations
@@ -509,27 +534,57 @@ array; sharing one would make a write to one row hit every row.
 
 **Not supported**: arrays beyond 2-D, inheritance, `static`, imports.
 
+### Static mode
+
+A sketch with neither `setup()` nor `draw()` — just statements at the top level —
+runs too. The whole thing becomes the body of `setup()` and is drawn once, as in
+Processing. Short tweet-sized sketches are often written this way.
+
+```processing
+float r, i, d;
+size(720, 720);
+strokeWeight(2);
+for (d = 960; d > 9; d -= 80)
+  for (r = 0; r < TAU; r += PI / d * 5) {
+    resetMatrix();
+    translate(cos(r) * d / 2 + 360, sin(r) * d / 2 + 360);
+    ...
+  }
+```
+
+Sketches that never call `background()` get Processing's default grey (204)
+canvas. Black would make this kind of sketch — drawn with the default black
+stroke — completely invisible.
+
 ### API (design §14.2)
 
 | Category | Functions and variables |
 |---|---|
-| Screen | `size()` (accepted, ignored), `width` `height` `frameCount` |
-| Basic shapes | `point() line() rect() ellipse() circle() triangle()` |
+| Screen | `size()` / `createCanvas()` (the declared canvas is scaled to fit), `width` `height` `frameCount` |
+| Basic shapes | `point() line() rect() ellipse() circle() triangle()`. A 5th argument onwards rounds `rect()` corners |
 | Free-form shapes | `beginShape() vertex() curveVertex() bezierVertex() endShape()`, `arc() quad() bezier() curve()` |
-| Text | `text() textSize() textAlign() textWidth()`, `str() nf()` |
+| Text | `text() textSize() textAlign() textWidth()`, `str() nf()`, `String.fromCodePoint()` |
 | Shape modes | `rectMode() ellipseMode() angleMode()`, `square()` |
 | Vectors | `createVector()`, `add sub mult div set copy mag magSq normalize limit setMag heading rotate dist dot cross lerp angleBetween` |
-| Looping | `noLoop() loop()` |
-| Colour values | `color() lerpColor()` |
+| Looping | `noLoop() loop()` `clear()` |
+| Colour values | `color() lerpColor()`, components `red() green() blue() alpha() hue() saturation() brightness()` |
 | Colour and stroke | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
-| Transforms | `translate() rotate() scale() pushMatrix() popMatrix()` |
+| Transforms | `translate() rotate() scale() pushMatrix() popMatrix() resetMatrix()`. `translate()` and `scale()` also take 3 arguments, `rotate()` takes `(angle, x, y, z)` |
+| 3D | `size(w, h, P3D)`, `box() sphere() rotateX() rotateY() rotateZ() lights() noLights()` |
 | Maths | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
-| Random and noise | `random() noise() randomSeed() millis()` |
+| Random and noise | `random() randomGaussian() noise() randomSeed() millis()` |
 | Input | `mouseX` `mouseY` `mousePressed` `keyPressed` |
-| Constants | `PI` `TWO_PI` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
+| Constants | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
 
 `background()`, `fill()` and `stroke()` switch on argument count exactly as
-Processing does.
+Processing does. **A single `int` argument is read as a packed colour**
+(`0xAARRGGBB`), so `stroke(-1)` is opaque white. Processing decides this by type,
+and so does this — `fill(128.0)` is still a grey level.
+
+`clear()` discards what has been drawn. Processing makes the canvas transparent;
+here it is filled with black instead, because a transparent thumbnail would show
+through and hide a sketch drawn in white lines. On screen it is composited over
+black anyway, so it looks the same.
 
 `beginShape()` fills concave shapes correctly. Fanning the vertices would spill
 outside the notches, so ear clipping is used instead. A filled `arc()` is a pie
@@ -542,6 +597,51 @@ Processing).
 
 `noLoop()` stops `frameCount` from advancing, which keeps a sketch that draws
 once from random numbers from flickering as it is redrawn every frame.
+
+`noise()` follows Processing's own implementation: a random table sampled with
+cosine interpolation, stacked over 4 octaves at 0.5 falloff (Processing's
+`noiseDetail(4, 0.5)` default). Two habits of it matter and are reproduced.
+**Negative coordinates are folded** — `noise(-3, 0)` equals `noise(3, 0)` — so a
+sketch that sweeps coordinates across the origin comes out mirrored. And four
+octaves keep values clustered near 0.5, which is what makes a threshold like
+`noise(...) > .6` pick out the same fraction of cells it does in Processing.
+The random table itself differs, so the pattern is not identical; the statistics
+and those habits are.
+
+### 3D (P3D)
+
+`size(w, h, P3D)` switches to a perspective camera with the same defaults as
+Processing: 60° field of view, the eye at `z = (height/2) / tan(30°)`. At that
+distance the `z = 0` plane maps one unit to one pixel, so a `rect()` written as
+if it were 2D lands exactly where it would in 2D. p5.js's
+`createCanvas(w, h, WEBGL)` works too; the only difference is that its origin
+sits at the centre of the canvas rather than the top-left.
+
+`resetMatrix()` drops the camera along with everything else, which puts the eye
+at the world origin looking down `-Z`. Sketches that build a grid around the
+origin rely on this.
+
+`lights()` gives the Processing default: ambient 128 plus a directional light of
+128 shining from the eye. Faces are flat-shaded — one colour per face — and
+`box()` / `sphere()` are outlined with the current stroke unless `noStroke()` is
+set. Hidden edges are removed by the depth buffer.
+
+Everything is transformed on the CPU and handed to the GPU as the same triangle
+list 2D uses; the only addition on the GPU side is a depth buffer. That has
+limits worth knowing:
+
+- Vertex colours interpolate in screen space, so a gradient across a large,
+  steeply angled triangle drifts slightly from Processing. Flat-coloured faces
+  such as `box()` are unaffected
+- A face that straddles the eye is dropped whole rather than clipped, so part of
+  a solid can vanish when the camera is inside it
+- Normals use the upper 3x3 of the model matrix, so shading is slightly off
+  under non-uniform `scale()`
+
+Not there yet: `camera()`, `perspective()`, `ortho()`, solids beyond box and
+sphere (`cylinder` / `cone` / `torus` / `plane`), `texture()`, and `vertex()`
+with a `z`. `ambientLight()` / `directionalLight()` / `pointLight()` are
+accepted but only turn the default lights on.
 
 ### Text (`text()`)
 
@@ -558,7 +658,13 @@ down to one, at the price that **forgetting to upload the atlas to the GPU makes
 shapes transparent too**. So that it cannot be forgotten, the drawing functions
 take the whole `Graphics` rather than just the draw list.
 
-Where no font can be found, `text()` draws nothing (it does not fail).
+Fonts are tried in order rather than one being picked. A CJK font rarely contains
+mahjong tiles or playing-card symbols, and a symbol font rarely contains
+Japanese, so CJK is tried first and a symbol font second, using whichever has the
+glyph.
+
+Characters missing from all of them are not drawn. Nothing fails if no font is
+found at all.
 
 `color()` returns an `[r, g, b, a]` array rather than a dedicated type.
 `fill()`, `stroke()` and `background()` use such a value directly without
@@ -605,7 +711,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | Control flow | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
 | Literals | decimal, hex (`0xFF6B35`), exponent |
 | Other | Semicolon insertion (ASI), numbers as truthiness (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` `colorMode(HSB)` `blendMode(ADD)` `push` / `pop`, 3-argument `noise` |
+| p5 API | `createCanvas` (including `WEBGL`) `colorMode(HSB)` `blendMode(ADD)` `push` / `pop`, 3-argument `noise` |
 | `Math` | `Math.sin` and friends map to the built-ins. `Math.PI` `Math.hypot` `Math.sign` too, and `S=Math.sin` works as a value |
 | Variadic | `min()` and `max()` take any number of arguments |
 
@@ -629,6 +735,13 @@ for(i of [...Array(120).keys()]){
 - `class` / `new` / `async`
 
 Code using something unsupported is listed line by line by the editor (above).
+
+### Accepted but inert
+
+`drawingContext` is the browser's own canvas context, which does not exist here.
+A container that swallows writes is handed over instead, so a sketch setting
+`drawingContext.shadowBlur` keeps running — it just gets no shadow. The editor's
+diagnosis says so.
 
 ### Safety (design §21)
 
@@ -749,17 +862,21 @@ it.
 
 - Java Mode language extensions: inheritance, arrays beyond 2-D, `static`
 - p5.js: `class`, object destructuring
-- p5 APIs: images (`image` / `pixels`), `strokeCap` / `strokeJoin`,
-  `frameRate()`, 3D (`box` / `sphere`)
+- **Reading pixels** (`get()` / `set()` / `pixels[]`). What has been drawn lives
+  only on the GPU; there is no rasterised image on the CPU side. Sketches that
+  read and write within the same frame (piling sand, growth, collision) would
+  need a separate CPU rasteriser
+- Other p5 APIs: images (`image` / `loadImage`), `strokeCap` / `strokeJoin`,
+  `frameRate()`
 - Import / export, GIF and video export (design §27)
 - Registering as an OS screensaver (macOS `.saver` / Windows `.scr`)
 - Android / iOS (Phases 10 and 11)
-- P3D and shaders
+- **GLSL shaders** (twigl-style sketches)
 
 ## Development
 
 ```sh
-cargo test --workspace      # 409 tests
+cargo test --workspace      # 448 tests
 cargo clippy --workspace --all-targets
 ```
 

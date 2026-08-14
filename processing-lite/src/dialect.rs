@@ -38,6 +38,8 @@ impl Dialect {
 
 /// p5.js で、まだ持っていない API。
 const UNSUPPORTED_P5_API: &[&str] = &[
+    "get",
+    "set",
     "image",
     "loadImage",
     "createImage",
@@ -52,13 +54,30 @@ const UNSUPPORTED_P5_API: &[&str] = &[
     "saveFrame",
     "shader",
     "createShader",
+];
+
+/// 3D のうち、まだ持っていないもの。
+///
+/// `box()` / `sphere()` と既定のカメラは動く。視点を自分で組む API と、
+/// 立方体と球以外の立体はまだ。
+const UNSUPPORTED_3D: &[&str] = &[
+    "camera",
+    "perspective",
+    "ortho",
+    "frustum",
+    "cylinder",
+    "cone",
     "torus",
-    "box",
-    "sphere",
+    "plane",
+    "sphereDetail",
+    "texture",
+    "createShape",
+    "shininess",
+    "specular",
 ];
 
 /// 受け付けるが、まだ効かない API。
-const IGNORED_API: &[&str] = &["blendMode"];
+const IGNORED_API: &[&str] = &["blendMode", "drawingContext"];
 
 /// 見つかった未対応の構文 1 件。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +200,9 @@ pub fn diagnose(source: &str) -> Diagnosis {
         if UNSUPPORTED_P5_API.contains(&text) {
             add("dialect.unsupported_api", byte);
         }
+        if word && UNSUPPORTED_3D.contains(&text) {
+            add("dialect.no_3d", byte);
+        }
         if IGNORED_API.contains(&text) {
             add("dialect.ignored_api", byte);
             looks_like_p5 = true;
@@ -193,12 +215,6 @@ pub fn diagnose(source: &str) -> Diagnosis {
     if dialect == Dialect::P5 {
         found.retain(|f| f.key != "dialect.unsupported_keyword");
     } else {
-        if let Some(byte) = multiple_declarators(&code, &spans) {
-            found.push(Finding {
-                key: "dialect.multiple_declarators",
-                line: line_of.line(byte),
-            });
-        }
         found.sort_by_key(|f| f.line);
     }
 
@@ -206,38 +222,6 @@ pub fn diagnose(source: &str) -> Diagnosis {
 }
 
 
-/// 括弧の外の `,`。`float a, b;` のような複数宣言。
-fn multiple_declarators(
-    code: &[(usize, &str, TokenClass)],
-    spans: &[crate::highlight::Span],
-) -> Option<usize> {
-    let mut paren_depth = 0i32;
-    let mut braces: Vec<Brace> = Vec::new();
-
-    for (position, (span_index, text, _)) in code.iter().enumerate() {
-        let previous = position.checked_sub(1).map(|p| code[p].1);
-        match *text {
-            "(" => paren_depth += 1,
-            ")" => paren_depth -= 1,
-            "{" => braces.push(if matches!(previous, Some("=" | "," | "(" | ":" | "?")) {
-                Brace::ObjectLiteral
-            } else {
-                Brace::Block
-            }),
-            "}" => {
-                braces.pop();
-            }
-            "," if paren_depth == 0
-                && !braces.is_empty()
-                && braces.last() == Some(&Brace::Block) =>
-            {
-                return Some(spans[*span_index].start);
-            }
-            _ => {}
-        }
-    }
-    None
-}
 
 /// 開いている `{` が何を囲んでいるか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -341,13 +325,6 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
         assert!(keys.contains(&"dialect.unsupported_keyword"), "{keys:?}");
     }
 
-    #[test]
-    fn multiple_declarators_are_found() {
-        assert!(
-            keys("void draw() {\n  float a = 1.0, b;\n}").contains(&"dialect.multiple_declarators")
-        );
-    }
-
     /// p5 側も、対応した書き方に文句を言わない。
     #[test]
     fn supported_p5_syntax_is_not_reported_either() {
@@ -397,6 +374,24 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
                 "class P { float x; P(float a) { x = a; } }\nvoid draw() { circle(new P(1).x, 0, 1); }",
             ),
             (
+                "複数宣言",
+                "float a = 1, b;\nvoid draw() { circle(a, b, 1); }",
+            ),
+            (
+                "静的モード",
+                "size(400, 400);\ncircle(1, 2, 3);",
+            ),
+            (
+                "3D",
+                "void setup() { size(400, 400, P3D); }\n\
+                 void draw() { lights(); rotateX(1); box(9); sphere(4); }",
+            ),
+            (
+                "WEBGL",
+                "function setup() { createCanvas(400, 400, WEBGL); }\n\
+                 function draw() { rotateY(1); box(9); }",
+            ),
+            (
                 "2 次元配列",
                 "float[][] g = new float[2][2];\nvoid draw() { circle(g[0][0], 0, 1); }",
             ),
@@ -421,7 +416,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
     fn java_only_complaints_do_not_appear_for_p5_code() {
         // p5 では `[]` も `,` も普通の書き方。
         let keys = keys("draw=_=>{a=[1,2];b={x:1,y:2}}");
-        assert!(!keys.contains(&"dialect.multiple_declarators"), "{keys:?}");
+        assert!(!keys.contains(&"dialect.untyped_variable"), "{keys:?}");
     }
 
     #[test]

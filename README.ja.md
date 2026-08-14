@@ -50,6 +50,7 @@ cargo run --release
 | `T` | 選択中のサムネイルを作り直す |
 | `V` | 表示方式を切り替え (グリッド → 大型カード → リスト) |
 | `C` | 選択中の作品をコレクションへ出し入れ |
+| `O` / ↗クリック | リンクをブラウザで開く |
 | `P` | スライドショーの開始 / 停止 |
 | 検索欄 | タイトル・id の部分一致 |
 | `F` / `F11` | 全画面 |
@@ -68,7 +69,8 @@ cargo run --release
 | `R` | ランダム |
 | `T` | サムネイル更新 |
 | `E` | この作品を編集 |
-| `I` | 情報表示 (fps / frameCount / 切り替え時間) |
+| `I` | 情報表示 (作者 / リンク / fps / frameCount / 切り替え時間) |
+| `O` | リンクをブラウザで開く |
 | `F` / `F11` | 全画面 |
 | `L` | UI 言語を切り替え |
 | `Esc` | 全画面解除、または Gallery へ戻る |
@@ -203,7 +205,7 @@ Gallery の上部で絞り込みと並び替えができる。
 
 | 操作 | 内容 |
 |---|---|
-| 検索欄 | タイトルと id の部分一致 (大文字小文字を区別しない) |
+| 検索欄 | タイトル・id・作者の部分一致 (大文字小文字を区別しない) |
 | お気に入り | ★を付けた作品だけ |
 | エラー | コンパイルできない作品だけ |
 | タグ | 選んだタグが付いた作品だけ |
@@ -211,6 +213,25 @@ Gallery の上部で絞り込みと並び替えができる。
 
 タグはエディタの `タグ` 欄にカンマ区切りで書く。カードの右下に表示され、
 絞り込みの候補にも出る。
+
+### 作者とリンク
+
+エディタの `作者` と `リンク` 欄に書く。設計書 §19.1 の表には無いが、つぶやきの
+作品は「誰の、どの投稿か」が大事なので足した。作者はカードの右下とリスト表示、
+ビューアの情報表示 (`I`) に出る。検索欄でも探せる。
+
+リンクは `O` かリスト表示の ↗ ボタンで既定のブラウザが開く。
+
+**開くのは `http://` と `https://` だけ。** リンクは作品と一緒に配られてくる値で、
+それを外部のプログラムへ渡すことになる。`file:` や `javascript:` を開けてしまうと、
+作品を配った側が受け取った側の環境で何かを起こせる。空白や制御文字が混ざったもの
+も開かない (引数の切れ目を作られないため)。開けない形のリンクにはボタンを出さない。
+
+Windows では `cmd /C start` を使わない。URL の `&` を cmd が自分で解釈してしまう
+ので、`rundll32 url.dll,FileProtocolHandler` を通す。
+
+作品のコードからリンクを開くことはできない。押したときだけ開く (設計書 §21 の
+砂場はそのまま)。
 
 お気に入り、タグ、追加日時、最終表示日時は次回起動時にも残る。
 
@@ -404,13 +425,14 @@ void draw() {
 | 型 | `int` `float` `boolean` `void` `String` `PVector`、1 次元配列 (`float[]` `int[]` `boolean[]` `String[]` `PVector[]`) |
 | 演算 | `+ - * / %`、`== != < <= > >=`、`&& \|\|`(短絡)、`!`、三項演算子 |
 | ビット演算 | `& \| ^ ~ << >> >>>` |
-| 代入 | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` `++` `--` |
+| 代入 | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` `++` `--` (前置・後置とも)。式の中でも書ける (`line(x, y, x += dx, y)`) |
 | 制御 | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `switch` |
-| 配列 | `new float[n]`、`new float[r][c]`、`{1,2,3}`、`a[i]`、`a[y][x]`、`a.length`、拡張 for (`for (int v : a)`) |
+| 配列 | `new float[n]`、`new float[r][c]`、`new int[]{1,2}`、`{1,2,3}`、`a[i]`、`a[y][x]`、`a.length`、拡張 for (`for (int v : a)`) |
 | クラス | `class P { ... }`、フィールド、コンストラクタ、メソッド、`this`、`new P(...)`、`P[]` |
 | ベクトル | `new PVector(x, y)`、`v.x` の読み書き、`v.add(u)` などのメソッド |
 | キャスト | `(int)x` `(float)x` `(boolean)x` |
 | リテラル | 10 進、16 進 (`0xFF6B35`)、指数 (`1e3`)、`1.0f`、文字 (`'a'` = 文字コード)、文字列 (`"..."`) |
+| 宣言 | `float a = 1, b;` のように 1 文へ複数書ける |
 | その他 | ユーザー定義関数 (再帰可)、グローバル変数、ブロックスコープ |
 
 `int` 同士の演算は Java と同じく整数演算になる (`7 / 2` は `3`)。ビット演算は
@@ -480,26 +502,55 @@ void draw() {
 
 **未対応**: 3 次元以上の配列、継承、`static`、import。
 
+### 静的モード
+
+`setup()` も `draw()` も書かず、関数の外に文を並べただけの作品も動く。全体を
+`setup()` の中身として 1 回だけ描く。Processing と同じ扱いで、つぶやきの短い
+コードはこの形が多い。
+
+```processing
+float r, i, d;
+size(720, 720);
+strokeWeight(2);
+for (d = 960; d > 9; d -= 80)
+  for (r = 0; r < TAU; r += PI / d * 5) {
+    resetMatrix();
+    translate(cos(r) * d / 2 + 360, sin(r) * d / 2 + 360);
+    ...
+  }
+```
+
+`background()` を呼ばない作品の地は Processing と同じ灰色 (204)。黒にすると、
+既定の黒い線で描くこの種の作品が何も見えなくなる。
+
 ### API (設計書 §14.2)
 
 | 分類 | 関数・変数 |
 |---|---|
-| 画面 | `size()` (受けるが無視)、`width` `height` `frameCount` |
-| 基本描画 | `point() line() rect() ellipse() circle() triangle()` |
+| 画面 | `size()` / `createCanvas()` (宣言したキャンバスを表示領域へ収める)、`width` `height` `frameCount` |
+| 基本描画 | `point() line() rect() ellipse() circle() triangle()`。`rect()` は 5 個目以降の引数で角が丸くなる |
 | 自由な形 | `beginShape() vertex() curveVertex() bezierVertex() endShape()`、`arc() quad() bezier() curve()` |
-| 文字 | `text() textSize() textAlign() textWidth()`、`str() nf()` |
+| 文字 | `text() textSize() textAlign() textWidth()`、`str() nf()`、`String.fromCodePoint()` |
 | 形の指定 | `rectMode() ellipseMode() angleMode()`、`square()` |
 | ベクトル | `createVector()`、`add sub mult div set copy mag magSq normalize limit setMag heading rotate dist dot cross lerp angleBetween` |
-| 進行 | `noLoop() loop()` |
-| 色の値 | `color() lerpColor()` |
+| 進行 | `noLoop() loop()` `clear()` |
+| 色の値 | `color() lerpColor()`、成分の取り出し `red() green() blue() alpha() hue() saturation() brightness()` |
 | 色と線 | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
-| 座標変換 | `translate() rotate() scale() pushMatrix() popMatrix()` |
+| 座標変換 | `translate() rotate() scale() pushMatrix() popMatrix() resetMatrix()`。`translate()` と `scale()` は 3 引数、`rotate()` は `(角度, x, y, z)` も取る |
+| 3D | `size(w, h, P3D)`、`box() sphere() rotateX() rotateY() rotateZ() lights() noLights()` |
 | 数学 | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
-| 乱数・ノイズ | `random() noise() randomSeed() millis()` |
+| 乱数・ノイズ | `random() randomGaussian() noise() randomSeed() millis()` |
 | 入力 | `mouseX` `mouseY` `mousePressed` `keyPressed` |
-| 定数 | `PI` `TWO_PI` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
+| 定数 | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
 
 `background()` / `fill()` / `stroke()` は Processing と同じく引数の数で切り替わる。
+`stroke(-1)` のように **int をひとつ渡すと、詰めた色 (`0xAARRGGBB`) として読む**。
+`-1` は不透明な白。Processing は型で見分けるので、こちらも `int` のときだけそう
+読む (`fill(128.0)` は今までどおり明度)。
+
+`clear()` は積んだ絵を捨てる。Processing では透明になるが、ここでは黒で塗る。
+透明のままだと書き出したサムネイルが透けて、白い線の作品が見えなくなる。画面では
+黒地に重ねて表示するので、見た目は変わらない。
 
 `beginShape()` は凹んだ形も正しく塗る。頂点を扇状に分けると凹みが外へはみ出す
 ので、耳切り法で三角形に分けている。`arc()` は塗ると扇形、線は弧そのもの
@@ -511,6 +562,45 @@ void draw() {
 
 `noLoop()` を呼ぶと `frameCount` が進まなくなる。乱数で一度だけ絵を作る作品が、
 毎フレーム描き直されてちらつくのを防ぐ。
+
+`noise()` は Processing の実装そのものに合わせてある。乱数表を余弦で補間し、
+4 オクターブを 0.5 の減衰で重ねる (Processing の既定 `noiseDetail(4, 0.5)`)。
+効いてくる癖が 2 つあり、どちらも再現している。**負の座標は折り返す** ―
+`noise(-3, 0)` は `noise(3, 0)` と同じ ― ので、原点をまたいで座標を振る作品は
+左右対称に出る。そして 4 オクターブぶんの重みで値が 0.5 付近へ寄るため、
+`noise(...) > .6` のような閾値が本家と同じ割合を拾う。乱数表そのものは違うので
+模様は一致しない。揃うのは値の散らばり方と、この 2 つの癖。
+
+### 3D (P3D)
+
+`size(w, h, P3D)` で遠近のついたカメラに切り替わる。既定値は Processing と
+同じで、視野角 60 度、視点は `z = (height/2) / tan(30°)`。この距離だと
+`z = 0` の平面が 1 単位 1 ピクセルで写るので、2D のつもりで書いた `rect()` が
+2D と同じ場所に出る。p5.js の `createCanvas(w, h, WEBGL)` も動く。違いは
+原点がキャンバスの左上ではなく中央にあることだけ。
+
+`resetMatrix()` はカメラごと消える。視点が世界の原点に移り `-Z` を向くので、
+原点まわりに立体を並べる書き方がそのまま使える。つぶやき系の作品はこれを
+よく使う。
+
+`lights()` は Processing の既定と同じで、環境光 128 と、視点から差す平行光
+128。陰影は面ごとに 1 色。`box()` / `sphere()` は `noStroke()` を書かない限り
+いまの線の色で縁取られ、隠れる稜線は深度バッファが落とす。
+
+変換はすべて CPU で行い、2D と同じ三角形の列にして GPU へ渡す。GPU 側に
+増えるのは深度バッファだけ。その代わりの限界がいくつかある。
+
+- 頂点色は画面空間で混ざるので、大きく傾いた三角形のグラデーションが
+  Processing とわずかにずれる。`box()` のように面ごとに 1 色なら差は出ない
+- 視点をまたぐ面は切らずに丸ごと落とすので、カメラが立体の中に入ると
+  一部が消える
+- 法線はモデル行列の左上 3x3 で移すため、軸ごとに違う倍率の `scale()` を
+  かけると陰影がわずかにずれる
+
+まだ無いもの: `camera()`、`perspective()`、`ortho()`、立方体と球以外の立体
+(`cylinder` / `cone` / `torus` / `plane`)、`texture()`、`z` つきの `vertex()`。
+`ambientLight()` / `directionalLight()` / `pointLight()` は受け付けるが、
+既定の明かりを点けるだけ。
 
 ### 文字 (`text()`)
 
@@ -524,7 +614,11 @@ void draw() {
 **アトラスを GPU へ送り忘れると図形まで透明になる**。忘れられないよう、
 描画関数は [`Graphics`] ごと受け取る形にしてある。
 
-フォントが見つからない環境では `text()` は何も描かない (落ちはしない)。
+フォントは 1 本ではなく、前から順に探す。日本語のフォントに麻雀牌やトランプの
+記号は入っていないことが多く、記号のフォントに日本語は入っていない。CJK →
+記号 の順に試し、字形を持っているものを使う。
+
+どれにも無い字は描かない。フォントが 1 本も見つからない環境でも落ちはしない。
 
 `color()` が返すのは `[r, g, b, a]` の配列で、専用の型は足していない。
 `fill()` / `stroke()` / `background()` はこれを受け取ると変換を通さず直に使うので、
@@ -570,7 +664,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | 制御 | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
 | リテラル | 10 進、16 進 (`0xFF6B35`)、指数 |
 | その他 | セミコロン省略 (ASI)、数値の真偽値化 (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` `colorMode(HSB)` `blendMode(ADD)` `push` / `pop`、3 引数 `noise` |
+| p5 API | `createCanvas` (`WEBGL` も) `colorMode(HSB)` `blendMode(ADD)` `push` / `pop`、3 引数 `noise` |
 | `Math` | `Math.sin` などを組み込みへ読み替える。`Math.PI` `Math.hypot` `Math.sign` も。`S=Math.sin` と値で持てる |
 | 可変長 | `min()` / `max()` は引数をいくつでも取る |
 
@@ -594,6 +688,12 @@ for(i of [...Array(120).keys()]){
 - `class` / `new` / `async`
 
 対応していないものを使っているコードは、エディタが行番号つきで挙げる (下記)。
+
+### 受け付けるが効かないもの
+
+`drawingContext` はブラウザのキャンバスそのもので、ここには無い。書き込みを
+受け取るだけの入れ物を渡す。`drawingContext.shadowBlur` を書く作品も止まらずに
+動くが、影は付かない。エディタの診断がそう伝える。
 
 ### 安全性 (設計書 §21)
 
@@ -708,17 +808,21 @@ MSAA は 4x。Viewer もサムネイルも同じ `BatchRenderer` を通る。
 
 - Processing Lite (Java Mode) 側の言語拡張: 継承、3 次元以上の配列、`static`
 - p5.js 側: `class`、オブジェクトの分割代入
-- 未実装の p5 API: 画像系 (`image` / `pixels`)、`strokeCap` / `strokeJoin`、
-  `frameRate()`、3D (`box` / `sphere`)
+- **画素の読み取り** (`get()` / `set()` / `pixels[]`)。描いた絵は GPU にしか無く、
+  CPU 側にラスタライズされた像を持っていない。同じフレームの中で読み書きする
+  作品 (砂が積もる、成長する、当たり判定を取る) を動かすには、CPU 側の
+  ラスタライザを別に持つ必要がある
+- 未実装のその他の p5 API: 画像 (`image` / `loadImage`)、`strokeCap` / `strokeJoin`、
+  `frameRate()`
 - Import / Export、GIF・動画の書き出し (設計書 §27)
 - OS のスクリーンセーバーとしての登録 (macOS `.saver` / Windows `.scr`)
 - Android / iOS (Phase 10, 11)
-- P3D とシェーダ
+- **GLSL のシェーダ** (twigl のような作品)
 
 ## 開発
 
 ```sh
-cargo test --workspace      # 409 tests
+cargo test --workspace      # 448 tests
 cargo clippy --workspace --all-targets
 ```
 

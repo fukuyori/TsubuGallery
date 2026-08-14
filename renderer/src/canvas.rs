@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::batch::{BatchRenderer, SAMPLE_COUNT};
+use crate::batch::{BatchRenderer, DEPTH_FORMAT, SAMPLE_COUNT, depth_state};
 use crate::draw::{Color, Graphics};
 use crate::texture::MsaaTarget;
 
@@ -48,7 +48,8 @@ struct Blit {
     layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
     sampler: wgpu::Sampler,
-    pipelines: HashMap<(wgpu::TextureFormat, u32), wgpu::RenderPipeline>,
+    /// 深度つきのパスと、そうでないパスの両方で使う。別々に要る。
+    pipelines: HashMap<(wgpu::TextureFormat, u32, bool), wgpu::RenderPipeline>,
 }
 
 impl Blit {
@@ -114,8 +115,9 @@ impl Blit {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         samples: u32,
+        depth: bool,
     ) -> &wgpu::RenderPipeline {
-        self.pipelines.entry((format, samples)).or_insert_with(|| {
+        self.pipelines.entry((format, samples, depth)).or_insert_with(|| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("tsubu.blit.pipeline"),
                 layout: Some(&self.pipeline_layout),
@@ -137,7 +139,9 @@ impl Blit {
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
+                // 下地を敷き直すだけなので深さは触らない。ここで書き込むと、
+                // このあとの立体がぜんぶ手前に隠されてしまう。
+                depth_stencil: depth.then(|| depth_state(false)),
                 multisample: wgpu::MultisampleState {
                     count: samples,
                     ..Default::default()
@@ -154,9 +158,10 @@ impl Blit {
         pass: &mut wgpu::RenderPass<'_>,
         format: wgpu::TextureFormat,
         samples: u32,
+        depth: bool,
         bind: &wgpu::BindGroup,
     ) {
-        let pipeline = self.pipeline(device, format, samples);
+        let pipeline = self.pipeline(device, format, samples, depth);
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.draw(0..3, 0..1);
@@ -176,6 +181,8 @@ pub struct Canvas {
     msaa: MsaaTarget,
     blit: Blit,
     faces: Vec<Face>,
+    /// 立体の前後を決めるためのバッファ。フレームごとに消す。
+    depth: Option<wgpu::TextureView>,
     size: (u32, u32),
     /// 直前のフレームが入っている側。
     front: usize,
@@ -190,6 +197,7 @@ impl Canvas {
             msaa: MsaaTarget::new(SAMPLE_COUNT),
             blit: Blit::new(device),
             faces: Vec::new(),
+            depth: None,
             size: (0, 0),
             front: 0,
             painted: false,
@@ -238,8 +246,8 @@ impl Canvas {
         self.ensure(device, width, height);
 
         // 消す色が指定されていなければ前のフレームを残す。ただし 1 枚目だけは
-        // 残すものが無いので黒で始める。
-        let clear = list.clear.or((!self.painted).then_some(Color::BLACK));
+        // 残すものが無いので、Processing の既定と同じ灰色で始める。
+        let clear = list.clear.or((!self.painted).then_some(Color::DEFAULT_BACKGROUND));
 
         batch.prepare(
             device,
@@ -273,7 +281,17 @@ impl Canvas {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                // 前の絵は色だけ残す。前後の関係はフレームごとに決め直す。
+                depth_stencil_attachment: self.depth.as_ref().map(|view| {
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
@@ -285,6 +303,7 @@ impl Canvas {
                     &mut pass,
                     self.format,
                     SAMPLE_COUNT,
+                    true,
                     &self.faces[self.front].bind,
                 );
             }
@@ -307,7 +326,7 @@ impl Canvas {
             return;
         }
         let bind = &self.faces[self.front].bind;
-        self.blit.draw(device, pass, format, samples, bind);
+        self.blit.draw(device, pass, format, samples, false, bind);
     }
 
     fn ensure(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -334,6 +353,19 @@ impl Canvas {
                 Face { texture, view, bind }
             })
             .collect();
+
+        // 深さは色と同じ枚数だけ重ねる。MSAA の色に合わせないと使えない。
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tsubu.canvas.depth"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        self.depth = Some(depth.create_view(&wgpu::TextureViewDescriptor::default()));
 
         self.size = (width, height);
         self.front = 0;

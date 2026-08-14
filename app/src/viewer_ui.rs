@@ -21,6 +21,10 @@ pub struct ViewerOverlay<'a> {
     pub error: Option<&'a str>,
     /// Processing か p5.js か。
     pub dialect: Option<&'static str>,
+    /// 作者。空なら出さない。
+    pub author: &'a str,
+    /// 元の投稿などへのリンク。
+    pub link: &'a str,
     /// スライドショー中か (設計書 §27)。
     pub slideshow: bool,
     /// スクリーンセーバーとして動いているか。
@@ -124,6 +128,7 @@ fn hint_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
                         ("R", locales.t("viewer.random")),
                         ("T", locales.t("viewer.update_thumbnail")),
                         ("I", locales.t("viewer.info")),
+                        ("O", locales.t("gallery.open_link")),
                         ("F", locales.t("viewer.fullscreen")),
                         ("Esc", locales.t("viewer.back_to_gallery")),
                     ] {
@@ -155,6 +160,12 @@ fn info_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
                             ui.end_row();
                         };
                         row(locales.t("viewer.stat.sketch"), info.title.to_string());
+                        if !info.author.is_empty() {
+                            row(locales.t("viewer.author"), info.author.to_string());
+                        }
+                        if !info.link.is_empty() {
+                            row(locales.t("viewer.link"), info.link.to_string());
+                        }
                         if let Some(dialect) = info.dialect {
                             row(locales.t("viewer.stat.dialect"), dialect.to_string());
                         }

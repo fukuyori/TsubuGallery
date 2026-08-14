@@ -39,6 +39,10 @@ pub enum ThumbnailState {
 pub struct GalleryItem {
     pub id: String,
     pub title: String,
+    /// 作者。空なら出さない。
+    pub author: String,
+    /// 元の投稿などへのリンク。
+    pub link: String,
     /// どちらの方言として読まれたか (`Processing` / `p5.js`)。
     ///
     /// 一覧に出すためだけに持つ。読めなかった作品は `None`。
@@ -61,6 +65,8 @@ impl GalleryItem {
         Self {
             id: id.into(),
             title: title.into(),
+            author: String::new(),
+            link: String::new(),
             dialect: None,
             favorite: false,
             status: SketchStatus::default(),
@@ -112,8 +118,10 @@ impl Filter {
         if !self.text.is_empty() {
             let needle = self.text.to_lowercase();
             // id も見る。タイトルは id から作られるが、改名すると離れるため。
+            // 作者でも探せる。誰の作品かで思い出すことが多い。
             if !item.title.to_lowercase().contains(&needle)
                 && !item.id.to_lowercase().contains(&needle)
+                && !item.author.to_lowercase().contains(&needle)
             {
                 return false;
             }

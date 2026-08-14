@@ -4,6 +4,8 @@
 //! ([`DrawList`]) になる。GPU バックエンドはこのリストしか知らないため、
 //! Viewer 描画とサムネイル生成が同一経路を共有できる (設計書 §17)。
 
+use crate::mat4::{Camera, Mat4, Origin};
+
 /// sRGB 空間の色。各成分は `0.0..=1.0`。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
@@ -25,6 +27,12 @@ impl Color {
     pub fn rgba255(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self::rgba(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
     }
+
+    /// `background()` を呼ばない作品の地の色。
+    ///
+    /// Processing の既定と同じ灰色 204。黒にすると、既定の黒い線で描く作品が
+    /// 何も見えなくなる。
+    pub const DEFAULT_BACKGROUND: Color = Color { r: 0.8, g: 0.8, b: 0.8, a: 1.0 };
 
     pub fn gray255(v: f32) -> Self {
         Self::rgba(v / 255.0, v / 255.0, v / 255.0, 1.0)
@@ -58,6 +66,8 @@ pub enum BlendMode {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Batch {
     pub blend: BlendMode,
+    /// 深度バッファへ書くか。3D の作品だけ真になる。
+    pub depth: bool,
     /// [`DrawList::indices`] の範囲。
     pub start: u32,
     pub end: u32,
@@ -110,7 +120,11 @@ impl Affine {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
-    pub pos: [f32; 2],
+    /// キャンバス上の位置と深さ。深さは 0 が手前、1 が奥。
+    ///
+    /// 3D も CPU 側で画面座標まで落としてからここへ入れる。
+    /// GPU に渡るのは 2D と同じ三角形の列。
+    pub pos: [f32; 3],
     pub color: [f32; 4],
     /// 字形アトラス上の位置。文字以外の図形は白い点を指す。
     pub uv: [f32; 2],
@@ -191,6 +205,24 @@ struct Shape {
     curves: Vec<[f32; 2]>,
 }
 
+/// 3D の状態。`size(w, h, P3D)` を書いた作品だけが持つ。
+struct Space {
+    camera: Camera,
+    /// モデルビュー行列。カメラの分もここに入っている。
+    ///
+    /// Processing の `resetMatrix()` はこれを単位行列へ戻す。カメラごと
+    /// 消える、というのがそのまま「原点が画面の中央に来る」書き方になる。
+    model: Mat4,
+    stack: Vec<Mat4>,
+    /// `lights()` が呼ばれたか。フレームごとに消える。
+    lights: bool,
+}
+
+/// 視点より手前にある点の行き先。
+///
+/// 深さが 1 を超えるので、この頂点を含む面はラスタライザが落とす。
+const BEHIND_THE_EYE: [f32; 3] = [0.0, 0.0, 2.0];
+
 /// 1 つの形に貯められる頂点の上限。
 const MAX_SHAPE_POINTS: usize = 20_000;
 
@@ -239,6 +271,13 @@ pub struct Graphics {
     stroke_weight: f32,
     matrix: Affine,
     stack: Vec<Affine>,
+    /// 3D。`size(w, h, P3D)` を書いた作品だけが持つ。
+    space: Option<Space>,
+    /// いま積んでいる三角形が深度バッファへ書くか。
+    ///
+    /// 2D だけの作品では一度も書かない。深さは全部 0 のままなので、
+    /// 描いた順にそのまま重なる。
+    depth_write: bool,
     /// `beginShape()` から `endShape()` までのあいだの頂点。
     shape: Option<Shape>,
     /// 字形のアトラス。使った字だけを溜める。
@@ -290,6 +329,8 @@ impl Graphics {
             stroke_weight: 1.0,
             matrix: Affine::IDENTITY,
             stack: Vec::with_capacity(16),
+            space: None,
+            depth_write: false,
             shape: None,
             font: crate::font::FontAtlas::new(),
             text_size: 12.0,
@@ -323,6 +364,9 @@ impl Graphics {
         self.list.reset();
         self.stack.clear();
         self.viewport = (width, height);
+        if let Some(space) = &mut self.space {
+            space.lights = false;
+        }
         self.apply_canvas();
     }
 
@@ -363,6 +407,13 @@ impl Graphics {
             }
         }
         self.matrix = self.base;
+        // キャンバスの大きさが変わればカメラも変わる。行列もフレームごとに
+        // ここで初期状態へ戻る。
+        if let Some(space) = &mut self.space {
+            space.camera = Camera::new(self.width, self.height, space.camera.origin);
+            space.model = space.camera.modelview();
+            space.stack.clear();
+        }
     }
 
     /// 実際の表示サイズ。作品から見える `width` / `height` とは違うことがある。
@@ -386,6 +437,8 @@ impl Graphics {
         self.stroke_weight = 1.0;
         self.matrix = Affine::IDENTITY;
         self.stack.clear();
+        self.space = None;
+        self.depth_write = false;
         self.frame_count = 0;
         self.time = 0.0;
         self.shape = None;
@@ -536,6 +589,18 @@ impl Graphics {
     ///
     /// 不透明なら塗りつぶし、それまでの描画を捨てる。半透明なら「上から薄く塗る」
     /// (p5.js の残像表現)。前のフレームは残らないので、地は黒のままになる。
+    /// `clear()`。積んだ絵を捨てる。
+    ///
+    /// Processing では透明になるが、ここでは黒で塗る。透明のままだと、
+    /// 書き出したサムネイルが透けて、白い線の作品が見えなくなる。画面では
+    /// 黒地に重ねて表示するので、見た目は Processing と変わらない。
+    pub fn clear(&mut self) {
+        self.list.vertices.clear();
+        self.list.indices.clear();
+        self.list.batches.clear();
+        self.list.clear = Some(Color::BLACK);
+    }
+
     pub fn background_color(&mut self, c: Color) {
         if c.a >= 1.0 {
             self.list.vertices.clear();
@@ -546,9 +611,15 @@ impl Graphics {
         }
 
         // 表示領域ぜんぶを覆う 1 枚。座標変換もキャンバスの拡大も外して描く。
+        // 3D でも画面に貼るだけなので、遠近と深さは外す。深さを書き込むと
+        // このあとの立体がぜんぶ隠れてしまう。
         let matrix = std::mem::replace(&mut self.matrix, Affine::IDENTITY);
+        let space = self.space.take();
+        let depth = std::mem::replace(&mut self.depth_write, false);
         let (w, h) = self.viewport;
         self.quad([0.0, 0.0], [w, 0.0], [w, h], [0.0, h], c);
+        self.depth_write = depth;
+        self.space = space;
         self.matrix = matrix;
     }
 
@@ -588,34 +659,300 @@ impl Graphics {
         self.stroke_weight = w.max(0.0);
     }
 
+    // ---- 3D (設計書 §14.2) ----------------------------------------------
+
+    /// `size(w, h, P3D)` / `createCanvas(w, h, WEBGL)`。
+    ///
+    /// 遠近のついたカメラに切り替える。`z = 0` の平面は 1 ピクセル 1 単位で
+    /// 写るので、2D のつもりで書いた `rect()` も同じ場所に出る。
+    pub fn enable_3d(&mut self, origin: Origin) {
+        if self.space.as_ref().is_some_and(|s| s.camera.origin == origin) {
+            return;
+        }
+        let camera = Camera::new(self.width, self.height, origin);
+        self.space =
+            Some(Space { model: camera.modelview(), camera, stack: Vec::new(), lights: false });
+    }
+
+    pub fn is_3d(&self) -> bool {
+        self.space.is_some()
+    }
+
+    /// 3D の呼び出しが来たので、まだなら切り替える。
+    ///
+    /// すでに 3D なら何もしない。`createCanvas(w, h, WEBGL)` で原点を中央に
+    /// している作品を、`box()` の一言で左上へ引き戻さないため。
+    fn ensure_3d(&mut self) {
+        if self.space.is_none() {
+            self.enable_3d(Origin::TopLeft);
+        }
+    }
+
+    /// `lights()`。既定の環境光と、視点から差す平行光を入れる。
+    pub fn lights(&mut self, on: bool) {
+        self.ensure_3d();
+        if let Some(space) = &mut self.space {
+            space.lights = on;
+        }
+    }
+
+    /// ローカル座標をキャンバス上の位置と深さへ直す。
+    fn pt(&self, x: f32, y: f32) -> [f32; 3] {
+        match &self.space {
+            Some(_) => self.pt3(x, y, 0.0).unwrap_or(BEHIND_THE_EYE),
+            None => {
+                let at = self.matrix.apply(x, y);
+                [at[0], at[1], 0.0]
+            }
+        }
+    }
+
+    /// 奥行きつきの 1 点。視点より手前なら `None`。
+    fn pt3(&self, x: f32, y: f32, z: f32) -> Option<[f32; 3]> {
+        let space = self.space.as_ref()?;
+        let (at, depth) = space.camera.project(space.model.point([x, y, z]))?;
+        // キャンバスを表示領域へ収める分は 2D と共通。
+        let at = self.base.apply(at[0], at[1]);
+        Some([at[0], at[1], depth])
+    }
+
+    /// 円の分割数や線の細さを決めるための、おおよその拡大率。
+    fn scale_hint(&self) -> f32 {
+        match &self.space {
+            // 遠近が入ると 1 つの値では表せない。等倍として扱う。
+            Some(_) => 1.0,
+            None => self.matrix.scale_hint(),
+        }
+    }
+
+    /// 視点座標の 3 点で面を 1 枚。手前すぎるものは描かない。
+    ///
+    /// 面が視点をまたぐ場合は切らずに丸ごと落とす。立体の一部が消えるが、
+    /// 変な形が画面いっぱいに伸びるよりは害が小さい。
+    fn face(&mut self, points: [[f32; 3]; 3], color: Color) {
+        let Some(space) = &self.space else { return };
+        let mut screen = [[0.0f32; 3]; 3];
+        for (out, p) in screen.iter_mut().zip(points) {
+            let Some((at, depth)) = space.camera.project(p) else { return };
+            let at = self.base.apply(at[0], at[1]);
+            *out = [at[0], at[1], depth];
+        }
+        self.tri(screen[0], screen[1], screen[2], color);
+    }
+
+    /// 立体の稜線。面と同じ深さだと消えるので、ほんの少し手前へ寄せる。
+    ///
+    /// 視点座標を原点方向へ縮めると、画面上の位置は変わらないまま深さだけ
+    /// 手前になる。画面の解像度にも遠近にも左右されない。
+    fn edge(&mut self, a: [f32; 3], b: [f32; 3], color: Color) {
+        const TOWARD_THE_EYE: f32 = 0.997;
+        let Some(space) = &self.space else { return };
+        let pull = |p: [f32; 3]| [p[0] * TOWARD_THE_EYE, p[1] * TOWARD_THE_EYE, p[2] * TOWARD_THE_EYE];
+        let (Some((p0, d0)), Some((p1, d1))) =
+            (space.camera.project(pull(a)), space.camera.project(pull(b)))
+        else {
+            return;
+        };
+        let p0 = self.base.apply(p0[0], p0[1]);
+        let p1 = self.base.apply(p1[0], p1[1]);
+        let (dx, dy) = (p1[0] - p0[0], p1[1] - p0[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-6 {
+            return;
+        }
+        // 太さは画面上のピクセル。細い線は Processing も画面基準で引く。
+        let hw = (self.stroke_weight * 0.5).max(0.5);
+        let (nx, ny) = (-dy / len * hw, dx / len * hw);
+        let base = self.list.vertices.len() as u32;
+        self.push_vertex([p0[0] + nx, p0[1] + ny, d0], color);
+        self.push_vertex([p1[0] + nx, p1[1] + ny, d1], color);
+        self.push_vertex([p1[0] - nx, p1[1] - ny, d1], color);
+        self.push_vertex([p0[0] - nx, p0[1] - ny, d0], color);
+        self.emit(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// 面の向きから明るさを決める。`lights()` を呼んでいなければ素の色。
+    fn shade(&self, color: Color, normal: [f32; 3]) -> Color {
+        let Some(space) = &self.space else { return color };
+        if !space.lights {
+            return color;
+        }
+        // 既定の lights() は環境光 128 と、視点から差す平行光 128。
+        const LEVEL: f32 = 128.0 / 255.0;
+        let n = crate::mat4::normalize(space.model.direction(normal));
+        let level = (LEVEL + LEVEL * n[2].max(0.0)).min(1.0);
+        Color { r: color.r * level, g: color.g * level, b: color.b * level, a: color.a }
+    }
+
+    /// `box()`。
+    pub fn draw_box(&mut self, w: f32, h: f32, d: f32) {
+        self.ensure_3d();
+        if w == 0.0 && h == 0.0 && d == 0.0 {
+            return;
+        }
+        let (x, y, z) = (w * 0.5, h * 0.5, d * 0.5);
+        // 8 隅。下位ビットが x、次が y、その次が z の符号。
+        let corner = |i: usize| {
+            [
+                if i & 1 == 0 { -x } else { x },
+                if i & 2 == 0 { -y } else { y },
+                if i & 4 == 0 { -z } else { z },
+            ]
+        };
+        // 6 面。四隅の番号と外向きの法線。
+        const FACES: [([usize; 4], [f32; 3]); 6] = [
+            ([0, 2, 6, 4], [-1.0, 0.0, 0.0]),
+            ([1, 5, 7, 3], [1.0, 0.0, 0.0]),
+            ([0, 4, 5, 1], [0.0, -1.0, 0.0]),
+            ([2, 3, 7, 6], [0.0, 1.0, 0.0]),
+            ([0, 1, 3, 2], [0.0, 0.0, -1.0]),
+            ([4, 6, 7, 5], [0.0, 0.0, 1.0]),
+        ];
+        self.solid(&FACES.map(|(idx, n)| (idx.map(corner), n)));
+    }
+
+    /// `sphere()`。緯度と経度で分ける。
+    pub fn sphere(&mut self, radius: f32) {
+        self.ensure_3d();
+        if radius <= 0.0 {
+            return;
+        }
+        // Processing の既定は 30 分割。小さい球にそこまでは要らない。
+        let rings = ((radius * 0.5) as usize).clamp(6, 24);
+        let segments = rings * 2;
+        let point = |ring: usize, seg: usize| {
+            let phi = std::f32::consts::PI * ring as f32 / rings as f32;
+            let theta = std::f32::consts::TAU * seg as f32 / segments as f32;
+            [phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin()]
+        };
+        let mut faces = Vec::with_capacity(rings * segments);
+        for ring in 0..rings {
+            for seg in 0..segments {
+                let quad = [
+                    point(ring, seg),
+                    point(ring, seg + 1),
+                    point(ring + 1, seg + 1),
+                    point(ring + 1, seg),
+                ];
+                // 球では法線が位置とそのまま同じ向き。4 隅の平均で足りる。
+                let mut n = [0.0f32; 3];
+                for p in quad {
+                    for (a, b) in n.iter_mut().zip(p) {
+                        *a += b;
+                    }
+                }
+                faces.push((quad.map(|p| [p[0] * radius, p[1] * radius, p[2] * radius]), n));
+            }
+        }
+        self.solid(&faces);
+    }
+
+    /// 面の並びを塗って縁取る。ローカル座標で受け取る。
+    fn solid(&mut self, faces: &[([[f32; 3]; 4], [f32; 3])]) {
+        let Some(space) = &self.space else { return };
+        let model = space.model;
+        let was = std::mem::replace(&mut self.depth_write, true);
+
+        if let Some(fill) = self.fill {
+            for (quad, normal) in faces {
+                let color = self.shade(fill, *normal);
+                let eye = quad.map(|p| model.point(p));
+                self.face([eye[0], eye[1], eye[2]], color);
+                self.face([eye[0], eye[2], eye[3]], color);
+            }
+        }
+        if let Some(stroke) = self.stroke {
+            for (quad, _) in faces {
+                let eye = quad.map(|p| model.point(p));
+                for i in 0..4 {
+                    self.edge(eye[i], eye[(i + 1) % 4], stroke);
+                }
+            }
+        }
+        self.depth_write = was;
+    }
+
     // ---- 座標変換 -------------------------------------------------------
 
     pub fn push_matrix(&mut self) {
-        self.stack.push(self.matrix);
+        match &mut self.space {
+            Some(space) => space.stack.push(space.model),
+            None => self.stack.push(self.matrix),
+        }
     }
 
     /// 座標変換を初期状態へ戻す。`resetMatrix()` 相当。
     pub fn reset_matrix(&mut self) {
-        self.matrix = self.base;
+        match &mut self.space {
+            // 3D ではカメラごと消える。Processing と同じ。
+            Some(space) => space.model = Mat4::IDENTITY,
+            None => self.matrix = self.base,
+        }
     }
 
     pub fn pop_matrix(&mut self) {
-        if let Some(m) = self.stack.pop() {
-            self.matrix = m;
+        match &mut self.space {
+            Some(space) => {
+                if let Some(m) = space.stack.pop() {
+                    space.model = m;
+                }
+            }
+            None => {
+                if let Some(m) = self.stack.pop() {
+                    self.matrix = m;
+                }
+            }
         }
     }
 
     pub fn translate(&mut self, x: f32, y: f32) {
-        self.matrix = self.matrix.then_local(Affine { e: x, f: y, ..Affine::IDENTITY });
+        match &mut self.space {
+            Some(space) => space.model = space.model.then_local(Mat4::translation(x, y, 0.0)),
+            None => self.matrix = self.matrix.then_local(Affine { e: x, f: y, ..Affine::IDENTITY }),
+        }
+    }
+
+    /// 3 引数の `translate()`。2D の作品では奥行きを捨てる。
+    pub fn translate_3d(&mut self, x: f32, y: f32, z: f32) {
+        self.ensure_3d();
+        if let Some(space) = &mut self.space {
+            space.model = space.model.then_local(Mat4::translation(x, y, z));
+        }
     }
 
     pub fn rotate(&mut self, angle: f32) {
-        let (s, c) = angle.sin_cos();
-        self.matrix = self.matrix.then_local(Affine { a: c, b: s, c: -s, d: c, e: 0.0, f: 0.0 });
+        match &mut self.space {
+            Some(space) => space.model = space.model.then_local(Mat4::rotation_z(angle)),
+            None => {
+                let (s, c) = angle.sin_cos();
+                self.matrix =
+                    self.matrix.then_local(Affine { a: c, b: s, c: -s, d: c, e: 0.0, f: 0.0 });
+            }
+        }
+    }
+
+    /// `rotateX()` / `rotateY()` / `rotateZ()`。
+    pub fn rotate_axis(&mut self, angle: f32, axis: [f32; 3]) {
+        self.ensure_3d();
+        if let Some(space) = &mut self.space {
+            let m = Mat4::rotation_axis(angle, axis[0], axis[1], axis[2]);
+            space.model = space.model.then_local(m);
+        }
     }
 
     pub fn scale(&mut self, sx: f32, sy: f32) {
-        self.matrix = self.matrix.then_local(Affine { a: sx, d: sy, ..Affine::IDENTITY });
+        match &mut self.space {
+            Some(space) => space.model = space.model.then_local(Mat4::scaling(sx, sy, 1.0)),
+            None => self.matrix = self.matrix.then_local(Affine { a: sx, d: sy, ..Affine::IDENTITY }),
+        }
+    }
+
+    /// 3 引数の `scale()`。
+    pub fn scale_3d(&mut self, sx: f32, sy: f32, sz: f32) {
+        self.ensure_3d();
+        if let Some(space) = &mut self.space {
+            space.model = space.model.then_local(Mat4::scaling(sx, sy, sz));
+        }
     }
 
     // ---- 図形 -----------------------------------------------------------
@@ -624,6 +961,70 @@ impl Graphics {
     pub fn rect(&mut self, a: f32, b: f32, c1: f32, d: f32) {
         let (x, y, w, h) = self.rect_mode.to_corner(a, b, c1, d);
         self.rect_corner(x, y, w, h);
+    }
+
+    /// 角の丸い `rect()`。`radii` は左上から時計回り。
+    pub fn rect_rounded(&mut self, a: f32, b: f32, c: f32, d: f32, radii: [f32; 4]) {
+        let (x, y, w, h) = self.rect_mode.to_corner(a, b, c, d);
+        // 半径は辺の半分まで。それ以上は意味を持たない。
+        let limit = (w.abs().min(h.abs())) * 0.5;
+        let r = radii.map(|v| v.clamp(0.0, limit));
+        if r.iter().all(|v| *v <= 0.0) {
+            self.rect_corner(x, y, w, h);
+            return;
+        }
+
+        // 角ごとに円弧を刻んで、閉じた輪郭を作る。
+        let mut points: Vec<[f32; 2]> = Vec::new();
+        let corners = [
+            // (中心, 開始角)。左上から時計回り。
+            ([x + r[0], y + r[0]], std::f32::consts::PI),
+            ([x + w - r[1], y + r[1]], -std::f32::consts::FRAC_PI_2),
+            ([x + w - r[2], y + h - r[2]], 0.0),
+            ([x + r[3], y + h - r[3]], std::f32::consts::FRAC_PI_2),
+        ];
+        for (i, (center, start)) in corners.iter().enumerate() {
+            let radius = r[i];
+            if radius <= 0.0 {
+                // 角が丸くないなら頂点をひとつ置くだけ。
+                let sharp = match i {
+                    0 => [x, y],
+                    1 => [x + w, y],
+                    2 => [x + w, y + h],
+                    _ => [x, y + h],
+                };
+                points.push(sharp);
+                continue;
+            }
+            let steps = ((radius * self.scale_hint() * 0.5) as usize).clamp(3, 16);
+            for step in 0..=steps {
+                let t = start + std::f32::consts::FRAC_PI_2 * (step as f32 / steps as f32);
+                points.push([center[0] + radius * t.cos(), center[1] + radius * t.sin()]);
+            }
+        }
+
+        // 角丸の四角は凸なので、中心からの扇で塗れる。耳切りより速い。
+        if let Some(color) = self.fill {
+            let center = self.pt(x + w * 0.5, y + h * 0.5);
+            let base = self.list.vertices.len() as u32;
+            self.push_vertex(center, color);
+            for p in &points {
+                let at = self.pt(p[0], p[1]);
+                self.push_vertex(at, color);
+            }
+            let n = points.len() as u32;
+            for i in 0..n {
+                self.emit(&[base, base + 1 + i, base + 1 + (i + 1) % n]);
+            }
+        }
+
+        if self.stroke.is_some() && self.stroke_weight > 0.0 {
+            for i in 0..points.len() {
+                let from = points[i];
+                let to = points[(i + 1) % points.len()];
+                self.line(from[0], from[1], to[0], to[1]);
+            }
+        }
     }
 
     /// `ellipse()`。引数の意味は `ellipseMode()` に従う。
@@ -667,12 +1068,12 @@ impl Graphics {
         let segments = self.circle_segments(rx.abs().max(ry.abs()));
 
         if let Some(c) = self.fill {
-            let center = self.matrix.apply(cx, cy);
+            let center = self.pt(cx, cy);
             let base = self.list.vertices.len() as u32;
             self.push_vertex(center, c);
             for i in 0..=segments {
                 let t = i as f32 / segments as f32 * std::f32::consts::TAU;
-                let p = self.matrix.apply(cx + rx * t.cos(), cy + ry * t.sin());
+                let p = self.pt(cx + rx * t.cos(), cy + ry * t.sin());
                 self.push_vertex(p, c);
             }
             for i in 0..segments {
@@ -703,9 +1104,9 @@ impl Graphics {
 
     pub fn triangle(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) {
         if let Some(c) = self.fill {
-            let p1 = self.matrix.apply(x1, y1);
-            let p2 = self.matrix.apply(x2, y2);
-            let p3 = self.matrix.apply(x3, y3);
+            let p1 = self.pt(x1, y1);
+            let p2 = self.pt(x2, y2);
+            let p3 = self.pt(x3, y3);
             self.tri(p1, p2, p3, c);
         }
         if self.stroke.is_some() && self.stroke_weight > 0.0 {
@@ -728,7 +1129,7 @@ impl Graphics {
             return;
         }
         // 画面上で 1px を下回る線も見えるように、変換後の太さで下限を設ける。
-        let hw = (self.stroke_weight * 0.5).max(0.5 / self.matrix.scale_hint());
+        let hw = (self.stroke_weight * 0.5).max(0.5 / self.scale_hint());
         let (nx, ny) = (-dy / len * hw, dx / len * hw);
         self.quad(
             [x1 + nx, y1 + ny],
@@ -869,9 +1270,9 @@ impl Graphics {
             // 凹みのある形も塗れるよう、耳切り法で三角形へ分ける。
             // 扇状に分けると、凹んだところが外へはみ出す。
             for [a, b, cc] in triangulate(points) {
-                let p1 = self.matrix.apply(points[a][0], points[a][1]);
-                let p2 = self.matrix.apply(points[b][0], points[b][1]);
-                let p3 = self.matrix.apply(points[cc][0], points[cc][1]);
+                let p1 = self.pt(points[a][0], points[a][1]);
+                let p2 = self.pt(points[b][0], points[b][1]);
+                let p3 = self.pt(points[cc][0], points[cc][1]);
                 self.tri(p1, p2, p3, c);
             }
         }
@@ -952,10 +1353,10 @@ impl Graphics {
                 let uv = glyph.uv;
 
                 let p = [
-                    self.matrix.apply(gx, gy),
-                    self.matrix.apply(gx + gw, gy),
-                    self.matrix.apply(gx + gw, gy + gh),
-                    self.matrix.apply(gx, gy + gh),
+                    self.pt(gx, gy),
+                    self.pt(gx + gw, gy),
+                    self.pt(gx + gw, gy + gh),
+                    self.pt(gx, gy + gh),
                 ];
                 let base = self.list.vertices.len() as u32;
                 self.push_textured(p[0], color, [uv[0], uv[1]]);
@@ -988,12 +1389,12 @@ impl Graphics {
         };
 
         if let Some(c) = self.fill {
-            let center = self.matrix.apply(cx, cy);
+            let center = self.pt(cx, cy);
             let base = self.list.vertices.len() as u32;
             self.push_vertex(center, c);
             for i in 0..=segments {
                 let (x, y) = at(i);
-                let p = self.matrix.apply(x, y);
+                let p = self.pt(x, y);
                 self.push_vertex(p, c);
             }
             for i in 0..segments {
@@ -1029,7 +1430,7 @@ impl Graphics {
         }
         // 制御点の広がりから分割数を決める。小さい曲線に無駄な頂点を置かない。
         let span = (x1 - x4).abs().max((y1 - y4).abs()).max((x2 - x3).abs()).max((y2 - y3).abs());
-        let segments = ((span * self.matrix.scale_hint() * 0.25) as usize).clamp(8, 128);
+        let segments = ((span * self.scale_hint() * 0.25) as usize).clamp(8, 128);
 
         let at = |t: f32| {
             let u = 1.0 - t;
@@ -1047,14 +1448,14 @@ impl Graphics {
 
     pub fn point(&mut self, x: f32, y: f32) {
         let Some(c) = self.stroke else { return };
-        let hw = (self.stroke_weight * 0.5).max(0.5 / self.matrix.scale_hint());
+        let hw = (self.stroke_weight * 0.5).max(0.5 / self.scale_hint());
         self.quad([x - hw, y - hw], [x + hw, y - hw], [x + hw, y + hw], [x - hw, y + hw], c);
     }
 
     // ---- 内部ヘルパ -----------------------------------------------------
 
     fn circle_segments(&self, radius: f32) -> usize {
-        let screen_radius = radius * self.matrix.scale_hint();
+        let screen_radius = radius * self.scale_hint();
         // 弧の 1 セグメントが数ピクセルに収まるようにする。細い輪郭線は継ぎ目が
         // 目立ちやすいので、塗りだけのときより多めに割る。
         ((screen_radius * 1.6) as usize).clamp(16, 256)
@@ -1062,10 +1463,10 @@ impl Graphics {
 
     /// ローカル座標 4 点を変換して 2 三角形にする。
     fn quad(&mut self, p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], c: Color) {
-        let a = self.matrix.apply(p0[0], p0[1]);
-        let b = self.matrix.apply(p1[0], p1[1]);
-        let cc = self.matrix.apply(p2[0], p2[1]);
-        let d = self.matrix.apply(p3[0], p3[1]);
+        let a = self.pt(p0[0], p0[1]);
+        let b = self.pt(p1[0], p1[1]);
+        let cc = self.pt(p2[0], p2[1]);
+        let d = self.pt(p3[0], p3[1]);
         let base = self.list.vertices.len() as u32;
         self.push_vertex(a, c);
         self.push_vertex(b, c);
@@ -1075,7 +1476,7 @@ impl Graphics {
     }
 
     /// 変換済みの 3 点。
-    fn tri(&mut self, a: [f32; 2], b: [f32; 2], c: [f32; 2], color: Color) {
+    fn tri(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], color: Color) {
         let base = self.list.vertices.len() as u32;
         self.push_vertex(a, color);
         self.push_vertex(b, color);
@@ -1091,12 +1492,23 @@ impl Graphics {
 
         match self.list.batches.last_mut() {
             // 合成方法が同じなら続きとして伸ばす。
-            Some(last) if last.blend == self.blend && last.end == start => last.end = end,
-            _ => self.list.batches.push(Batch { blend: self.blend, start, end }),
+            Some(last)
+                if last.blend == self.blend
+                    && last.depth == self.depth_write
+                    && last.end == start =>
+            {
+                last.end = end
+            }
+            _ => self.list.batches.push(Batch {
+                blend: self.blend,
+                depth: self.depth_write,
+                start,
+                end,
+            }),
         }
     }
 
-    fn push_vertex(&mut self, pos: [f32; 2], color: Color) {
+    fn push_vertex(&mut self, pos: [f32; 3], color: Color) {
         // 図形はアトラスの白い点を指す。文字と同じ経路で描けるようにするため。
         self.list.vertices.push(Vertex {
             pos,
@@ -1105,7 +1517,7 @@ impl Graphics {
         });
     }
 
-    fn push_textured(&mut self, pos: [f32; 2], color: Color, uv: [f32; 2]) {
+    fn push_textured(&mut self, pos: [f32; 3], color: Color, uv: [f32; 2]) {
         self.list.vertices.push(Vertex { pos, color: color.to_array(), uv });
     }
 }

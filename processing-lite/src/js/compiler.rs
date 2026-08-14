@@ -657,9 +657,9 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         let argc = args.len() as u8;
 
-        // `Math.sin(x)` は組み込みの `sin(x)` と同じものへ読み替える。
+        // `Math.sin(x)` と `String.fromCodePoint(n)` は組み込みへ読み替える。
         if let Expr::Member { object, name } = callee
-            && is_math(object)
+            && (is_math(object) || is_namespace(object, "String"))
             && let Some(native) = natives::resolve(math_name(name), argc)
         {
             for arg in args {
@@ -773,7 +773,12 @@ impl Compiler {
 
 /// `Math` そのものを指しているか。
 fn is_math(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name) if name == "Math")
+    is_namespace(expr, "Math")
+}
+
+/// `Math` や `String` のような、まとめ役の名前を指しているか。
+fn is_namespace(expr: &Expr, name: &str) -> bool {
+    matches!(expr, Expr::Ident(n) if n == name)
 }
 
 /// `Math.foo` の `foo` を、このランタイムの API 名へ直す。

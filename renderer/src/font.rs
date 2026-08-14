@@ -38,7 +38,11 @@ pub struct Glyph {
 
 /// 焼いた字形を溜めておくアトラス。
 pub struct FontAtlas {
-    font: Option<Rc<Vec<u8>>>,
+    /// 使うフォント。前から順に試し、字形を持っているものを使う。
+    ///
+    /// 1 本では足りない。日本語のフォントに麻雀牌や記号は入っていないことが
+    /// 多く、記号のフォントに日本語は入っていない。
+    fonts: Vec<Rc<Vec<u8>>>,
     pixels: Vec<u8>,
     glyphs: HashMap<char, Option<Glyph>>,
     /// 次に字形を置く位置。
@@ -65,7 +69,7 @@ impl FontAtlas {
             }
         }
         Self {
-            font: None,
+            fonts: Vec::new(),
             pixels,
             glyphs: HashMap::new(),
             // 白い点を避けて始める。
@@ -83,11 +87,22 @@ impl FontAtlas {
 
     /// 使うフォントを差し替える。焼いた字形は捨てる。
     pub fn set_font(&mut self, bytes: Vec<u8>) {
-        if font_of(&bytes).is_none() {
-            log::warn!("フォントとして読めませんでした");
-            return;
-        }
-        self.font = Some(Rc::new(bytes));
+        self.set_fonts(vec![bytes]);
+    }
+
+    /// 予備も含めて差し替える。前のものから順に字形を探す。
+    pub fn set_fonts(&mut self, fonts: Vec<Vec<u8>>) {
+        self.fonts = fonts
+            .into_iter()
+            .filter(|bytes| {
+                let ok = font_of(bytes).is_some();
+                if !ok {
+                    log::warn!("フォントとして読めませんでした");
+                }
+                ok
+            })
+            .map(Rc::new)
+            .collect();
         self.glyphs.clear();
         self.pixels[4..].fill(0);
         self.cursor = (4, 0);
@@ -96,7 +111,7 @@ impl FontAtlas {
     }
 
     pub fn has_font(&self) -> bool {
-        self.font.is_some()
+        !self.fonts.is_empty()
     }
 
     pub fn version(&self) -> u64 {
@@ -120,9 +135,13 @@ impl FontAtlas {
     }
 
     fn bake(&mut self, ch: char) -> Option<Glyph> {
-        let bytes = self.font.clone()?;
+        // 字形を持っているフォントを前から探す。
+        let (bytes, glyph_id) = self.fonts.iter().find_map(|bytes| {
+            let font = font_of(bytes)?;
+            let id = font.charmap().map(ch)?;
+            Some((bytes.clone(), id))
+        })?;
         let font = font_of(&bytes)?;
-        let glyph_id = font.charmap().map(ch)?;
 
         let size = Size::new(RASTER_SIZE);
         let metrics = font.glyph_metrics(size, LocationRef::default());

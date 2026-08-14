@@ -27,6 +27,10 @@ pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 pub struct SketchMeta {
     pub id: String,
     pub title: String,
+    /// 作者。設計書 §19.1 には無いが、つぶやきの作品は出どころが大事なので足した。
+    pub author: String,
+    /// 元の投稿などへのリンク。`http://` か `https://` だけを受ける。
+    pub link: String,
     pub favorite: bool,
     /// ソースのハッシュ。変わっていなければコンパイル結果を信用してよい。
     pub compile_hash: String,
@@ -52,6 +56,8 @@ impl SketchMeta {
         Self {
             id: id.into(),
             title: title.into(),
+            author: String::new(),
+            link: String::new(),
             favorite: false,
             compile_hash: String::new(),
             compile_status: CompileStatus::Unknown,
@@ -205,6 +211,18 @@ impl Repository {
             )?;
         }
 
+        if version < 4 {
+            // 作者とリンク。既存の行は空文字列で始まる。
+            self.conn.execute_batch(
+                "
+                ALTER TABLE sketch ADD COLUMN author TEXT NOT NULL DEFAULT '';
+                ALTER TABLE sketch ADD COLUMN link   TEXT NOT NULL DEFAULT '';
+
+                PRAGMA user_version = 4;
+                ",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -302,7 +320,7 @@ impl Repository {
     pub fn all(&self) -> Result<Vec<SketchMeta>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, favorite, compile_hash, compile_status, compile_message,
-                    thumbnail_frame, created_at, updated_at, last_opened_at
+                    thumbnail_frame, created_at, updated_at, last_opened_at, author, link
              FROM sketch ORDER BY id",
         )?;
 
@@ -318,6 +336,8 @@ impl Repository {
                     created_at: row.get(7)?,
                     updated_at: row.get(8)?,
                     last_opened_at: row.get(9)?,
+                    author: row.get(10)?,
+                    link: row.get(11)?,
                     tags: BTreeSet::new(),
                     collections: BTreeSet::new(),
                 })
@@ -355,8 +375,8 @@ impl Repository {
         tx.execute(
             "INSERT INTO sketch
                 (id, title, favorite, compile_hash, compile_status, compile_message,
-                 thumbnail_frame, created_at, updated_at, last_opened_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 thumbnail_frame, created_at, updated_at, last_opened_at, author, link)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 favorite = excluded.favorite,
@@ -365,7 +385,9 @@ impl Repository {
                 compile_message = excluded.compile_message,
                 thumbnail_frame = excluded.thumbnail_frame,
                 updated_at = excluded.updated_at,
-                last_opened_at = excluded.last_opened_at",
+                last_opened_at = excluded.last_opened_at,
+                author = excluded.author,
+                link = excluded.link",
             params![
                 meta.id,
                 meta.title,
@@ -377,6 +399,8 @@ impl Repository {
                 meta.created_at,
                 meta.updated_at,
                 meta.last_opened_at,
+                meta.author,
+                meta.link,
             ],
         )?;
 
@@ -510,8 +534,26 @@ mod tests {
     #[test]
     fn a_fresh_database_is_migrated() {
         let r = repo();
-        assert_eq!(r.schema_version().expect("読める"), 3);
+        assert_eq!(r.schema_version().expect("読める"), 4);
         assert_eq!(r.count().expect("数えられる"), 0);
+    }
+
+    #[test]
+    fn author_and_link_survive_a_save_and_load() {
+        let mut repo = repo();
+        let mut meta = SketchMeta::new("a", "A", 1);
+        meta.author = "だれか".into();
+        meta.link = "https://example.com/status/1".into();
+        repo.upsert(&meta).unwrap();
+
+        let saved = repo.get("a").unwrap().expect("ある");
+        assert_eq!(saved.author, "だれか");
+        assert_eq!(saved.link, "https://example.com/status/1");
+
+        // 改名しても付いて回る。
+        repo.rename("a", "b", "B", 2).unwrap();
+        let renamed = repo.get("b").unwrap().expect("ある");
+        assert_eq!(renamed.author, "だれか");
     }
 
     #[test]
@@ -619,7 +661,7 @@ mod tests {
     fn migrating_twice_is_harmless() {
         let r = repo();
         r.migrate().expect("2 回目も通る");
-        assert_eq!(r.schema_version().expect("読める"), 3);
+        assert_eq!(r.schema_version().expect("読める"), 4);
     }
 
     #[test]

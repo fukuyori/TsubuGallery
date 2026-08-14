@@ -23,6 +23,8 @@ pub enum GalleryAction {
     CancelDelete,
     /// 設定画面を開く。
     OpenSettings,
+    /// リンクをブラウザで開く。
+    OpenLink(usize),
     /// コレクションへの出し入れ。`true` なら入れる。
     SetCollection(usize, String, bool),
     /// コレクションごと消す。
@@ -129,6 +131,7 @@ fn hints(ui: &mut egui::Ui, locales: &Locales) {
         ("Del", locales.t("gallery.delete")),
         ("E", locales.t("gallery.edit")),
         ("N", locales.t("gallery.new")),
+        ("O", locales.t("gallery.open_link")),
         ("C", locales.t("gallery.collection")),
         ("P", locales.t("gallery.slideshow")),
         ("V", locales.t("gallery.view_mode")),
@@ -338,7 +341,7 @@ fn list(
             actions.push(GalleryAction::Open(index));
         }
 
-        if ui.is_rect_visible(rect) && draw_list_row(ui, rect, state, index, &response) {
+        if ui.is_rect_visible(rect) && draw_list_row(ui, rect, state, index, &response, actions) {
             actions.push(GalleryAction::ToggleFavorite(index));
         }
         ui.add_space(LIST_ROW_GAP);
@@ -354,6 +357,7 @@ fn draw_list_row(
     state: &GalleryUi<'_>,
     index: usize,
     response: &egui::Response,
+    actions: &mut Vec<GalleryAction>,
 ) -> bool {
     let Some(item) = state.view.item(index) else { return false };
     let selected = Some(index) == state.view.selected();
@@ -373,7 +377,7 @@ fn draw_list_row(
 
     // 星の分だけ右を空ける。
     let text_left = thumb_rect.max.x + 14.0;
-    let text_right = rect.max.x - 44.0;
+    let text_right = rect.max.x - 76.0;
     let text_width = (text_right - text_left).max(1.0);
 
     // 2 行目に方言・状態・タグ。グリッドではサムネイルへ重ねている情報を、
@@ -383,6 +387,9 @@ fn draw_list_row(
         detail.push(state.locales.t("gallery.compile_error").to_string());
     } else if let Some(dialect) = &item.dialect {
         detail.push(dialect.clone());
+    }
+    if !item.author.is_empty() {
+        detail.push(item.author.clone());
     }
     if !item.tags.is_empty() {
         detail.push(item.tags.iter().cloned().collect::<Vec<_>>().join(", "));
@@ -413,6 +420,26 @@ fn draw_list_row(
     }
 
     let star = draw_star(ui, egui::pos2(rect.max.x - 22.0, rect.center().y), index, item, &palette);
+
+    // リンクがあれば、押して開けるようにする。キーボードの `O` と同じ働き。
+    if tsubu_core::open::check(&item.link).is_ok() {
+        let at = egui::Rect::from_center_size(
+            egui::pos2(rect.max.x - 54.0, rect.center().y),
+            egui::vec2(26.0, 26.0),
+        );
+        let id = ui.id().with(("tsubu.gallery.link", index));
+        let response = ui.interact(at, id, egui::Sense::click()).on_hover_text(&item.link);
+        ui.painter().text(
+            at.center(),
+            egui::Align2::CENTER_CENTER,
+            "↗",
+            egui::FontId::proportional(15.0),
+            if response.hovered() { palette.accent } else { palette.dim },
+        );
+        if response.clicked() {
+            actions.push(GalleryAction::OpenLink(index));
+        }
+    }
 
     if selected {
         ui.painter().rect_stroke(
@@ -486,10 +513,16 @@ fn draw_card(
         );
     }
 
-    // タグは右下に小さく出す。多いときは先頭だけ (設計書 §6.1)。
-    if let Some(tag) = item.tags.iter().next() {
-        let more = item.tags.len() - 1;
-        let label = if more > 0 { format!("{tag} +{more}") } else { tag.clone() };
+    // 作者とタグを右下に小さく出す。多いときはタグの先頭だけ (設計書 §6.1)。
+    let credit = match (item.author.is_empty(), item.tags.iter().next()) {
+        (false, _) => Some(item.author.clone()),
+        (true, Some(tag)) => {
+            let more = item.tags.len() - 1;
+            Some(if more > 0 { format!("{tag} +{more}") } else { tag.clone() })
+        }
+        (true, None) => None,
+    };
+    if let Some(label) = credit {
         painter.text(
             egui::pos2(thumb_rect.max.x - 10.0, thumb_rect.max.y - 8.0),
             egui::Align2::RIGHT_BOTTOM,
@@ -1093,5 +1126,35 @@ mod view_mode_tests {
             let (out, _) = run_in(&mut view, None, *mode);
             assert_eq!(out.columns, 1, "{mode:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::tests::*;
+    use super::*;
+    use tsubu_gallery::GalleryItem;
+
+    fn view_with(link: &str) -> GalleryView {
+        let mut item = GalleryItem::new("a", "A");
+        item.author = "だれか".into();
+        item.link = link.to_string();
+        GalleryView::new(vec![item])
+    }
+
+    /// 開けるリンクがあるときだけ、リスト表示にボタンを出す。
+    #[test]
+    fn a_link_button_appears_only_for_web_links() {
+        let mut with = view_with("https://example.com/1");
+        let (_, drawn) = run_in(&mut with, None, ViewMode::List);
+
+        let mut without = view_with("");
+        let (_, bare) = run_in(&mut without, None, ViewMode::List);
+        assert!(drawn > bare, "リンクのボタンが出ていません: {bare} → {drawn}");
+
+        // 開けない形のものにはボタンを出さない。
+        let mut bad = view_with("file:///etc/passwd");
+        let (_, refused) = run_in(&mut bad, None, ViewMode::List);
+        assert_eq!(refused, bare, "開けないリンクにボタンが出ています");
     }
 }

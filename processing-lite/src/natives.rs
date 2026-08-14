@@ -3,7 +3,7 @@
 //! ユーザーコードから触れるのはここに並んだものだけ。任意のファイルアクセスや
 //! ネットワークへの入り口は最初から存在しない (設計書 §21)。
 
-use tsubu_renderer::{AngleMode, Color, Graphics, ShapeKind, ShapeMode, TextAlign};
+use tsubu_renderer::{AngleMode, Color, Graphics, Origin, ShapeKind, ShapeMode, TextAlign};
 
 use crate::bytecode::Value;
 use crate::math::{self, Rng};
@@ -13,6 +13,9 @@ use crate::math::{self, Rng};
 pub enum BuiltinVar {
     Width,
     Height,
+    /// `drawingContext`。ブラウザのキャンバスそのもの。ここには無いので、
+    /// 書き込みを受け取るだけの入れ物を渡す。
+    DrawingContext,
     FrameCount,
     MouseX,
     MouseY,
@@ -20,6 +23,7 @@ pub enum BuiltinVar {
     KeyPressed,
     Pi,
     TwoPi,
+    Tau,
     HalfPi,
     QuarterPi,
 
@@ -53,12 +57,18 @@ pub enum BuiltinVar {
     Top,
     Bottom,
     Baseline,
+
+    // size() / createCanvas() の 3 つめ。
+    P2d,
+    P3d,
+    WebGl,
 }
 
 impl BuiltinVar {
     pub fn resolve(name: &str) -> Option<Self> {
         Some(match name {
             "width" => BuiltinVar::Width,
+            "drawingContext" => BuiltinVar::DrawingContext,
             "height" => BuiltinVar::Height,
             "frameCount" => BuiltinVar::FrameCount,
             "mouseX" => BuiltinVar::MouseX,
@@ -67,6 +77,7 @@ impl BuiltinVar {
             "keyPressed" => BuiltinVar::KeyPressed,
             "PI" => BuiltinVar::Pi,
             "TWO_PI" => BuiltinVar::TwoPi,
+            "TAU" => BuiltinVar::Tau,
             "HALF_PI" => BuiltinVar::HalfPi,
             "QUARTER_PI" => BuiltinVar::QuarterPi,
             "RGB" => BuiltinVar::Rgb,
@@ -92,6 +103,10 @@ impl BuiltinVar {
             "TOP" => BuiltinVar::Top,
             "BOTTOM" => BuiltinVar::Bottom,
             "BASELINE" => BuiltinVar::Baseline,
+            // P2D と OPENGL は Processing の別名。中身は同じ。
+            "P2D" | "JAVA2D" => BuiltinVar::P2d,
+            "P3D" | "OPENGL" => BuiltinVar::P3d,
+            "WEBGL" => BuiltinVar::WebGl,
             _ => return None,
         })
     }
@@ -99,6 +114,8 @@ impl BuiltinVar {
     pub fn read(self, g: &Graphics) -> Value {
         use std::f32::consts;
         match self {
+            // 影の設定などを書き込む先。効きはしないが、書けないと止まってしまう。
+            BuiltinVar::DrawingContext => Value::new_object(),
             // size() を呼ばない作品も動くよう、width/height は実表示サイズを返す。
             BuiltinVar::Width => Value::Int(g.width as i32),
             BuiltinVar::Height => Value::Int(g.height as i32),
@@ -109,6 +126,8 @@ impl BuiltinVar {
             BuiltinVar::KeyPressed => Value::Bool(g.key_pressed),
             BuiltinVar::Pi => Value::Float(consts::PI),
             BuiltinVar::TwoPi => Value::Float(consts::TAU),
+            // TAU は TWO_PI と同じ。p5 の書き方。
+            BuiltinVar::Tau => Value::Float(consts::TAU),
             BuiltinVar::HalfPi => Value::Float(consts::FRAC_PI_2),
             BuiltinVar::QuarterPi => Value::Float(consts::FRAC_PI_4),
             // 定数は番号でしかないので、そのまま数値にする。
@@ -136,6 +155,10 @@ impl BuiltinVar {
             BuiltinVar::Top => Value::Float(28.0),
             BuiltinVar::Bottom => Value::Float(29.0),
             BuiltinVar::Baseline => Value::Float(30.0),
+            // 描画方式。size() が見分ける。
+            BuiltinVar::P2d => Value::Float(40.0),
+            BuiltinVar::P3d => Value::Float(41.0),
+            BuiltinVar::WebGl => Value::Float(42.0),
         }
     }
 }
@@ -147,6 +170,7 @@ pub enum Native {
     ArrayOf,
     /// `createVector()` / `new PVector()`。
     CreateVector,
+    FromCodePoint,
     Text,
     TextSize,
     TextAlign,
@@ -161,12 +185,22 @@ pub enum Native {
     /// `color()`。値としての色を作る。
     MakeColor,
     LerpColor,
+    Red,
+    Green,
+    Blue,
+    Alpha,
+    Hue,
+    Saturation,
+    Brightness,
+    RandomGaussian,
     Quad,
     /// `square(x, y, size)`。数の 2 乗 (`Native::Square`) とは別物。
     SquareShape,
     Curve,
     CurveVertex,
     BezierVertex,
+    ResetMatrix,
+    Clear,
     RectMode,
     EllipseMode,
     AngleMode,
@@ -195,6 +229,15 @@ pub enum Native {
     Rotate,
     Scale,
     PushMatrix,
+
+    // 3D (設計書 §14.2)。
+    Box,
+    Sphere,
+    RotateX,
+    RotateY,
+    RotateZ,
+    Lights,
+    NoLights,
     PopMatrix,
 
     Sin,
@@ -246,7 +289,7 @@ struct Signature {
 }
 
 const SIGNATURES: &[Signature] = &[
-    Signature { name: "size", native: Native::Size, arities: &[2] },
+    Signature { name: "size", native: Native::Size, arities: &[2, 3] },
     Signature { name: "createCanvas", native: Native::CreateCanvas, arities: &[1, 2, 3] },
     Signature { name: "colorMode", native: Native::ColorMode, arities: &[1, 2, 4, 5] },
     Signature { name: "blendMode", native: Native::BlendMode, arities: &[1] },
@@ -280,7 +323,7 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "strokeWeight", native: Native::StrokeWeight, arities: &[1] },
     Signature { name: "point", native: Native::Point, arities: &[2] },
     Signature { name: "line", native: Native::Line, arities: &[4] },
-    Signature { name: "rect", native: Native::Rect, arities: &[4] },
+    Signature { name: "rect", native: Native::Rect, arities: &[4, 5, 6, 7, 8] },
     Signature { name: "ellipse", native: Native::Ellipse, arities: &[4] },
     Signature { name: "circle", native: Native::Circle, arities: &[3] },
     Signature { name: "triangle", native: Native::Triangle, arities: &[6] },
@@ -290,6 +333,8 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "arc", native: Native::Arc, arities: &[6] },
     Signature { name: "quad", native: Native::Quad, arities: &[8] },
     Signature { name: "square", native: Native::SquareShape, arities: &[3] },
+    Signature { name: "resetMatrix", native: Native::ResetMatrix, arities: &[0] },
+    Signature { name: "clear", native: Native::Clear, arities: &[0] },
     Signature { name: "curve", native: Native::Curve, arities: &[8] },
     Signature { name: "curveVertex", native: Native::CurveVertex, arities: &[2] },
     Signature { name: "bezierVertex", native: Native::BezierVertex, arities: &[6] },
@@ -301,9 +346,29 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "bezier", native: Native::Bezier, arities: &[8] },
     Signature { name: "color", native: Native::MakeColor, arities: &[1, 2, 3, 4] },
     Signature { name: "lerpColor", native: Native::LerpColor, arities: &[3] },
-    Signature { name: "translate", native: Native::Translate, arities: &[2] },
-    Signature { name: "rotate", native: Native::Rotate, arities: &[1] },
-    Signature { name: "scale", native: Native::Scale, arities: &[1, 2] },
+    Signature { name: "red", native: Native::Red, arities: &[1] },
+    Signature { name: "green", native: Native::Green, arities: &[1] },
+    Signature { name: "blue", native: Native::Blue, arities: &[1] },
+    Signature { name: "alpha", native: Native::Alpha, arities: &[1] },
+    Signature { name: "hue", native: Native::Hue, arities: &[1] },
+    Signature { name: "saturation", native: Native::Saturation, arities: &[1] },
+    Signature { name: "brightness", native: Native::Brightness, arities: &[1] },
+    Signature { name: "randomGaussian", native: Native::RandomGaussian, arities: &[0] },
+    Signature { name: "translate", native: Native::Translate, arities: &[2, 3] },
+    Signature { name: "rotate", native: Native::Rotate, arities: &[1, 4] },
+    Signature { name: "scale", native: Native::Scale, arities: &[1, 2, 3] },
+    Signature { name: "box", native: Native::Box, arities: &[1, 3] },
+    Signature { name: "sphere", native: Native::Sphere, arities: &[1] },
+    Signature { name: "rotateX", native: Native::RotateX, arities: &[1] },
+    Signature { name: "rotateY", native: Native::RotateY, arities: &[1] },
+    Signature { name: "rotateZ", native: Native::RotateZ, arities: &[1] },
+    Signature { name: "lights", native: Native::Lights, arities: &[0] },
+    Signature { name: "noLights", native: Native::NoLights, arities: &[0] },
+    // 光源を細かく置く API。向きや色までは再現しないので、既定の明かりを
+    // 点けるだけにする。真っ黒よりは作品の姿が伝わる。
+    Signature { name: "ambientLight", native: Native::Lights, arities: &[1, 2, 3, 4] },
+    Signature { name: "directionalLight", native: Native::Lights, arities: &[6] },
+    Signature { name: "pointLight", native: Native::Lights, arities: &[6] },
     Signature { name: "pushMatrix", native: Native::PushMatrix, arities: &[0] },
     Signature { name: "popMatrix", native: Native::PopMatrix, arities: &[0] },
     Signature { name: "sin", native: Native::Sin, arities: &[1] },
@@ -315,6 +380,8 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "max", native: Native::Max, arities: &[2] },
     Signature { name: "Array", native: Native::ArrayOf, arities: &[1] },
     Signature { name: "createVector", native: Native::CreateVector, arities: &[0, 1, 2, 3] },
+    Signature { name: "fromCodePoint", native: Native::FromCodePoint, arities: &[1] },
+    Signature { name: "fromCharCode", native: Native::FromCodePoint, arities: &[1] },
     Signature { name: "text", native: Native::Text, arities: &[3] },
     Signature { name: "textSize", native: Native::TextSize, arities: &[1] },
     Signature { name: "textAlign", native: Native::TextAlign, arities: &[1, 2] },
@@ -385,6 +452,12 @@ pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> 
         // 宣言されたキャンバスは、縦横比を保ったまま表示領域へ収める。
         Native::Size | Native::CreateCanvas => {
             g.set_canvas(f(0), f(1));
+            // 3 つめは描画方式。P3D と WEBGL で原点の置き方が違う。
+            match args.get(2).map(|v| v.as_f32() as i32) {
+                Some(41) => g.enable_3d(Origin::TopLeft),
+                Some(42) => g.enable_3d(Origin::Center),
+                _ => {}
+            }
             Value::Void
         }
 
@@ -426,7 +499,15 @@ pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> 
             Value::Void
         }
         Native::Rect => {
-            g.rect(f(0), f(1), f(2), f(3));
+            // 5 個目からは角の丸み。1 個なら 4 隅とも同じ、4 個なら左上から
+            // 時計回りに指定する (Processing と同じ)。
+            match args.len() {
+                0..=4 => g.rect(f(0), f(1), f(2), f(3)),
+                5 => g.rect_rounded(f(0), f(1), f(2), f(3), [f(4); 4]),
+                6 => g.rect_rounded(f(0), f(1), f(2), f(3), [f(4), f(5), f(5), f(5)]),
+                7 => g.rect_rounded(f(0), f(1), f(2), f(3), [f(4), f(5), f(6), f(6)]),
+                _ => g.rect_rounded(f(0), f(1), f(2), f(3), [f(4), f(5), f(6), f(7)]),
+            }
             Value::Void
         }
         Native::Ellipse => {
@@ -475,6 +556,14 @@ pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> 
         }
         Native::BezierVertex => {
             g.bezier_vertex(f(0), f(1), f(2), f(3), f(4), f(5));
+            Value::Void
+        }
+        Native::ResetMatrix => {
+            g.reset_matrix();
+            Value::Void
+        }
+        Native::Clear => {
+            g.clear();
             Value::Void
         }
         Native::RectMode => {
@@ -535,19 +624,69 @@ pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> 
         }
 
         Native::Translate => {
-            g.translate(f(0), f(1));
+            if args.len() >= 3 {
+                g.translate_3d(f(0), f(1), f(2));
+            } else {
+                g.translate(f(0), f(1));
+            }
             Value::Void
         }
         Native::Rotate => {
-            g.rotate(g.to_radians(f(0)));
+            // 4 引数は軸まわりの回転。Processing の 3D の書き方。
+            if args.len() >= 4 {
+                g.rotate_axis(g.to_radians(f(0)), [f(1), f(2), f(3)]);
+            } else {
+                g.rotate(g.to_radians(f(0)));
+            }
             Value::Void
         }
-        Native::Scale => {
-            if args.len() == 1 {
+        Native::Scale => match args.len() {
+            0 | 1 => {
                 g.scale(f(0), f(0));
-            } else {
-                g.scale(f(0), f(1));
+                Value::Void
             }
+            2 => {
+                g.scale(f(0), f(1));
+                Value::Void
+            }
+            _ => {
+                g.scale_3d(f(0), f(1), f(2));
+                Value::Void
+            }
+        },
+
+        // 3D。奥行きのある図形は、呼ばれた時点で 3D へ切り替える。
+        // size() に P3D を書き忘れた作品も、そのまま動く。
+        Native::Box => {
+            if args.len() >= 3 {
+                g.draw_box(f(0), f(1), f(2));
+            } else {
+                g.draw_box(f(0), f(0), f(0));
+            }
+            Value::Void
+        }
+        Native::Sphere => {
+            g.sphere(f(0));
+            Value::Void
+        }
+        Native::RotateX => {
+            g.rotate_axis(g.to_radians(f(0)), [1.0, 0.0, 0.0]);
+            Value::Void
+        }
+        Native::RotateY => {
+            g.rotate_axis(g.to_radians(f(0)), [0.0, 1.0, 0.0]);
+            Value::Void
+        }
+        Native::RotateZ => {
+            g.rotate_axis(g.to_radians(f(0)), [0.0, 0.0, 1.0]);
+            Value::Void
+        }
+        Native::Lights => {
+            g.lights(true);
+            Value::Void
+        }
+        Native::NoLights => {
+            g.lights(false);
             Value::Void
         }
         Native::PushMatrix => {
@@ -602,6 +741,17 @@ pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> 
         Native::Log10 => Value::Float(f(0).log10()),
         Native::CreateVector => Value::new_vector(f(0), f(1), f(2)),
 
+        // `String.fromCodePoint(n)`。番号から 1 文字を作る。
+        Native::FromCodePoint => {
+            let code = f(0);
+            let ch = if code.is_finite() && code >= 0.0 {
+                char::from_u32(code as u32).unwrap_or('\u{fffd}')
+            } else {
+                '\u{fffd}'
+            };
+            Value::new_str(ch.to_string())
+        }
+
         // ---- 文字 ----
         Native::Text => {
             let text = args.first().map(Value::to_display).unwrap_or_default();
@@ -636,6 +786,28 @@ pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> 
                 format!("{sign}{padded}.{rest}")
             })
         }
+        // 色の成分。`color()` の作った値と、詰めた int のどちらも受ける。
+        Native::Red => Value::Float(color_components(args.first())[0]),
+        Native::Green => Value::Float(color_components(args.first())[1]),
+        Native::Blue => Value::Float(color_components(args.first())[2]),
+        Native::Alpha => Value::Float(color_components(args.first())[3]),
+        Native::Hue | Native::Saturation | Native::Brightness => {
+            let c = color_components(args.first());
+            let (h, s, v) = rgb_to_hsb(c[0] / 255.0, c[1] / 255.0, c[2] / 255.0);
+            // 返す範囲は colorMode に合わせる。既定では 0..255。
+            let max = g.color_max();
+            Value::Float(match native {
+                Native::Hue => h * max[0],
+                Native::Saturation => s * max[1],
+                _ => v * max[2],
+            })
+        }
+        // 平均 0、標準偏差 1 の正規乱数 (Box-Muller)。
+        Native::RandomGaussian => {
+            let u1 = rng.random(1.0).max(f32::MIN_POSITIVE);
+            let u2 = rng.random(1.0);
+            Value::Float((-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos())
+        }
         Native::Min => extreme(args, false),
         Native::Max => extreme(args, true),
         Native::Constrain => match (
@@ -659,8 +831,7 @@ pub fn call(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> 
         Native::Noise => match args.len() {
             0 | 1 => Value::Float(math::noise(f(0), 0.0)),
             2 => Value::Float(math::noise(f(0), f(1))),
-            // 3 次元ノイズは持っていないので、3 つ目を混ぜてずらす。
-            _ => Value::Float(math::noise(f(0) + f(2) * 31.7, f(1) - f(2) * 17.3)),
+            _ => Value::Float(math::noise3(f(0), f(1), f(2))),
         },
 
         Native::ColorMode => {
@@ -750,6 +921,20 @@ fn numbers(args: &[Value]) -> Vec<f32> {
 /// `color()` の中身は RGB の 0〜255 で持っているので、[`Graphics::color_from`]
 /// は通さない。通すと `colorMode(HSB)` のときに二重変換になる。
 fn resolve_color(args: &[Value], g: &Graphics) -> Color {
+    // `stroke(-1)` のように int をひとつ渡す書き方は、詰めた色 (0xAARRGGBB)。
+    // Processing は型で見分けるので、こちらも int のときだけそう読む。
+    // float の `fill(128.0)` は今までどおり明度。
+    if let (1, Some(Value::Int(packed))) = (args.len(), args.first())
+        && !(0..=255).contains(packed)
+    {
+        let v = *packed as u32;
+        return Color::rgba(
+            ((v >> 16) & 255) as f32 / 255.0,
+            ((v >> 8) & 255) as f32 / 255.0,
+            (v & 255) as f32 / 255.0,
+            ((v >> 24) & 255) as f32 / 255.0,
+        );
+    }
     let Some(Value::Array(_)) = args.first() else {
         return g.color_from(&numbers(args));
     };
@@ -802,6 +987,25 @@ fn shape_mode(arg: Option<&Value>) -> ShapeMode {
     }
 }
 
+/// RGB (0..1) を HSB (0..1) へ。色の成分を返す関数で使う。
+fn rgb_to_hsb(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let span = max - min;
+
+    let hue = if span < 1e-6 {
+        0.0
+    } else if max == r {
+        ((g - b) / span / 6.0).rem_euclid(1.0)
+    } else if max == g {
+        ((b - r) / span + 2.0) / 6.0
+    } else {
+        ((r - g) / span + 4.0) / 6.0
+    };
+    let saturation = if max < 1e-6 { 0.0 } else { span / max };
+    (hue, saturation, max)
+}
+
 /// 色の値から `[r, g, b, a]` を取り出す。
 ///
 /// `color()` が返す配列のほか、単なる数値も灰色として受ける。
@@ -811,6 +1015,17 @@ fn color_components(value: Option<&Value>) -> [f32; 4] {
             let items = items.borrow();
             let get = |i: usize| items.get(i).map_or(0.0, Value::as_f32);
             [get(0), get(1), get(2), items.get(3).map_or(255.0, Value::as_f32)]
+        }
+        // 詰めた色 (0xAARRGGBB)。`color()` の戻り値以外にも、int を直に
+        // 渡す書き方がある。
+        Some(Value::Int(packed)) if !(0..=255).contains(packed) => {
+            let v = *packed as u32;
+            [
+                ((v >> 16) & 255) as f32,
+                ((v >> 8) & 255) as f32,
+                (v & 255) as f32,
+                ((v >> 24) & 255) as f32,
+            ]
         }
         Some(other) => {
             let v = other.as_f32();
@@ -842,7 +1057,7 @@ mod tests {
     #[test]
     fn known_name_with_wrong_arity_can_be_reported() {
         assert!(is_native("rect"));
-        assert_eq!(accepted_arities("rect"), vec![4]);
+        assert_eq!(accepted_arities("rect"), vec![4, 5, 6, 7, 8]);
         assert_eq!(accepted_arities("fill"), vec![1, 2, 3, 4]);
     }
 

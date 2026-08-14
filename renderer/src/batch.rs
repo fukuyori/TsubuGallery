@@ -13,6 +13,23 @@ use crate::draw::{Batch, BlendMode, DrawList, Vertex};
 /// 全レンダーターゲットで共通のサンプル数。
 pub const SAMPLE_COUNT: u32 = 4;
 
+/// 深度バッファの形式。3D の作品だけが書き込む。
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// 深度バッファの使い方。
+///
+/// 2D だけの作品は一度も書き込まないので、深さは全部 0 のまま、描いた順に
+/// そのまま重なる。書き込むのは立体の面と稜線だけ。
+pub fn depth_state(write: bool) -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(write),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -20,8 +37,8 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 
-/// パイプラインを分ける条件。合成方法ごとに別々に要る。
-type PipelineKey = (wgpu::TextureFormat, u32, BlendMode);
+/// パイプラインを分ける条件。合成方法と、深さを書くかどうかで別々に要る。
+type PipelineKey = (wgpu::TextureFormat, u32, BlendMode, bool);
 
 pub struct BatchRenderer {
     shader: wgpu::ShaderModule,
@@ -194,7 +211,7 @@ impl BatchRenderer {
         samples: u32,
     ) {
         for batch in &list.batches {
-            self.ensure_pipeline(device, (format, samples, batch.blend));
+            self.ensure_pipeline(device, (format, samples, batch.blend, batch.depth));
         }
 
         if list.indices.is_empty() {
@@ -240,13 +257,13 @@ impl BatchRenderer {
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
-        let mut current: Option<BlendMode> = None;
+        let mut current: Option<(BlendMode, bool)> = None;
         for batch in &pending.batches {
-            if current != Some(batch.blend) {
-                let key = (pending.format, pending.samples, batch.blend);
+            if current != Some((batch.blend, batch.depth)) {
+                let key = (pending.format, pending.samples, batch.blend, batch.depth);
                 let Some(pipeline) = self.pipelines.get(&key) else { continue };
                 pass.set_pipeline(pipeline);
-                current = Some(batch.blend);
+                current = Some((batch.blend, batch.depth));
             }
             pass.draw_indexed(batch.start..batch.end, 0, 0..1);
         }
@@ -256,7 +273,7 @@ impl BatchRenderer {
         if self.pipelines.contains_key(&key) {
             return;
         }
-        let (format, samples, blend) = key;
+        let (format, samples, blend, depth) = key;
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("tsubu.batch.pipeline"),
             layout: Some(&self.pipeline_layout),
@@ -268,7 +285,7 @@ impl BatchRenderer {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2,
+                        0 => Float32x3,
                         1 => Float32x4,
                         2 => Float32x2,
                     ],
@@ -290,7 +307,7 @@ impl BatchRenderer {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(depth_state(depth)),
             multisample: wgpu::MultisampleState {
                 count: samples,
                 mask: !0,

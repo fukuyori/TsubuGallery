@@ -140,7 +140,14 @@ impl Parser {
             }
 
             let Some(ty) = self.type_keyword() else {
-                return Err(self.error("トップレベルには型か関数定義だけを書けます"));
+                // 型でも関数でもなければ、静的モードの文として読む。
+                //
+                // Processing は `setup()` も `draw()` も書かない書き方を許し、
+                // その場合は全体を setup の中身として 1 回だけ描く。つぶやきの
+                // 短いコードはこの形が多い。
+                let stmt = self.statement()?;
+                ast.statements.push(stmt);
+                continue;
             };
             let name = self.ident()?;
 
@@ -149,6 +156,7 @@ impl Parser {
             } else if ty == Type::Void {
                 return Err(CompileError::new(line, column, "void の変数は宣言できません"));
             } else {
+                // `float r, i, d;` のように 1 文で複数を宣言できる。
                 let init = if self.eat(&TokenKind::Assign) {
                     // `int[] a = {1,2,3}` は式ではないのでここで受ける。
                     if ty.is_array() && self.check(&TokenKind::LBrace) {
@@ -159,8 +167,11 @@ impl Parser {
                 } else {
                     None
                 };
-                self.expect(&TokenKind::Semicolon, "`;`")?;
                 ast.globals.push(Stmt::VarDecl { ty, name, init, line, column });
+                while self.eat(&TokenKind::Comma) {
+                    ast.globals.push(self.declarator(ty)?);
+                }
+                self.expect(&TokenKind::Semicolon, "`;`")?;
             }
         }
 
@@ -317,18 +328,15 @@ impl Parser {
             if ty == Type::Void {
                 return Err(CompileError::new(line, column, "void の変数は宣言できません"));
             }
-            let name = self.ident()?;
-            let init = if self.eat(&TokenKind::Assign) {
-                // `float[] a = {1, 2, 3}` の形。`{` は式ではないのでここで受ける。
-                if ty.is_array() && self.check(&TokenKind::LBrace) {
-                    Some(self.array_literal(ty)?)
-                } else {
-                    Some(self.expression()?)
-                }
+            let mut decls = vec![self.declarator(ty)?];
+            while self.eat(&TokenKind::Comma) {
+                decls.push(self.declarator(ty)?);
+            }
+            return Ok(if decls.len() == 1 {
+                decls.pop().expect("1 つある")
             } else {
-                None
-            };
-            return Ok(Stmt::VarDecl { ty, name, init, line, column });
+                Stmt::VarDecls(decls)
+            });
         }
 
         // 添字やプロパティを伴う文。`a[i] = v` / `v.x += 1` / `a[i].add(u)`。
@@ -471,6 +479,25 @@ impl Parser {
         Ok(Stmt::For { init, cond, update, body })
     }
 
+    /// `名前` と、あれば `= 初期値` を 1 つ読む。
+    ///
+    /// `float a = 1, b;` のように 1 文へ複数書けるので、名前ごとにこれを呼ぶ。
+    fn declarator(&mut self, ty: Type) -> Result<Stmt, CompileError> {
+        let (line, column) = self.position();
+        let name = self.ident()?;
+        let init = if self.eat(&TokenKind::Assign) {
+            // `float[] a = {1, 2, 3}` の形。`{` は式ではないのでここで受ける。
+            if ty.is_array() && self.check(&TokenKind::LBrace) {
+                Some(self.array_literal(ty)?)
+            } else {
+                Some(self.expression()?)
+            }
+        } else {
+            None
+        };
+        Ok(Stmt::VarDecl { ty, name, init, line, column })
+    }
+
     /// `{1, 2, 3}` の形の配列初期化子。
     fn array_literal(&mut self, ty: Type) -> Result<Expr, CompileError> {
         self.expect(&TokenKind::LBrace, "`{`")?;
@@ -555,7 +582,16 @@ impl Parser {
     // ---- 式 -------------------------------------------------------------
 
     fn expression(&mut self) -> Result<Expr, CompileError> {
-        self.ternary()
+        let left = self.ternary()?;
+
+        // `f(x += 1)` のように、式の中でも代入できる。Java も同じ。
+        let Some(op) = self.assign_op() else { return Ok(left) };
+        if !matches!(left, Expr::Var { .. } | Expr::Index { .. } | Expr::Field { .. }) {
+            return Ok(left);
+        }
+        self.advance();
+        let value = Box::new(self.expression()?);
+        Ok(Expr::Assign { target: Box::new(left), op, value })
     }
 
     fn ternary(&mut self) -> Result<Expr, CompileError> {
@@ -751,10 +787,23 @@ impl Parser {
                 return self.suffixes(Expr::NewVector { args });
             }
             // `new float[3][4]` のように次元の数だけ `[...]` が並ぶ。
+            // `new int[]{1,2}` のように、大きさを書かず中身を並べる形もある。
             let mut sizes = Vec::new();
             let mut ty = element;
             while self.check(&TokenKind::LBracket) {
                 self.advance();
+                if self.check(&TokenKind::RBracket) {
+                    // `[]` は中身の並びで大きさが決まる。
+                    self.advance();
+                    ty = ty.to_array().ok_or_else(|| {
+                        CompileError::new(line, column, "この型の配列は作れません")
+                    })?;
+                    if !self.check(&TokenKind::LBrace) {
+                        return Err(self.error("`{` がありません"));
+                    }
+                    let items = self.array_literal(ty)?;
+                    return self.suffixes(items);
+                }
                 sizes.push(self.expression()?);
                 self.expect(&TokenKind::RBracket, "`]`")?;
                 ty = ty
@@ -768,6 +817,17 @@ impl Parser {
                 return Err(CompileError::new(line, column, "配列は 2 次元までです"));
             }
             return self.suffixes(Expr::NewArray { ty, sizes });
+        }
+
+        // 前置の増減。`++t` は増やしたあとの値になる。
+        if matches!(self.peek(), TokenKind::Increment | TokenKind::Decrement) {
+            let delta = if self.check(&TokenKind::Increment) { 1 } else { -1 };
+            self.advance();
+            let target = self.unary()?;
+            if !matches!(target, Expr::Var { .. } | Expr::Index { .. } | Expr::Field { .. }) {
+                return Err(self.error("ここは増減できません"));
+            }
+            return Ok(Expr::IncDec { target: Box::new(target), delta, prefix: true });
         }
 
         let op = match self.peek() {
@@ -811,6 +871,15 @@ impl Parser {
                 expr = Expr::Index { target: Box::new(expr), index, line, column };
                 continue;
             }
+            if matches!(self.peek(), TokenKind::Increment | TokenKind::Decrement)
+                && matches!(expr, Expr::Var { .. } | Expr::Index { .. } | Expr::Field { .. })
+            {
+                let delta = if self.check(&TokenKind::Increment) { 1 } else { -1 };
+                self.advance();
+                expr = Expr::IncDec { target: Box::new(expr), delta, prefix: false };
+                continue;
+            }
+
             if self.check(&TokenKind::Dot) {
                 let (line, column) = self.position();
                 self.advance();
@@ -902,7 +971,7 @@ impl Parser {
             TokenKind::Ident(name) => {
                 self.advance();
                 if !self.eat(&TokenKind::LParen) {
-                    return Ok(Expr::Var(name));
+                    return Ok(Expr::Var { name, line, column });
                 }
                 let mut args = Vec::new();
                 if !self.check(&TokenKind::RParen) {
@@ -1071,10 +1140,15 @@ mod tests {
         assert!(e.message.contains("`}`"), "{e}");
     }
 
+    /// トップレベルには文も書ける (静的モード) が、文にならないものは弾く。
     #[test]
     fn top_level_junk_is_rejected() {
-        let e = parse("42;").unwrap_err();
-        assert!(e.message.contains("トップレベル"), "{e}");
+        assert!(parse(")").is_err());
+        assert!(parse("}").is_err());
+        // 文はここで受ける。setup() の中身として扱う。
+        let ast = parse("size(400, 400);\ncircle(1, 2, 3);").expect("読める");
+        assert_eq!(ast.statements.len(), 2);
+        assert!(ast.functions.is_empty());
     }
 
     #[test]

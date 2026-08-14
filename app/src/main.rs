@@ -339,9 +339,10 @@ impl App {
 
         // 作品の `text()` は OS のフォントを借りる。無ければ文字は出ない。
         let mut thumb_graphics = tsubu_renderer::Graphics::new();
-        if let Some(font) = fonts::load_sketch_font() {
-            viewer.set_font(font.clone());
-            thumb_graphics.font.set_font(font);
+        let sketch_fonts = fonts::load_sketch_fonts();
+        if !sketch_fonts.is_empty() {
+            viewer.set_fonts(sketch_fonts.clone());
+            thumb_graphics.font.set_fonts(sketch_fonts);
         }
         let mut gallery = GalleryView::new(items);
         gallery.set_sort(settings.sort_order);
@@ -628,6 +629,8 @@ impl App {
                     item.favorite = saved.favorite;
                     item.tags = saved.tags.clone();
                     item.collections = saved.collections.clone();
+                    item.author = saved.author.clone();
+                    item.link = saved.link.clone();
                     item.created_at = saved.created_at;
                     item.last_opened_at = saved.last_opened_at;
 
@@ -683,6 +686,8 @@ impl App {
         meta.title = item.title.clone();
         meta.favorite = item.favorite;
         meta.tags = item.tags.clone();
+        meta.author = item.author.clone();
+        meta.link = item.link.clone();
         meta.last_opened_at = item.last_opened_at;
         meta.compile_status = match &item.status {
             SketchStatus::Error(e) => CompileStatus::Error(e.clone()),
@@ -739,7 +744,14 @@ impl App {
         let Some(source) = self.sources.get(index) else { return };
         let Some(item) = self.gallery.items().get(index) else { return };
         let tags = item.tags.iter().cloned().collect::<Vec<_>>().join(", ");
-        self.editor = Some(Editor::edit(index, item.id.clone(), source.text.clone(), tags));
+        self.editor = Some(Editor::edit(
+            index,
+            item.id.clone(),
+            source.text.clone(),
+            tags,
+            item.author.clone(),
+            item.link.clone(),
+        ));
         self.return_screen = self.screen;
         self.screen = Screen::Editor;
     }
@@ -815,6 +827,7 @@ impl App {
         };
 
         self.gallery.set_tags(index, ed.parsed_tags());
+        self.gallery.set_credit(index, ed.author.trim(), ed.link.trim());
         ed.mark_saved(index);
         self.gallery.select(index);
         self.invalidate_thumbnail(index, &name);
@@ -1077,6 +1090,7 @@ impl App {
                     self.assigning = Some(selected);
                 }
             }
+            KeyCode::KeyO => self.open_selected_link(selected),
             KeyCode::Escape => {
                 if self.assigning.take().is_some() {
                     // まず割り当て画面を閉じる。
@@ -1112,6 +1126,7 @@ impl App {
                 self.request_thumbnail_refresh(index, frame);
             }
             KeyCode::KeyI => self.show_info = !self.show_info,
+            KeyCode::KeyO => self.open_selected_link(self.viewer.current_index()),
             KeyCode::KeyP => self.toggle_slideshow(),
             KeyCode::KeyE => self.open_editor(self.viewer.current_index()),
             KeyCode::KeyL => self.cycle_language(),
@@ -1359,6 +1374,12 @@ impl App {
             let collections = &self.collections;
             let assigning = self.assigning;
             let view_mode = self.settings.view_mode;
+            // 作者とリンクは Gallery 側の項目に載っている。可変借用の前に写す。
+            let credit = self
+                .gallery
+                .items()
+                .get(self.viewer.current_index())
+                .map_or((String::new(), String::new()), |i| (i.author.clone(), i.link.clone()));
             let card_size = self.settings.card_size;
             let show_titles = self.settings.show_titles;
             let settings = &mut self.settings;
@@ -1378,6 +1399,8 @@ impl App {
                 show_info: self.show_info,
                 error: self.viewer.current_error(),
                 dialect: self.viewer.current_dialect().map(|d| d.label()),
+                author: &credit.0,
+                link: &credit.1,
                 slideshow: self.slideshow.is_some(),
                 screensaver: self.screensaver.is_some(),
             };
@@ -1502,9 +1525,36 @@ impl App {
         }
     }
 
+    /// 選んだ作品のリンクを開く。無い作品では何もしない。
+    fn open_selected_link(&mut self, index: usize) {
+        let link = self.gallery.items().get(index).map(|i| i.link.clone()).unwrap_or_default();
+        if link.trim().is_empty() {
+            return;
+        }
+        self.open_link(&link);
+    }
+
+    /// リンクをブラウザで開く。開けないものは開かない。
+    fn open_link(&mut self, url: &str) {
+        match tsubu_core::open::open(url) {
+            Ok(()) => log::info!("リンクを開きました: {url}"),
+            Err(e) => {
+                log::warn!("リンクを開けませんでした: {e}");
+                if let Some(ui) = self.ui.as_mut() {
+                    ui.toast(format!("{}: {e}", self.locales.t("app.link_failed")));
+                }
+            }
+        }
+    }
+
     fn apply_editor_actions(&mut self, actions: &[EditorAction]) {
         for action in actions {
             match action {
+                EditorAction::OpenLink => {
+                    if let Some(link) = self.editor.as_ref().map(|e| e.link.trim().to_string()) {
+                        self.open_link(&link);
+                    }
+                }
                 EditorAction::Save => self.save_editor(),
                 EditorAction::Run => {
                     self.save_editor();
@@ -1597,6 +1647,11 @@ impl App {
                 }
                 GalleryAction::CancelDelete => self.pending_delete = None,
                 GalleryAction::OpenSettings => self.open_settings(),
+                GalleryAction::OpenLink(index) => {
+                    if let Some(link) = self.gallery.items().get(index).map(|i| i.link.clone()) {
+                        self.open_link(&link);
+                    }
+                }
                 GalleryAction::SetCollection(index, name, member) => {
                     self.set_collection(index, &name, member);
                 }

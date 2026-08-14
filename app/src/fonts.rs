@@ -24,16 +24,37 @@ const CANDIDATES: &[&str] = &[
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
 ];
 
-/// 作品の `text()` に使うフォントを読む。
+/// 記号のフォント。日本語のフォントに入っていない字を補う。
 ///
-/// UI と同じ候補から探す。`.ttc` のようにフォントが束ねられたファイルでも、
+/// 麻雀牌 (U+1F000〜) やトランプのような記号は、CJK フォントには無いことが
+/// 多い。1 本だけだと、そういう字を使う作品が空白になる。
+const SYMBOL_CANDIDATES: &[&str] = &[
+    // macOS
+    "/System/Library/Fonts/Apple Symbols.ttf",
+    "/System/Library/Fonts/Supplemental/Apple Symbols.ttf",
+    // Windows
+    "C:/Windows/Fonts/seguisym.ttf",
+    // Linux
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansSymbols2-Regular.ttf",
+];
+
+/// 作品の `text()` に使うフォントを、前から試す順に読む。
+///
+/// UI と同じ候補に記号のフォントを足す。`.ttc` のように束ねられたファイルでも、
 /// 字形を取り出す側が先頭の 1 本を使う。
-pub fn load_sketch_font() -> Option<Vec<u8>> {
-    let found = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok());
-    if found.is_none() {
+pub fn load_sketch_fonts() -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    if let Some(main) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) {
+        out.push(main);
+    }
+    if let Some(symbols) = SYMBOL_CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) {
+        out.push(symbols);
+    }
+    if out.is_empty() {
         log::warn!("フォントが見つかりませんでした。text() は何も描きません。");
     }
-    found
+    out
 }
 
 /// CJK フォントを egui へ登録する。登録できたら `true`。

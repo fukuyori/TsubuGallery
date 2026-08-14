@@ -182,6 +182,31 @@ impl<'a> Compiler<'a> {
             functions.push(self.method(class, f)?);
         }
 
+        // 静的モード。関数の外に書かれた文を setup() の中身として組む。
+        // ユーザーが setup() を書いていればそちらが優先。
+        let mut static_setup = None;
+        if !self.ast.statements.is_empty() && !self.functions.contains_key("setup") {
+            self.scopes.clear();
+            self.scopes.push(HashMap::new());
+            self.next_local = 0;
+            self.max_locals = 0;
+            self.code.clear();
+
+            for stmt in &self.ast.statements {
+                self.statement(stmt)?;
+            }
+            self.code.push(Op::Return);
+
+            static_setup = Some(functions.len() as u16);
+            functions.push(CompiledFunction {
+                name: "<static>".into(),
+                arity: 0,
+                local_count: self.max_locals,
+                return_type: Type::Void,
+                code: std::mem::take(&mut self.code),
+            });
+        }
+
         // グローバル初期化も関数として持たせる。名前に使えない文字を入れて、
         // ユーザーの関数と衝突しないようにする。
         globals_init.push(Op::Return);
@@ -207,7 +232,7 @@ impl<'a> Compiler<'a> {
         }
 
         let program = Program {
-            setup: entry("setup"),
+            setup: entry("setup").or(static_setup),
             draw: entry("draw"),
             functions,
             keys: self.keys.clone(),
@@ -218,7 +243,11 @@ impl<'a> Compiler<'a> {
         };
 
         if program.setup.is_none() && program.draw.is_none() {
-            return Err(CompileError::new(1, 1, "setup() か draw() のどちらかが必要です"));
+            return Err(CompileError::new(
+                1,
+                1,
+                "setup() か draw() か、関数の外に書いた文のどれかが必要です".to_string(),
+            ));
         }
 
         Ok(program)
@@ -401,6 +430,13 @@ impl<'a> Compiler<'a> {
                 } else {
                     Op::StoreGlobal(var.slot)
                 });
+            }
+
+            // 1 文に並べた宣言。まとめて出すだけで、見える範囲は変えない。
+            Stmt::VarDecls(decls) => {
+                for decl in decls {
+                    self.statement(decl)?;
+                }
             }
 
             Stmt::Block(stmts) => {
@@ -682,18 +718,18 @@ impl<'a> Compiler<'a> {
             Expr::Bool(v) => self.code.push(Op::ConstBool(*v)),
 
             // メソッドの中では、フィールド名は `this.x` の意味になる。
-            Expr::Var(name) if self.fields.contains(name) && self.lookup(name).is_none() => {
+            Expr::Var { name, .. } if self.fields.contains(name) && self.lookup(name).is_none() => {
                 let key = self.key(name);
                 self.code.push(Op::LoadLocal(0));
                 self.code.push(Op::GetProp(key));
             }
 
-            Expr::Var(name) => {
+            Expr::Var { name, line, column } => {
                 if let Some(builtin) = BuiltinVar::resolve(name) {
                     self.code.push(Op::LoadBuiltin(builtin));
                 } else {
                     let (var, is_local) = self.lookup(name).ok_or_else(|| {
-                        CompileError::new(0, 0, format!("変数 {name} が見つかりません"))
+                        CompileError::new(*line, *column, format!("変数 {name} が見つかりません"))
                     })?;
                     self.code.push(if is_local {
                         Op::LoadLocal(var.slot)
@@ -759,6 +795,86 @@ impl<'a> Compiler<'a> {
             }
 
             Expr::This => self.code.push(Op::LoadLocal(0)),
+
+            // 前置と後置の増減。返す値が違うだけで、書き込みは同じ。
+            Expr::IncDec { target, delta, prefix } => {
+                // `t = t + delta` として組み、返す値だけを選ぶ。
+                let updated = Expr::Assign {
+                    target: target.clone(),
+                    op: AssignOp::Add,
+                    value: Box::new(Expr::Int(*delta)),
+                };
+                if *prefix {
+                    self.expression(&updated)?;
+                } else {
+                    // 後置は増やす前の値を返す。先に読んでおく。
+                    self.expression(target)?;
+                    self.expression(&updated)?;
+                    self.code.push(Op::Pop);
+                }
+            }
+
+            // 式としての代入。書いた値をひとつ残す。
+            Expr::Assign { target, op, value } => match target.as_ref() {
+                Expr::Var { name, line, column } => {
+                    let (var, is_local) = self.lookup(name).ok_or_else(|| {
+                        CompileError::new(*line, *column, format!("変数 {name} が見つかりません"))
+                    })?;
+                    if let Some(binary) = op.binary() {
+                        self.code.push(if is_local {
+                            Op::LoadLocal(var.slot)
+                        } else {
+                            Op::LoadGlobal(var.slot)
+                        });
+                        self.expression(value)?;
+                        self.code.push(binary_op(binary));
+                    } else {
+                        self.expression(value)?;
+                    }
+                    self.code.push(Op::Coerce(var.ty));
+                    // 書き込みは値を消すので、残す分を複製しておく。
+                    self.code.push(Op::Dup);
+                    self.code.push(if is_local {
+                        Op::StoreLocal(var.slot)
+                    } else {
+                        Op::StoreGlobal(var.slot)
+                    });
+                }
+                Expr::Index { target, index, .. } => {
+                    self.expression(target)?;
+                    self.expression(index)?;
+                    if let Some(binary) = op.binary() {
+                        self.code.push(Op::Dup2);
+                        self.code.push(Op::GetIndex);
+                        self.expression(value)?;
+                        self.code.push(binary_op(binary));
+                    } else {
+                        self.expression(value)?;
+                    }
+                    // SetIndex は書いた値を残す。
+                    self.code.push(Op::SetIndex);
+                }
+                Expr::Field { target, name } => {
+                    let key = self.key(name);
+                    self.expression(target)?;
+                    if let Some(binary) = op.binary() {
+                        self.code.push(Op::Dup);
+                        self.code.push(Op::GetProp(key));
+                        self.expression(value)?;
+                        self.code.push(binary_op(binary));
+                    } else {
+                        self.expression(value)?;
+                    }
+                    self.code.push(Op::SetProp(key));
+                }
+                other => {
+                    return Err(CompileError::new(
+                        0,
+                        0,
+                        format!("ここへは代入できません: {other:?}"),
+                    ));
+                }
+            },
 
             Expr::Cast { ty, operand } => {
                 self.expression(operand)?;
@@ -1046,8 +1162,11 @@ mod tests {
 
     #[test]
     fn wrong_arity_on_a_native_names_the_accepted_counts() {
+        let e = compile_source("void draw() { circle(1, 2); }").unwrap_err();
+        assert!(e.message.contains("引数 3 個"), "{e}");
+        // 受け付ける数が複数あるときは全部並べる。
         let e = compile_source("void draw() { rect(1, 2, 3); }").unwrap_err();
-        assert!(e.message.contains("引数 4 個"), "{e}");
+        assert!(e.message.contains("4 か 5"), "{e}");
     }
 
     #[test]

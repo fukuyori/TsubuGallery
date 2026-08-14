@@ -18,6 +18,8 @@ const CODE_ID: &str = "tsubu.editor.code";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorAction {
+    /// リンクをブラウザで開く。
+    OpenLink,
     /// 保存してコンパイルし直す。
     Save,
     /// 編集をやめて元の画面へ戻る。未保存なら確認を挟む。
@@ -83,20 +85,56 @@ fn top_bar(
     egui::Panel::top("tsubu.editor.top").exact_size(52.0).show(root, |ui| {
         ui.horizontal_centered(|ui| {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new(locales.t("editor.name")).size(12.0));
-            ui.add(
-                egui::TextEdit::singleline(&mut editor.name)
-                    .desired_width(200.0)
-                    .hint_text(locales.t("editor.name")),
+
+            // 入力欄は残った幅を分け合う。決め打ちの幅にすると、窓が狭いときに
+            // 右のボタンへ食い込む。
+            const BUTTON_AREA: f32 = 330.0;
+            const LABELS: f32 = 210.0;
+            let each =
+                ((ui.available_width() - BUTTON_AREA - LABELS) / 4.0).clamp(60.0, 220.0);
+
+            let field = |ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String| {
+                ui.label(egui::RichText::new(label).size(12.0));
+                ui.add(
+                    egui::TextEdit::singleline(value).desired_width(each).hint_text(hint),
+                );
+                ui.add_space(8.0);
+            };
+
+            field(
+                ui,
+                locales.t("editor.name"),
+                locales.t("editor.name"),
+                &mut editor.name,
+            );
+            field(
+                ui,
+                locales.t("editor.author"),
+                locales.t("editor.author_hint"),
+                &mut editor.author,
+            );
+            field(
+                ui,
+                locales.t("editor.link"),
+                locales.t("editor.link_hint"),
+                &mut editor.link,
+            );
+            field(
+                ui,
+                locales.t("editor.tags"),
+                locales.t("editor.tags_hint"),
+                &mut editor.tags,
             );
 
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new(locales.t("editor.tags")).size(12.0));
-            ui.add(
-                egui::TextEdit::singleline(&mut editor.tags)
-                    .desired_width(200.0)
-                    .hint_text(locales.t("editor.tags_hint")),
-            );
+            // 開けるリンクのときだけボタンを出す。押せないボタンより分かりやすい。
+            if tsubu_core::open::check(&editor.link).is_ok()
+                && ui
+                    .button(locales.t("editor.open_link"))
+                    .on_hover_text(editor.link.trim())
+                    .clicked()
+            {
+                actions.push(EditorAction::OpenLink);
+            }
 
             if editor.is_dirty() {
                 ui.label(

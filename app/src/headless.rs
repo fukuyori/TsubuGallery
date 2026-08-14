@@ -42,9 +42,7 @@ pub fn capture_all(
     let mut batch = BatchRenderer::new(&device);
     let mut capturer = Capturer::new();
     let mut graphics = Graphics::new();
-    if let Some(font) = crate::fonts::load_sketch_font() {
-        graphics.font.set_font(font);
-    }
+    graphics.font.set_fonts(crate::fonts::load_sketch_fonts());
     let mut written = Vec::new();
 
     for outcome in loader::load_library(paths) {

@@ -69,54 +69,119 @@ impl Rng {
     }
 }
 
-/// `noise(x, y)` 相当の 2D value noise。
+/// Processing の `noise()`。
 ///
-/// Processing の Perlin noise と数値は一致しないが、`0.0..=1.0` に収まり
-/// 連続で滑らかという性質は同じ。
+/// Perlin という名前で呼ばれているが、中身は乱数表を引く value noise で、
+/// それを 4 オクターブ重ねたもの (`noiseDetail(4, 0.5)` が既定)。ここでは
+/// Processing の実装をそのまま写している。数列が違うので模様は一致しないが、
+/// 値の散らばり方と、下に挙げる癖まで揃う。
+///
+/// 揃えないと困る癖が 2 つある。
+///
+/// - **負の座標は折り返す**。`noise(-3, 0)` は `noise(3, 0)` と同じ値。
+///   原点をまたいで座標を振る作品は、この折り返しのせいで左右対称になる。
+///   つぶやき系はこれを承知で使っていることがある
+/// - **4 オクターブ**なので値が 0.5 付近へ寄る。1 オクターブだと散らばりが
+///   広く、`noise(...) > .6` のような閾値の作品で数が合わなくなる
 pub fn noise(x: f32, y: f32) -> f32 {
-    let xi = x.floor();
-    let yi = y.floor();
-    let xf = x - xi;
-    let yf = y - yi;
-
-    let u = smoothstep(xf);
-    let v = smoothstep(yf);
-
-    let a = hash2(xi, yi);
-    let b = hash2(xi + 1.0, yi);
-    let c = hash2(xi, yi + 1.0);
-    let d = hash2(xi + 1.0, yi + 1.0);
-
-    let top = a + (b - a) * u;
-    let bottom = c + (d - c) * u;
-    top + (bottom - top) * v
+    noise3(x, y, 0.0)
 }
 
-/// オクターブを重ねた `noise()`。輪郭が単調になりにくい。
-pub fn fbm(x: f32, y: f32, octaves: u32) -> f32 {
+/// 表の大きさ。Processing と同じ。
+const PERLIN_SIZE: usize = 4095;
+/// y と z を表の添字へ混ぜるときのずらし幅。Processing と同じ。
+const YWRAP: i32 = 1 << 4;
+const ZWRAP: i32 = 1 << 8;
+const OCTAVES: u32 = 4;
+const AMP_FALLOFF: f32 = 0.5;
+
+/// 乱数表。Processing は起動ごとに引き直すが、ここは決まった数列にする。
+///
+/// サムネイルが実行のたびに変わっては困る。
+fn table() -> &'static [f32; PERLIN_SIZE + 1] {
+    static TABLE: std::sync::OnceLock<[f32; PERLIN_SIZE + 1]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut rng = Rng::new(0x5EED_1234_ABCD_0001);
+        std::array::from_fn(|_| rng.next_f32())
+    })
+}
+
+/// 補間の重み。Processing は余弦の表を引く。
+fn fsc(i: f32) -> f32 {
+    0.5 * (1.0 - (i * std::f32::consts::PI).cos())
+}
+
+/// `noise(x, y, z)`。
+pub fn noise3(x: f32, y: f32, z: f32) -> f32 {
+    let perlin = table();
+    // Processing は負の座標を折り返す。原点をまたぐ作品はここで対称になる。
+    let (mut x, mut y, mut z) = (x.abs(), y.abs(), z.abs());
+    // 表を大きく外れる座標は、そのまま整数へ落とすと溢れる。
+    let wrap = (PERLIN_SIZE + 1) as f32;
+    if x >= wrap {
+        x %= wrap;
+    }
+    if y >= wrap {
+        y %= wrap;
+    }
+    if z >= wrap {
+        z %= wrap;
+    }
+
+    let (mut xi, mut yi, mut zi) = (x as i32, y as i32, z as i32);
+    let (mut xf, mut yf, mut zf) = (x - xi as f32, y - yi as f32, z - zi as f32);
+
+    let at = |i: i32| perlin[(i as usize) & PERLIN_SIZE];
     let mut sum = 0.0;
     let mut amp = 0.5;
-    let mut freq = 1.0;
-    let mut norm = 0.0;
-    for _ in 0..octaves.max(1) {
-        sum += noise(x * freq, y * freq) * amp;
-        norm += amp;
-        amp *= 0.5;
-        freq *= 2.0;
+
+    for _ in 0..OCTAVES {
+        let mut of = xi + (yi * YWRAP) + (zi * ZWRAP);
+        let (rxf, ryf) = (fsc(xf), fsc(yf));
+
+        // 手前の面を x → y の順に混ぜる。
+        let mut n1 = at(of);
+        n1 += rxf * (at(of + 1) - n1);
+        let mut n2 = at(of + YWRAP);
+        n2 += rxf * (at(of + YWRAP + 1) - n2);
+        n1 += ryf * (n2 - n1);
+
+        // 奥の面も同じように。
+        of += ZWRAP;
+        let mut n2 = at(of);
+        n2 += rxf * (at(of + 1) - n2);
+        let mut n3 = at(of + YWRAP);
+        n3 += rxf * (at(of + YWRAP + 1) - n3);
+        n2 += ryf * (n3 - n2);
+
+        n1 += fsc(zf) * (n2 - n1);
+
+        sum += n1 * amp;
+        amp *= AMP_FALLOFF;
+
+        // 次のオクターブは倍の細かさで。
+        xi <<= 1;
+        xf *= 2.0;
+        yi <<= 1;
+        yf *= 2.0;
+        zi <<= 1;
+        zf *= 2.0;
+        if xf >= 1.0 {
+            xi += 1;
+            xf -= 1.0;
+        }
+        if yf >= 1.0 {
+            yi += 1;
+            yf -= 1.0;
+        }
+        if zf >= 1.0 {
+            zi += 1;
+            zf -= 1.0;
+        }
     }
-    sum / norm
+    sum
 }
 
-fn smoothstep(t: f32) -> f32 {
-    t * t * (3.0 - 2.0 * t)
-}
-
-fn hash2(x: f32, y: f32) -> f32 {
-    let n = x as i32 as i64 * 374_761_393 + y as i32 as i64 * 668_265_263;
-    let mut n = (n ^ (n >> 13)) as u64;
-    n = n.wrapping_mul(1_274_126_177);
-    ((n >> 40) as f32) / (1u32 << 24) as f32
-}
 
 #[cfg(test)]
 mod tests {
@@ -170,5 +235,61 @@ mod tests {
                 assert!((0.0..=255.0).contains(&c), "channel out of range: {c}");
             }
         }
+    }
+
+    /// 負の座標は折り返す。Processing がそうしている。
+    ///
+    /// 原点をまたいで座標を振る作品は、これで左右対称になる。ここを直すと
+    /// 「本家では対称なのにこちらは砂嵐」という差が出る。
+    #[test]
+    fn negative_coordinates_fold_back() {
+        for (a, b) in [
+            (noise3(9.3, 1.0, 6.0), noise3(-9.3, 1.0, 6.0)),
+            (noise3(0.5, 2.5, 0.0), noise3(-0.5, -2.5, 0.0)),
+            (noise(3.25, 0.0), noise(-3.25, 0.0)),
+        ] {
+            assert!((a - b).abs() < 1e-6, "{a} と {b}");
+        }
+    }
+
+    /// 4 オクターブぶんの重みで、値が 0.5 のあたりへ寄る。
+    ///
+    /// 1 オクターブだと散らばりが広く、`noise(...) > .6` のような閾値で
+    /// 数を数える作品が本家より濃くなる。
+    #[test]
+    fn the_spread_matches_four_octaves() {
+        let mut v: Vec<f32> = (0..20_000)
+            .map(|i| {
+                let f = i as f32 * 0.0137;
+                noise3(f, f * 0.73, f * 1.31)
+            })
+            .collect();
+        v.sort_by(|a, b| a.partial_cmp(b).expect("NaN は出ない"));
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        assert!((mean - 0.47).abs() < 0.05, "平均が寄っていません: {mean}");
+        // 0.5 + 0.25 + 0.125 + 0.0625 を超えることはない。
+        assert!(v[v.len() - 1] <= 0.9375, "上限を超えました: {}", v[v.len() - 1]);
+        assert!(v[0] >= 0.0, "下限を割りました: {}", v[0]);
+        // 端まで振り切れない。ここが広いと 1 オクターブに戻っている。
+        assert!(v[v.len() / 20] > 0.2 && v[v.len() * 19 / 20] < 0.8, "散らばりすぎです");
+    }
+
+    /// 隣り合う点は近い値になる。
+    #[test]
+    fn neighbouring_points_stay_close() {
+        for axis in 0..3 {
+            let at = |d: f32| match axis {
+                0 => noise3(4.0 + d, 2.0, 1.0),
+                1 => noise3(4.0, 2.0 + d, 1.0),
+                _ => noise3(4.0, 2.0, 1.0 + d),
+            };
+            assert!((at(0.01) - at(0.0)).abs() < 0.05, "軸 {axis} が飛んでいます");
+        }
+    }
+
+    /// 何度呼んでも同じ値。サムネイルが実行のたびに変わっては困る。
+    #[test]
+    fn the_field_is_the_same_every_run() {
+        assert_eq!(noise3(1.5, 2.5, 3.5), noise3(1.5, 2.5, 3.5));
     }
 }

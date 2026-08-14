@@ -16,10 +16,16 @@ pub struct Editor {
     pub source: String,
     /// タグ。カンマ区切りで編集する (設計書 §19.2)。
     pub tags: String,
+    /// 作者。
+    pub author: String,
+    /// 元の投稿などへのリンク。
+    pub link: String,
     /// 保存済みの状態。変更の有無を見るために持つ。
     saved_name: String,
     saved_source: String,
     saved_tags: String,
+    saved_author: String,
+    saved_link: String,
     /// 直近の保存で出たコンパイルエラー。行を強調するので位置ごと持つ。
     pub error: Option<tsubu_processing_lite::CompileError>,
     /// 保存に失敗した理由 (ファイル書き込みなど)。
@@ -54,10 +60,14 @@ impl Editor {
             name,
             source: String::new(),
             tags: String::new(),
+            author: String::new(),
+            link: String::new(),
             // 未保存であることを示すため、保存済みの状態は空にしておく。
             saved_name: String::new(),
             saved_source: String::new(),
             saved_tags: String::new(),
+            saved_author: String::new(),
+            saved_link: String::new(),
             error: None,
             io_error: None,
             confirming_close: false,
@@ -70,15 +80,26 @@ impl Editor {
     }
 
     /// 既存の作品を開く。
-    pub fn edit(index: usize, name: String, source: String, tags: String) -> Self {
+    pub fn edit(
+        index: usize,
+        name: String,
+        source: String,
+        tags: String,
+        author: String,
+        link: String,
+    ) -> Self {
         Self {
             index: Some(index),
             saved_name: name.clone(),
             saved_source: source.clone(),
             saved_tags: tags.clone(),
+            saved_author: author.clone(),
+            saved_link: link.clone(),
             name,
             source,
             tags,
+            author,
+            link,
             error: None,
             io_error: None,
             confirming_close: false,
@@ -94,6 +115,8 @@ impl Editor {
         self.name != self.saved_name
             || self.source != self.saved_source
             || self.tags != self.saved_tags
+            || self.author != self.saved_author
+            || self.link != self.saved_link
     }
 
     /// カンマ区切りのタグを整える。空白だけの要素と重複は落とす。
@@ -171,6 +194,8 @@ impl Editor {
         self.saved_name = self.name.clone();
         self.saved_source = self.source.clone();
         self.saved_tags = self.tags.clone();
+        self.saved_author = self.author.clone();
+        self.saved_link = self.link.clone();
         self.io_error = None;
         self.confirming_close = false;
     }
@@ -203,22 +228,22 @@ mod tests {
 
     #[test]
     fn an_opened_sketch_starts_clean() {
-        let e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new());
+        let e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new(), String::new(), String::new());
         assert!(!e.is_new());
         assert!(!e.is_dirty());
     }
 
     #[test]
     fn editing_the_name_code_or_tags_marks_it_dirty() {
-        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new());
+        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new(), String::new(), String::new());
         e.source.push(' ');
         assert!(e.is_dirty());
 
-        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new());
+        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new(), String::new(), String::new());
         e.name = "renamed".into();
         assert!(e.is_dirty());
 
-        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new());
+        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new(), String::new(), String::new());
         e.tags = "circles".into();
         assert!(e.is_dirty());
     }
@@ -235,13 +260,13 @@ mod tests {
 
     #[test]
     fn an_untouched_editor_has_nothing_to_check() {
-        let e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new());
+        let e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new(), String::new(), String::new());
         assert!(e.source_to_check().is_none(), "開いただけでは走らせない");
     }
 
     #[test]
     fn a_change_is_not_checked_immediately() {
-        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new());
+        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new(), String::new(), String::new());
         e.source.push('x');
         e.note_source_changes();
         // 打った直後は待つ。毎文字が構文エラーになるので。
@@ -250,7 +275,7 @@ mod tests {
 
     #[test]
     fn a_change_is_checked_once_the_hand_stops() {
-        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new());
+        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new(), String::new(), String::new());
         e.source.push('x');
         e.note_source_changes();
         e.changed_at = Some(std::time::Instant::now() - CHECK_DELAY);
@@ -260,7 +285,7 @@ mod tests {
 
     #[test]
     fn the_result_sticks_until_the_source_changes_again() {
-        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new());
+        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new(), String::new(), String::new());
         e.source.push('x');
         e.note_source_changes();
         e.changed_at = Some(std::time::Instant::now() - CHECK_DELAY);
@@ -275,7 +300,7 @@ mod tests {
 
     #[test]
     fn editing_while_the_check_is_pending_schedules_another_one() {
-        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new());
+        let mut e = Editor::edit(0, "demo".into(), "void draw() {}".into(), String::new(), String::new(), String::new());
         e.source.push('x');
         e.note_source_changes();
 

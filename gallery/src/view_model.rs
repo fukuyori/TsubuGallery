@@ -212,6 +212,16 @@ impl GalleryView {
         self.refresh();
     }
 
+    /// 作者とリンクを記録する。
+    pub fn set_credit(&mut self, index: usize, author: &str, link: &str) {
+        if let Some(item) = self.items.get_mut(index) {
+            item.author = author.to_string();
+            item.link = link.to_string();
+        }
+        // 作者でも検索できるので、絞り込み中なら見え方が変わる。
+        self.refresh_keeping_selection(index);
+    }
+
     /// どちらの方言として読まれたかを記録する。リスト表示に出す。
     pub fn set_dialect(&mut self, index: usize, dialect: Option<String>) {
         if let Some(item) = self.items.get_mut(index) {

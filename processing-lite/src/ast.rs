@@ -181,7 +181,7 @@ pub enum Expr {
     Float(f32),
     Bool(bool),
     Str(String),
-    Var(String),
+    Var { name: String, line: u32, column: u32 },
     Unary { op: UnaryOp, operand: Box<Expr> },
     Binary { op: BinaryOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Logical { op: LogicalOp, lhs: Box<Expr>, rhs: Box<Expr> },
@@ -207,6 +207,13 @@ pub enum Expr {
     New { class: String, args: Vec<Expr>, line: u32, column: u32 },
     /// メソッドの中の `this`。
     This,
+    /// 前置と後置の増減。`++t` は増やしたあとの値、`t++` は増やす前の値。
+    IncDec { target: Box<Expr>, delta: i32, prefix: bool },
+    /// 式としての代入。`f(x += 1)` のように引数の中でも書ける。
+    ///
+    /// 値をひとつ残す。文としての代入 ([`Stmt::Assign`]) とは別に持つのは、
+    /// 残すか捨てるかが違うため。
+    Assign { target: Box<Expr>, op: AssignOp, value: Box<Expr> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -224,6 +231,10 @@ pub enum Stmt {
     If { cond: Expr, then: Box<Stmt>, otherwise: Option<Box<Stmt>> },
     While { cond: Expr, body: Box<Stmt> },
     For { init: Option<Box<Stmt>>, cond: Option<Expr>, update: Option<Box<Stmt>>, body: Box<Stmt> },
+    /// `float a = 1, b;` のように 1 文で複数を宣言したもの。
+    ///
+    /// 宣言の並びとして持つ。ブロックにすると変数の見える範囲が変わってしまう。
+    VarDecls(Vec<Stmt>),
     Block(Vec<Stmt>),
     Expr(Expr),
     /// 一番内側のループを抜ける。
@@ -281,6 +292,8 @@ pub struct Ast {
     pub globals: Vec<Stmt>,
     pub functions: Vec<Function>,
     pub classes: Vec<Class>,
+    /// 関数の外に直接書かれた文 (静的モード)。`setup()` の中身として扱う。
+    pub statements: Vec<Stmt>,
 }
 
 impl Ast {
