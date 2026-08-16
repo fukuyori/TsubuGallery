@@ -352,6 +352,20 @@ two builds at once.
 Where the lock cannot be taken (a data directory that is not writable, say) the
 app warns and starts anyway.
 
+### When it cannot start
+
+If the window cannot be created, or no GPU can be prepared, the reason goes into
+**an OS dialog** before the app quits. The same line lands in the log.
+
+The dialog is there because staying quiet tells the user nothing. The window is
+created before the GPU is, so without it you would only see an empty window
+flash and vanish. Writing to stderr does not help either: launched from a
+shortcut, the console closes together with the process.
+
+For the GPU part, wgpu considers Vulkan, DX12 and OpenGL. On Windows a missing
+Vulkan just falls through to DX12, so stopping here means no working graphics
+driver at all.
+
 ### Settings (design §24)
 
 Open with `,` or the **Settings** button at the top right of the gallery.

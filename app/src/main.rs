@@ -6,6 +6,7 @@
 //! - D: スクリーンショットをグリッド表示し、選択した作品を Viewer へ渡す
 //! - E: 外部の Processing Lite コードを Parser / AST / Bytecode 経由で実行する
 
+mod alert;
 mod editing;
 mod editor;
 mod editor_ui;
@@ -421,9 +422,6 @@ impl App {
         }
     }
 
-    /// 表示方式を順に切り替える (設計書 §6.2)。
-    ///
-    /// 設定画面からも変えられるが、見比べたいものなので一覧から直接切り替える。
     /// 再生速度を 1 段変える。設定画面で選ぶのと同じもので、保存もされる。
     ///
     /// 見ている最中に「もっとゆっくり」と思ったときに設定画面まで行かせない。
@@ -437,6 +435,18 @@ impl App {
         self.apply_settings();
     }
 
+    /// 起動を諦めるときに、その理由をダイアログで出す。
+    ///
+    /// 翻訳した一文の下に、生のエラーをそのまま添える。上は利用者が読むもの、
+    /// 下は問い合わせを受けたときにこちらが見る材料。ログにも同じものが残るが、
+    /// ログの場所を知らない相手には、この画面が唯一の手がかりになる。
+    fn report_fatal(&self, key: &str, detail: &str) {
+        alert::fatal(&format!("{}\n\n{detail}", self.locales.t(key)));
+    }
+
+    /// 表示方式を順に切り替える (設計書 §6.2)。
+    ///
+    /// 設定画面からも変えられるが、見比べたいものなので一覧から直接切り替える。
     fn cycle_view_mode(&mut self) {
         let all = <ViewMode as Choice>::ALL;
         let next = all
@@ -1754,6 +1764,7 @@ impl ApplicationHandler for App {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 log::error!("ウィンドウを作成できませんでした: {e}");
+                self.report_fatal("app.window_failed", &e.to_string());
                 event_loop.exit();
                 return;
             }
@@ -1763,6 +1774,7 @@ impl ApplicationHandler for App {
             Ok(g) => g,
             Err(e) => {
                 log::error!("{e}");
+                self.report_fatal("app.gpu_failed", &e);
                 event_loop.exit();
                 return;
             }

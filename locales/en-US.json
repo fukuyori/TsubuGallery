@@ -1,8 +1,10 @@
 {
   "app.already_running": "TsubuGallery is already running.",
   "app.already_running.hint": "Only one instance at a time. Set TSUBU_DATA_DIR to open a separate data directory.",
+  "app.gpu_failed": "Cannot start: no GPU is available. Updating the graphics driver often fixes this.",
   "app.link_failed": "Could not open the link",
   "app.lock_failed": "Could not guard against a second instance. Take care not to open two.",
+  "app.window_failed": "Cannot start: could not create a window.",
   "common.cancel": "Cancel",
   "dialect.glsl": "Read as tweet-sized GLSL, but the fragment shader has something that cannot be accepted.",
   "dialect.ignored_api": "Accepted but not implemented yet (blendMode)",

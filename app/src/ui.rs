@@ -135,7 +135,7 @@ impl UiLayer {
         let raw_input = self.state.take_egui_input(window);
         let toast = self.active_toast().map(str::to_owned);
 
-        let output = self.ctx.run_ui(raw_input, |ui| {
+        let mut output = self.ctx.run_ui(raw_input, |ui| {
             build(ui);
             if let Some(message) = &toast {
                 toast_area(ui.ctx(), message);
@@ -145,13 +145,17 @@ impl UiLayer {
         self.state.handle_platform_output(window, output.platform_output);
         self.jobs = self.ctx.tessellate(output.shapes, output.pixels_per_point);
 
-        for (id, deltas) in &output.textures_delta.set {
-            for delta in deltas {
-                self.renderer.update_texture(device, queue, *id, delta);
+        // 取り出して空にする。egui 0.36 の TexturesDelta は、中身が残ったまま
+        // 落とされると debug_assert! で落ちる。借りて回すだけでは空にならない。
+        let mut delta = std::mem::take(&mut output.textures_delta);
+        for (id, deltas) in delta.set.drain() {
+            for image in deltas {
+                self.renderer.update_texture(device, queue, id, &image);
             }
         }
         self.renderer.update_buffers(device, queue, encoder, &self.jobs, &self.screen);
-        self.to_free = output.textures_delta.free.iter().copied().collect();
+        // 解放は submit のあと。まだ描画に使われているかもしれない。
+        self.to_free = std::mem::take(&mut delta.free).into_iter().collect();
     }
 
     pub fn render(&self, pass: &mut wgpu::RenderPass<'static>) {

@@ -1,8 +1,10 @@
 {
   "app.already_running": "TsubuGallery はすでに起動しています。",
   "app.already_running.hint": "同時に開けるのは 1 つだけです。別のデータ領域で開くには TSUBU_DATA_DIR を指定してください。",
+  "app.gpu_failed": "GPU を用意できないため起動できません。グラフィックドライバを更新すると直ることがあります。",
   "app.link_failed": "リンクを開けませんでした",
   "app.lock_failed": "多重起動を防げませんでした。二重に開かないよう注意してください。",
+  "app.window_failed": "ウィンドウを作成できないため起動できません。",
   "common.cancel": "キャンセル",
   "dialect.glsl": "つぶやき GLSL として読みました。ただし、フラグメントシェーダーとして受け付けられない書き方があります。",
   "dialect.ignored_api": "受け付けるが、まだ効かない API (blendMode)",

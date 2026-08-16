@@ -23,3 +23,6 @@ egui-winit.workspace = true
 pollster.workspace = true
 image.workspace = true
 log.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
