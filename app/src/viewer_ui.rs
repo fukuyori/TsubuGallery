@@ -32,6 +32,10 @@ pub struct ViewerOverlay<'a> {
     pub slideshow: bool,
     /// スクリーンセーバーとして動いているか。
     pub screensaver: bool,
+    /// 描いている GPU の名前。
+    pub gpu: &'a str,
+    /// その GPU をどの経路で使っているか (`Vulkan · DiscreteGpu` など)。
+    pub backend: &'a str,
 }
 
 pub fn build(ui: &mut egui::Ui, info: &ViewerOverlay<'_>, locales: &Locales) {
@@ -226,6 +230,10 @@ fn info_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
                             locales.t("viewer.stat.switch_time"),
                             format!("{:.3} ms", info.stats.last_switch_ms),
                         );
+                        // 機械の話は最後。作品ごとに変わらないので、上に置くと
+                        // 目当ての数字が下へ押し出される。
+                        row(locales.t("viewer.stat.gpu"), info.gpu.to_string());
+                        row(locales.t("viewer.stat.backend"), info.backend.to_string());
                     },
                 );
             });

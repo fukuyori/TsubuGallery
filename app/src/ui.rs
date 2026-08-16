@@ -12,6 +12,11 @@ use winit::window::Window;
 
 /// 操作がないときに Viewer のオーバーレイを消すまでの時間 (設計書 §8.2)。
 pub const AUTO_HIDE: Duration = Duration::from_millis(2600);
+/// 操作がないときにマウスカーソルを消すまでの時間。
+///
+/// オーバーレイ ([`AUTO_HIDE`]) より少しあとにする。同時に消すと画面から 2 つの
+/// ものが一度に消えて、何が起きたのか読み取りにくい。
+pub const CURSOR_HIDE: Duration = Duration::from_millis(3000);
 /// トーストの表示時間。
 const TOAST_DURATION: Duration = Duration::from_millis(2200);
 
@@ -33,6 +38,8 @@ pub struct UiLayer {
     screen: ScreenDescriptor,
 
     last_activity: Instant,
+    /// このフレームでカーソルを消すか。呼び出し側が毎フレーム決める。
+    cursor_hidden: bool,
     toast: Option<(String, Instant)>,
     /// CJK フォントを用意できたか。できていなければ日本語 UI は使わない。
     pub has_cjk_font: bool,
@@ -72,6 +79,7 @@ impl UiLayer {
             to_free: Vec::new(),
             screen: ScreenDescriptor { size_in_pixels: [1, 1], pixels_per_point: 1.0 },
             last_activity: Instant::now(),
+            cursor_hidden: false,
             toast: None,
             has_cjk_font,
         }
@@ -98,6 +106,16 @@ impl UiLayer {
     /// 何か操作があったことを記録する。
     pub fn note_activity(&mut self) {
         self.last_activity = Instant::now();
+    }
+
+    /// カーソルを消してよいだけの時間、操作が途切れているか。
+    pub fn cursor_idle(&self) -> bool {
+        self.last_activity.elapsed() >= CURSOR_HIDE
+    }
+
+    /// このフレームでカーソルを消すか。[`Self::prepare`] の前に決める。
+    pub fn set_cursor_hidden(&mut self, hidden: bool) {
+        self.cursor_hidden = hidden;
     }
 
     pub fn toast(&mut self, message: impl Into<String>) {
@@ -134,11 +152,22 @@ impl UiLayer {
 
         let raw_input = self.state.take_egui_input(window);
         let toast = self.active_toast().map(str::to_owned);
+        let hide_cursor = self.cursor_hidden;
 
         let mut output = self.ctx.run_ui(raw_input, |ui| {
             build(ui);
             if let Some(message) = &toast {
                 toast_area(ui.ctx(), message);
+            }
+            // カーソルを消すのは egui へ頼む。ここで直接
+            // `window.set_cursor_visible(false)` を呼ぶと、egui-winit が毎フレーム
+            // `set_cursor_visible(true)` を呼び返すので取り合いになる。
+            // `CursorIcon::None` なら egui-winit 側が消してくれる。
+            //
+            // 組み立てのあとで指定する。カーソルがウィジェットの上に載っていると
+            // そのウィジェットが自分の形を書き込むので、先に指定すると消される。
+            if hide_cursor {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             }
         });
 

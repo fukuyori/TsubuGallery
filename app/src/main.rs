@@ -288,6 +288,8 @@ struct App {
     fullscreen: bool,
     mouse: (f32, f32),
     mouse_pressed: bool,
+    /// カーソルがこの窓の上にあるか。全画面でも、別のモニタへ出ていれば false。
+    cursor_inside: bool,
     /// キーボードで選択が動いた直後だけ true。
     scroll_to_selected: bool,
     /// 手動更新など、優先して処理するサムネイル。
@@ -407,6 +409,7 @@ impl App {
             fullscreen: settings.fullscreen,
             mouse: (0.0, 0.0),
             mouse_pressed: false,
+            cursor_inside: false,
             scroll_to_selected: false,
             requested_thumbnail: None,
             editor: None,
@@ -1482,6 +1485,9 @@ impl App {
             let tags = &self.tags;
             let scroll_to_selected = self.scroll_to_selected;
             let mut editor = self.editor.as_mut();
+            let hide_cursor =
+                should_hide_cursor(self.fullscreen, self.cursor_inside, ui.cursor_idle());
+            ui.set_cursor_hidden(hide_cursor);
             let overlay = ViewerOverlay {
                 title: self.viewer.current_title().unwrap_or(""),
                 index: self.viewer.current_index(),
@@ -1497,6 +1503,8 @@ impl App {
                 link: &credit.1,
                 slideshow: self.slideshow.is_some(),
                 screensaver: self.screensaver.is_some(),
+                gpu: &gfx.gpu,
+                backend: &gfx.backend,
             };
 
             ui.prepare(
@@ -1859,10 +1867,16 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x as f32, position.y as f32);
+                // 座標が届いた時点で窓の上にいる。全画面へ入った直後など、
+                // CursorEntered が来ないまま動き始めることがある。
+                self.cursor_inside = true;
                 if let Some(ui) = self.ui.as_mut() {
                     ui.note_activity();
                 }
             }
+
+            WindowEvent::CursorEntered { .. } => self.cursor_inside = true,
+            WindowEvent::CursorLeft { .. } => self.cursor_inside = false,
 
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 self.mouse_pressed = state == ElementState::Pressed;
@@ -1899,6 +1913,18 @@ impl ApplicationHandler for App {
 /// これ以下のカーソル移動は「触っていない」とみなす (論理ピクセル)。
 const CURSOR_NOISE: f32 = 4.0;
 
+/// マウスカーソルを消すか。
+///
+/// 全画面で見ている最中に矢印が居座ると、作品の一部のように見えてしまう。
+/// オーバーレイが引いたあとに続けて消す。
+///
+/// 窓の外にいるときは消さない。全画面でも、モニタが 2 枚あればカーソルは別の
+/// 画面へ出ていける。そこで消すと、こちらを見ていない — 他のアプリを触って
+/// いる — 人のカーソルを奪うことになる。
+fn should_hide_cursor(fullscreen: bool, inside: bool, idle: bool) -> bool {
+    fullscreen && inside && idle
+}
+
 /// ユーザーが何かした、と数えてよいイベントか。
 ///
 /// ウィンドウの移動やフォーカスの変化は数えない。他のアプリを使っている間も
@@ -1934,6 +1960,26 @@ mod input_tests {
 
     /// ごく小さなカーソル移動では解除しない。
     ///
+    /// 窓の上にいないカーソルは消さない。
+    ///
+    /// ここを落とすと、モニタ 2 枚で全画面にしている人が、別の画面で作業して
+    /// いる最中にカーソルを見失う。
+    #[test]
+    fn the_cursor_only_disappears_over_our_own_window() {
+        assert!(should_hide_cursor(true, true, true), "全画面・窓の上・無操作なら消す");
+        assert!(!should_hide_cursor(true, false, true), "別のモニタへ出ていれば消さない");
+        assert!(!should_hide_cursor(false, true, true), "窓表示のときは消さない");
+        assert!(!should_hide_cursor(true, true, false), "触っている間は消さない");
+    }
+
+    /// カーソルはオーバーレイより遅れて消える。
+    ///
+    /// 同時だと画面から 2 つのものが一度に消えて、何が起きたのか読み取れない。
+    #[test]
+    fn the_cursor_goes_after_the_overlay() {
+        assert!(ui::CURSOR_HIDE > ui::AUTO_HIDE);
+    }
+
     /// 全画面への切り替えでウィンドウの大きさが変わると、指を触れていなくても
     /// 座標が届くことがある。
     #[test]

@@ -17,6 +17,15 @@ pub struct Gfx {
     pub msaa: MsaaTarget,
     /// スケッチの絵。`background()` を呼ばないフレームのために残しておく。
     pub canvas: Canvas,
+    /// 選ばれた GPU の名前。`I` の情報に出す。
+    ///
+    /// 毎フレーム組み立て直さないよう、ここで作っておく。起動中に変わらない。
+    pub gpu: String,
+    /// どの経路で描いているか。`Vulkan · DiscreteGpu` のような形。
+    ///
+    /// 内蔵と外付けの 2 枚が載っている機械では、どちらが選ばれたかで速さが
+    /// 何倍も変わる。動きが遅いという報告を受けたとき、最初に見る場所。
+    pub backend: String,
 }
 
 impl Gfx {
@@ -68,10 +77,14 @@ impl Gfx {
         };
         surface.configure(&device, &config);
 
+        let info = adapter.get_info();
         log::info!(
-            "GPU: {} ({:?}) / surface format {:?}",
-            adapter.get_info().name,
-            adapter.get_info().backend,
+            "GPU: {} ({:?} / {:?}) driver {} {} / surface format {:?}",
+            info.name,
+            info.backend,
+            info.device_type,
+            info.driver,
+            info.driver_info,
             format
         );
 
@@ -86,6 +99,9 @@ impl Gfx {
             batch,
             msaa: MsaaTarget::new(SAMPLE_COUNT),
             canvas,
+            gpu: info.name,
+            // 種類まで出す。Backend も DeviceType も固有名詞なので翻訳しない。
+            backend: format!("{:?} · {:?}", info.backend, info.device_type),
         })
     }
 

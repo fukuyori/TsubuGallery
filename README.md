@@ -403,10 +403,34 @@ to the default, so hand-editing the table cannot stop the app from starting.
 | Instructions/frame | Bytecode instructions the sketch executed. The per-frame budget (Settings → Runtime) is measured in these |
 | Triangles/frame | What the GPU was handed |
 | Sketch clock | Seconds elapsed as the sketch sees them, accumulated at the playback speed. This is GLSL's `t` |
+| GPU | Name of the adapter wgpu picked |
+| Backend | Something like `Vulkan · DiscreteGpu`: which API, and which kind of GPU |
 
-Together they say where a slow sketch is slow. A high instruction count with few
-triangles is the language being asked to do too much; the reverse is the
+Together the first four say where a slow sketch is slow. A high instruction count
+with few triangles is the language being asked to do too much; the reverse is the
 renderer.
+
+The last two rows never change between sketches, which is why they sit at the
+bottom. On a machine carrying both an integrated and a discrete GPU, which one
+got picked is worth several times the frame rate — it is the first thing to look
+at when someone reports that things are slow. The same line goes into the log at
+startup, with the driver version as well (`RUST_LOG=info`).
+
+### The cursor in fullscreen
+
+Three seconds without input in fullscreen and the mouse cursor disappears; moving
+it brings it back. A stationary arrow starts to look like part of the sketch.
+
+It goes slightly after the overlay (2.6 s). Losing both at once makes it hard to
+read what just happened.
+
+**The cursor is left alone when it is not over our window.** Fullscreen or not,
+a second monitor lets the cursor walk off this screen, and hiding it there would
+take the cursor away from someone who is working in another application.
+
+Hiding is done by asking egui for `CursorIcon::None` rather than calling
+`window.set_cursor_visible(false)`: egui-winit calls `set_cursor_visible(true)`
+every frame, so the direct route turns into a tug of war.
 
 ### Playback speed
 
