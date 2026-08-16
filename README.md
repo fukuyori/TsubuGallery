@@ -508,20 +508,23 @@ target frame too, so sketches with trails look the same as when they run.
 Nothing accumulates while paused. Stacking the same shapes every frame would make
 a supposedly frozen picture keep darkening.
 
-## Two dialects
+## Three dialects
 
-Drop in a `.pde` and it runs. Both **Processing (Java Mode)** and **p5.js** are
-accepted, and which one it is gets detected automatically — you never have to say
-(design §23.2, swappable frontends).
+Drop in a `.pde` and it runs. **Processing (Java Mode)**, **p5.js** and
+**tweet-sized GLSL** are all accepted, and which one it is gets detected
+automatically — you never have to say (design §23.2, swappable frontends).
 
 ```text
 Processing Lite ─┐
-                 ├─ AST → bytecode → VM → renderer
-p5.js subset ────┘
+                 ├─ AST → bytecode → VM ─┐
+p5.js subset ────┘                        ├─ renderer
+tweet-sized GLSL ── naga → WGSL → wgpu ───┘
 ```
 
 Everything below bytecode is shared; only the VM's value type was widened to
-cover arrays, objects and functions.
+cover arrays, objects and functions. GLSL is the exception: it never reaches the
+VM. A single fragment shader goes straight to the GPU, so it takes a different
+road from the one that builds triangles ([tweet-sized GLSL](#tweet-sized-glsl)).
 
 ## Processing Lite (Java Mode)
 
@@ -975,6 +978,75 @@ line 3, column 3: `;` expected
 A sketch that fails still appears in the list, with an error badge on its card.
 Opening it in the viewer shows why.
 
+## Tweet-sized GLSL
+
+`#つぶやきGLSL` (twigl's geekest mode) drops in as-is. Write one fragment shader
+and it paints the whole frame, every frame.
+
+```glsl
+for (float i, e, R, s; i++ < 99.;) {
+  vec3 p = vec3((FC.xy - .5 * r) / r.y, 1) * i * .1;
+  o.rgb += hsv(R = length(p), .6, .02 / abs(sin(p.z * 9. + t) + .1));
+}
+```
+
+A word that exists in neither Processing nor p5.js — `vec3`, `gl_FragCoord` and
+friends — is what marks a source as GLSL. It skips the VM: naga translates it to
+WGSL, wgpu builds a pipeline, and it is drawn on one triangle covering the frame.
+
+```text
+GLSL → prepend the preamble → naga (glsl-in) → validate → WGSL → wgpu
+```
+
+### What you get for free
+
+All of this comes from the preamble, so none of it needs declaring.
+
+| Name | Type | Meaning |
+|---|---|---|
+| `r` | `vec2` | resolution |
+| `t` | `float` | seconds since the sketch started |
+| `f` | `float` | frame number |
+| `m` | `vec2` | mouse position (0..1) |
+| `FC` | `vec4` | `gl_FragCoord` |
+| `o` | `vec4` | output colour, starting at `vec4(0)` |
+| `PI` / `TAU` | `float` | π and 2π |
+| `rotate2D(a)` | `mat2` | rotation |
+| `rotate3D(a, axis)` | `mat3` | rotation about an axis |
+| `hsv(h, s, v)` | `vec3` | HSV → RGB |
+| `snoise2D(v)` / `snoise3D(v)` | `float` | simplex noise |
+
+Writing your own `void main()` works too (twigl's geek / geeker). `o` still
+starts at `vec4(0)`, and `gl_FragColor` is treated as `o`.
+
+### Differences from twigl
+
+| | Why |
+|---|---|
+| No `#version` line | naga only accepts 440/450/460, so it is added here |
+| `o.a` is dropped and the output is always opaque | in tweet-sized GLSL the fourth channel holds loop counts or brightness, not transparency |
+| No backbuffer `b` | not supported yet |
+| No `snoise4D` / `fsnoise` | not supported yet |
+| A trailing `#つぶやきGLSL` tag line is skipped | it is not a preprocessor directive, so it would not compile |
+
+`gl_FragCoord`'s vertical direction and its `z` follow the OpenGL convention.
+wgpu puts the origin at the top left and uses 0..1 for `z` directly; without
+matching, the image comes out upside down and sketches using `FC.z` change.
+
+### Safety
+
+The loops run inside the GPU, so the per-frame instruction budget (design §24)
+does not apply. A pathologically heavy shader can still trip the driver timeout.
+
+Translation and validation happen at load time. wgpu's default handling turns a
+pipeline validation error into a process-wide panic, so naga rejects bad shaders
+before the GPU ever sees them. What does not compile is reported with a line and
+column, in the log and on the card.
+
+```
+line 2, column 9: Unknown variable: s
+```
+
 ## Distribution (Phase 9)
 
 ```sh
@@ -1014,8 +1086,10 @@ A cargo workspace matching the module boundaries in design §31.
 ```text
 core/              library / repository / locale / paths … shared layer, independent of UI and runtime
 renderer/          draw / batch / texture / capture / canvas / font … Processing API → triangles → wgpu
+                   shader … tweet-sized GLSL → naga → WGSL
 processing-lite/   lexer → parser → ast → compiler ─┐
                    js/{lexer,parser,ast,compiler} ──┴→ bytecode → vm
+                   glsl_sketch … GLSL sketches / front … picks the dialect
                    natives / highlight / format / dialect / examples / sketch
 gallery/           grid / model / view_model        … column count, selection, ordering (UI independent)
 app/               ui / gallery_ui / viewer_ui / editor_ui / editor / settings_ui
@@ -1036,6 +1110,9 @@ Dependencies run `app → {gallery, processing-lite, renderer, core}`,
 ```text
 at startup   source → lexer → parser → ast → compiler → bytecode
 at display   bytecode → vm → natives → Graphics → triangles → wgpu
+
+at startup   GLSL   → preamble → naga → WGSL
+at display   Graphics → shader pass → wgpu
 ```
 
 As design §15.2 requires, no parser runs at the moment a sketch is picked from

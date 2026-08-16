@@ -96,7 +96,8 @@ impl Sketch for VmSketch {
         // 地の色、text() の線、int ひとつの読み方が方言で違う。
         g.set_flavour(match self.dialect {
             Dialect::P5 => tsubu_renderer::Flavour::P5,
-            Dialect::Processing => tsubu_renderer::Flavour::Processing,
+            // GLSL は VM を通らないので、ここへは来ない。
+            Dialect::Processing | Dialect::Glsl => tsubu_renderer::Flavour::Processing,
         });
         let result = self.vm.init_globals(&self.program, g, self.budget);
         if let Err(trap) = result {

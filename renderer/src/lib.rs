@@ -10,14 +10,16 @@ pub mod capture;
 pub mod draw;
 pub mod font;
 pub mod mat4;
+pub mod shader;
 pub mod texture;
 
 pub use batch::{BatchRenderer, SAMPLE_COUNT};
 pub use canvas::Canvas;
 pub use capture::{CaptureError, CapturedImage, Capturer};
 pub use draw::{
-    Affine, AngleMode, ArcMode, Batch, BlendMode, CanvasFit, Color, ColorMode, DrawList, Flavour, Graphics, GraphicsState, ShapeKind,
+    Affine, AngleMode, ArcMode, Batch, BlendMode, CanvasFit, Color, ColorMode, DrawList, Flavour, Graphics, GraphicsState, ShaderPaint, ShapeKind,
     Shadow, ShapeMode, TextAlign, Vertex,
 };
+pub use shader::ShaderError;
 pub use mat4::{Camera, Mat4, Origin};
 pub use texture::MsaaTarget;

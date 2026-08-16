@@ -44,7 +44,6 @@ use settings_ui::{SettingsAction, SettingsUi};
 use thumbnail::ThumbnailLoader;
 use tsubu_renderer::{Capturer, Color, SAMPLE_COUNT};
 use ui::{UiFrame, UiLayer};
-use tsubu_processing_lite::Sketch as _;
 use viewer::Viewer;
 use viewer_ui::ViewerOverlay;
 use wgpu::CurrentSurfaceTexture;
@@ -58,7 +57,7 @@ const DISK_THUMBNAILS_PER_FRAME: usize = 4;
 
 /// 使い方。`--help` で出す。
 const USAGE: &str = "\
-TsubuGallery — 短い Processing / p5.js 作品のギャラリー
+TsubuGallery — 短い Processing / p5.js / GLSL 作品のギャラリー
 
   tsubugallery                       ギャラリーを開く
   tsubugallery --capture-all [DIR]   全作品のサムネイルを作って終了
@@ -834,7 +833,7 @@ impl App {
         ed.set_check_result(
             ed.source.clone(),
             compiled.as_ref().err().cloned(),
-            compiled.as_ref().ok().map(|s| s.dialect()),
+            compiled.as_ref().ok().map(|c| c.dialect),
         );
 
         let index = match ed.index {
@@ -872,22 +871,22 @@ impl App {
         index: usize,
         id: String,
         source: loader::Source,
-        compiled: Result<tsubu_processing_lite::VmSketch, tsubu_processing_lite::CompileError>,
+        compiled: Result<tsubu_processing_lite::Compiled, tsubu_processing_lite::CompileError>,
     ) {
         let title = tsubu_core::library::title_from_id(&id);
         self.sources[index] = source;
 
         match compiled {
-            Ok(sketch) => {
+            Ok(compiled) => {
                 let info = tsubu_processing_lite::SketchInfo {
                     id: id.clone(),
                     title: title.clone(),
                     thumbnail_frame: self.settings.capture_frame,
                 };
                 // 書き換えで Processing から p5.js へ変わることがある。
-                self.gallery.set_dialect(index, Some(sketch.dialect().label().to_string()));
+                self.gallery.set_dialect(index, Some(compiled.dialect.label().to_string()));
                 self.viewer
-                    .replace(index, tsubu_processing_lite::LoadedSketch::new(info, Box::new(sketch)));
+                    .replace(index, tsubu_processing_lite::LoadedSketch::new(info, compiled.sketch));
                 self.gallery.set_status(index, SketchStatus::Ready);
             }
             // 直前の正常なコードで動かし続ける (設計書 §15.1)。
@@ -901,7 +900,7 @@ impl App {
         &mut self,
         id: String,
         source: loader::Source,
-        compiled: Result<tsubu_processing_lite::VmSketch, tsubu_processing_lite::CompileError>,
+        compiled: Result<tsubu_processing_lite::Compiled, tsubu_processing_lite::CompileError>,
     ) -> usize {
         // Gallery はファイル名順なので、同じ順序を保つ位置に差し込む。
         let index = self
@@ -928,10 +927,10 @@ impl App {
             .map_or_else(repository::now, |meta| meta.created_at);
         let mut item = GalleryItem::new(&id, &title, created_at);
         let sketch: Box<dyn tsubu_processing_lite::Sketch> = match compiled {
-            Ok(sketch) => {
-                // VmSketch は必ずどちらかの方言で読めている。
-                item.dialect = Some(sketch.dialect().label().to_string());
-                Box::new(sketch)
+            Ok(compiled) => {
+                // 通ったものは必ずどれかの方言で読めている。
+                item.dialect = Some(compiled.dialect.label().to_string());
+                compiled.sketch
             }
             Err(e) => {
                 item.status = SketchStatus::Error(e.to_string());
@@ -1024,8 +1023,8 @@ impl App {
 
         let Some(source) = editor.source_to_check() else { return };
         let source = source.to_string();
-        let compiled = tsubu_processing_lite::VmSketch::compile(&source, 0);
-        let dialect = compiled.as_ref().ok().map(|s| s.dialect());
+        let compiled = tsubu_processing_lite::compile_sketch(&source, 0);
+        let dialect = compiled.as_ref().ok().map(|c| c.dialect);
         editor.set_check_result(source, compiled.err(), dialect);
     }
 
@@ -1279,7 +1278,7 @@ impl App {
             thumbnail::size_for_width(gfx.size(), self.settings.image_quality.width());
 
         let source = self.sources.get(index).ok_or_else(|| format!("作品 {index} がありません"))?;
-        let mut sketch = source.instantiate().map_err(|e| e.to_string())?;
+        let mut sketch = source.instantiate().map_err(|e| e.to_string())?.sketch;
 
         // 表示中のインスタンスとは別に動かし、目標フレームまで進めてから撮る。
         // フレームをまたいで状態を持つ作品でも、実行結果と同じ絵になる。

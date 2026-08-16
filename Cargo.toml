@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -21,6 +21,9 @@ tsubu-processing-lite = { path = "processing-lite" }
 tsubu-gallery = { path = "gallery" }
 
 wgpu = "30.0"
+# つぶやき GLSL を WGSL へ翻訳する。wgpu が内部で使っているものと同じ版。
+# glsl-in だけでは足りない (naga 30.0.0 の内部モジュールが wgsl-in に依存している)。
+naga = { version = "30.0", features = ["glsl-in", "wgsl-in", "wgsl-out"] }
 winit = "0.30"
 egui = "0.36"
 egui-wgpu = "0.36"

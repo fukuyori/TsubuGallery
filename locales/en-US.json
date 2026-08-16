@@ -4,6 +4,7 @@
   "app.link_failed": "Could not open the link",
   "app.lock_failed": "Could not guard against a second instance. Take care not to open two.",
   "common.cancel": "Cancel",
+  "dialect.glsl": "Read as tweet-sized GLSL, but the fragment shader has something that cannot be accepted.",
   "dialect.ignored_api": "Accepted but not implemented yet (blendMode)",
   "dialect.line": "line",
   "dialect.no_3d": "3D: custom cameras and solids beyond box/sphere are not there yet",

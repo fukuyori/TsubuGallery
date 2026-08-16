@@ -475,19 +475,22 @@ void draw() {
 作品は、キャンバスが捨てられるたびに頭から動かし直す。乱数の出発点も戻すので、
 さっき見た絵、そしてギャラリーのカードと同じ絵が出る。
 
-## 2 つの方言
+## 3 つの方言
 
-`.pde` を置けば動く。**Processing (Java Mode)** と **p5.js** の両方を受ける。
-どちらで書かれているかは自動で判定するので、書き分けの指定は要らない
-(設計書 §23.2 の Frontend 交換)。
+`.pde` を置けば動く。**Processing (Java Mode)**・**p5.js**・**つぶやき GLSL** の
+どれでも受ける。どれで書かれているかは自動で判定するので、書き分けの指定は
+要らない (設計書 §23.2 の Frontend 交換)。
 
 ```text
 Processing Lite ─┐
-                 ├─ AST → Bytecode → VM → Renderer
-p5.js subset ────┘
+                 ├─ AST → Bytecode → VM ─┐
+p5.js subset ────┘                        ├─ Renderer
+つぶやき GLSL ── naga → WGSL → wgpu ──────┘
 ```
 
 Bytecode から下は共通で、VM の値だけ配列・オブジェクト・関数まで広げてある。
+GLSL だけは VM を通らない。フラグメントシェーダー 1 本を GPU へ渡すので、
+図形の列を組み立てる道とは別になる ([つぶやき GLSL](#つぶやき-glsl))。
 
 ## Processing Lite (Java Mode)
 
@@ -905,6 +908,74 @@ Viewer へ制御を返し、3 フレーム続けて超えた作品は停止し�
 失敗した作品も一覧からは消えず、カードにエラーバッジが付く。Viewer で開くと理由が
 表示される。
 
+## つぶやき GLSL
+
+`#つぶやきGLSL` (twigl の geekest 相当) もそのまま置ける。フラグメント
+シェーダー 1 本を書けば、画面いっぱいを毎フレーム塗る。
+
+```glsl
+for (float i, e, R, s; i++ < 99.;) {
+  vec3 p = vec3((FC.xy - .5 * r) / r.y, 1) * i * .1;
+  o.rgb += hsv(R = length(p), .6, .02 / abs(sin(p.z * 9. + t) + .1));
+}
+```
+
+`vec3` や `gl_FragCoord` のような、Processing にも p5.js にも無い語があれば
+GLSL として読む。VM は通らず、naga で WGSL へ翻訳して wgpu のパイプラインを
+組み、画面を覆う三角形 1 枚に貼る。
+
+```text
+GLSL → 前置きを足す → naga (glsl-in) → 検証 → WGSL → wgpu
+```
+
+### 用意されているもの
+
+前置きとして与えるので、宣言せずに使える。
+
+| 名前 | 型 | 中身 |
+|---|---|---|
+| `r` | `vec2` | 解像度 |
+| `t` | `float` | 実行開始からの経過秒 |
+| `f` | `float` | フレーム番号 |
+| `m` | `vec2` | マウス位置 (0..1) |
+| `FC` | `vec4` | `gl_FragCoord` |
+| `o` | `vec4` | 出力色。`vec4(0)` から始まる |
+| `PI` / `TAU` | `float` | 円周率とその 2 倍 |
+| `rotate2D(a)` | `mat2` | 回転 |
+| `rotate3D(a, axis)` | `mat3` | 軸まわりの回転 |
+| `hsv(h, s, v)` | `vec3` | HSV → RGB |
+| `snoise2D(v)` / `snoise3D(v)` | `float` | Simplex ノイズ |
+
+`void main()` を自分で書いてもよい (twigl の geek / geeker)。その場合も `o` は
+`vec4(0)` から始まり、`gl_FragColor` は `o` として扱う。
+
+### twigl との違い
+
+| | 理由 |
+|---|---|
+| `#version` は書かない | naga が受けるのは 440/450/460 だけなので、こちらで付ける |
+| `o.a` は捨てて必ず不透明で出す | つぶやき GLSL の 4 本目はループ回数や明るさの置き場で、透明度ではない |
+| バックバッファ `b` は無い | 未対応 |
+| `snoise4D` / `fsnoise` は無い | 未対応 |
+| 末尾の `#つぶやきGLSL` タグ行は読み飛ばす | プリプロセッサ指令ではないので、そのままでは通らない |
+
+`gl_FragCoord` の上下と `z` は OpenGL の規約に合わせてある。wgpu は左上原点で
+`z` も 0..1 をそのまま使うため、揃えないと絵が上下逆になったり `FC.z` を使う
+作品が変わったりする。
+
+### 安全性
+
+ループは GPU の中で回るので、1 フレームの命令数の予算 (設計書 §24) は効かない。
+極端に重いシェーダーはドライバのタイムアウトを起こしうる。
+
+翻訳と検証は読み込み時に済ませる。wgpu の既定の扱いではパイプラインの検証
+エラーがプロセスごと落とすので、GPU へ渡す前に naga で弾く。通らないものは
+行と列つきでログとカードに出る。
+
+```
+2行9列: Unknown variable: s
+```
+
 ## 配布 (Phase 9)
 
 ```sh
@@ -943,8 +1014,10 @@ Windows と Linux 向けのクロスビルドには、その OS の C ツール�
 ```text
 core/              library / repository / locale / paths … UI とランタイムから独立した共通層
 renderer/          draw / batch / texture / capture … Processing API → 三角形 → wgpu
+                   shader … つぶやき GLSL → naga → WGSL
 processing-lite/   lexer → parser → ast → compiler ─┐
                    js/{lexer,parser,ast,compiler} ──┴→ bytecode → vm
+                   glsl_sketch … GLSL 作品 / front … 方言を見分けて振り分ける
                    natives / highlight / format / dialect / examples / sketch
 gallery/           grid / model / view_model        … 列数計算・選択・取得順 (UI 非依存)
 app/               ui / gallery_ui / viewer_ui / editor_ui / editor
@@ -964,6 +1037,9 @@ locales/           ja-JP.json / en-US.json
 ```text
 起動時   source → lexer → parser → ast → compiler → bytecode
 表示時   bytecode → vm → natives → Graphics → 三角形 → wgpu
+
+起動時   GLSL   → 前置き → naga → WGSL
+表示時   Graphics → シェーダーパス → wgpu
 ```
 
 設計書 §15.2 のとおり、Gallery から作品を選んだ時点では Parser を動かさない。

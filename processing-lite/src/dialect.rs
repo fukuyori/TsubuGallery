@@ -16,6 +16,8 @@ pub enum Dialect {
     P5,
     /// Processing (Java Mode)。ただし未対応の構文を使っている。
     Processing,
+    /// つぶやき GLSL。フラグメントシェーダー 1 本。
+    Glsl,
 }
 
 impl Dialect {
@@ -24,6 +26,7 @@ impl Dialect {
         match self {
             Dialect::P5 => "p5.js",
             Dialect::Processing => "Processing",
+            Dialect::Glsl => "GLSL",
         }
     }
 
@@ -32,8 +35,48 @@ impl Dialect {
         match self {
             Dialect::P5 => "dialect.p5",
             Dialect::Processing => "dialect.processing",
+            Dialect::Glsl => "dialect.glsl",
         }
     }
+}
+
+/// GLSL にしか出てこない語。1 つでもあれば GLSL と見てよい。
+///
+/// Processing にも p5.js にも同じ名前の型や変数は無い。`float` や `void` の
+/// ように両方にある語は入れない。
+const GLSL_ONLY: &[&str] = &[
+    "vec2",
+    "vec3",
+    "vec4",
+    "ivec2",
+    "ivec3",
+    "ivec4",
+    "bvec2",
+    "bvec3",
+    "bvec4",
+    "mat2",
+    "mat3",
+    "mat4",
+    "sampler2D",
+    "gl_FragCoord",
+    "gl_FragColor",
+    "gl_Position",
+    "rotate2D",
+    "rotate3D",
+    "snoise2D",
+    "snoise3D",
+    "fwidth",
+];
+
+/// つぶやき GLSL として読むべきコードか。
+///
+/// コンパイルを試す前に呼ぶ。GLSL は Processing のパーサに掛けても 1 行目で
+/// 転ぶだけで、どこが悪いのかを言えない。先に見分けて別の道へ送る。
+pub fn looks_like_glsl(source: &str) -> bool {
+    tokens(source)
+        .iter()
+        .filter(|s| !matches!(s.class, TokenClass::Plain | TokenClass::Comment))
+        .any(|s| GLSL_ONLY.contains(&&source[s.start..s.end]))
 }
 
 /// p5.js で、まだ持っていない API。
@@ -117,6 +160,12 @@ const UNSUPPORTED_JAVA_KEYWORDS: &[&str] = &["static", "import", "char"];
 
 /// コンパイルできなかったコードを見て、方言と未対応の構文を挙げる。
 pub fn diagnose(source: &str) -> Diagnosis {
+    // GLSL は Processing でも p5.js でもない。未対応の構文を挙げても
+    // 「Processing にこの書き方は無い」ばかりになるので、方言だけ返す。
+    if looks_like_glsl(source) {
+        return Diagnosis { dialect: Dialect::Glsl, findings: Vec::new() };
+    }
+
     let spans = tokens(source);
     let code: Vec<(usize, &str, TokenClass)> = spans
         .iter()
@@ -449,10 +498,50 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
         }
     }
 
+    /// 実際に貼られたつぶやき GLSL。Processing でも p5.js でもない。
+    #[test]
+    fn a_tweet_sized_shader_is_recognised_as_glsl() {
+        for source in [
+            "float e, i, a, w, x, g;\nfor (; i++< 1e2;) {\n  vec3 p = vec3((FC.xy - .5 * r) / r.y * g, g - 3.);\n  p.zy *= rotate2D(.6);\n}",
+            "void main() {\n  vec3 d = vec3(gl_FragCoord.xy / r - .5, .8);\n  gl_FragColor = vec4(d, 1);\n}",
+            "o += vec4(snoise3D(vec3(FC.xy, t)));",
+        ] {
+            assert!(looks_like_glsl(source), "GLSL と見ていない: {source}");
+            assert_eq!(diagnose(source).dialect, Dialect::Glsl);
+        }
+    }
+
+    /// Processing と p5.js を GLSL と取り違えない。
+    ///
+    /// `float` や `void` は両方にある語なので手がかりにしていない。
+    #[test]
+    fn processing_and_p5_are_not_mistaken_for_glsl() {
+        for source in [
+            P5_SAMPLE,
+            "float x = 1;\nvoid draw() { circle(x, 0, 1); }",
+            "void setup() { size(400, 400, P3D); }\nvoid draw() { box(9); }",
+            include_str!("../sketches/spiral.pde"),
+            include_str!("../sketches/noise-field.pde"),
+        ] {
+            assert!(!looks_like_glsl(source), "GLSL と間違えている: {source}");
+        }
+    }
+
+    /// GLSL には未対応の構文を並べない。
+    ///
+    /// 挙げても「Processing にこの書き方は無い」ばかりになり、直す先を指せない。
+    #[test]
+    fn a_shader_gets_no_processing_findings() {
+        let diagnosis = diagnose("vec3 p = vec3(FC.xy, 1);\nfor (int i = 0; i < 9; i++) p *= 2.;\no.rgb = p;");
+        assert_eq!(diagnosis.dialect, Dialect::Glsl);
+        assert!(diagnosis.findings.is_empty(), "{:?}", diagnosis.findings);
+    }
+
     #[test]
     fn broken_input_does_not_panic() {
         for source in ["", "$", "⇒", "/* 閉じない", "日本語だけ"] {
             let _ = diagnose(source);
+            let _ = looks_like_glsl(source);
         }
     }
 

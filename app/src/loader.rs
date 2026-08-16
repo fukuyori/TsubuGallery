@@ -8,7 +8,7 @@ use tsubu_core::library;
 use tsubu_core::logging::{self, SketchRecord};
 use tsubu_processing_lite::dialect;
 use tsubu_processing_lite::examples::{DEFAULT_THUMBNAIL_FRAME, EXAMPLES};
-use tsubu_processing_lite::{BrokenSketch, LoadedSketch, SketchInfo, VmSketch};
+use tsubu_processing_lite::{BrokenSketch, Compiled, LoadedSketch, SketchInfo};
 
 /// 読み込み結果 1 件。
 pub struct LoadOutcome {
@@ -36,8 +36,8 @@ impl Source {
     ///
     /// サムネイルは目標フレームまで進めて撮るので、表示中の作品の状態を
     /// 進めてしまわないよう別インスタンスが要る。
-    pub fn instantiate(&self) -> Result<VmSketch, tsubu_processing_lite::CompileError> {
-        VmSketch::compile(&self.text, self.seed)
+    pub fn instantiate(&self) -> Result<Compiled, tsubu_processing_lite::CompileError> {
+        tsubu_processing_lite::compile_sketch(&self.text, self.seed)
     }
 }
 
@@ -69,14 +69,14 @@ pub fn load_library(paths: &DataPaths) -> Vec<LoadOutcome> {
             let source = Source { text: file.source, seed: seed_for(&file.id) };
 
             match source.instantiate() {
-                Ok(sketch) => {
+                Ok(compiled) => {
                     logging::sketch_loaded(
                         &info.id,
-                        Some(sketch.dialect().label()),
-                        sketch.instruction_count(),
+                        Some(compiled.dialect.label()),
+                        compiled.instructions,
                     );
                     LoadOutcome {
-                        sketch: LoadedSketch::new(info, Box::new(sketch)),
+                        sketch: LoadedSketch::new(info, compiled.sketch),
                         source,
                         error: None,
                     }

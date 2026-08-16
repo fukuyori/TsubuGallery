@@ -25,7 +25,19 @@ const MAX_WRAP_DEPTH: u32 = 8;
 ///
 /// 文の区切りで改行して字下げしたあと、まだ長すぎる行は括弧の中で折り返す。
 pub fn expand(source: &str) -> String {
+    if leave_alone(source) {
+        return source.to_string();
+    }
     wrap_long_lines(&lay_out(source))
+}
+
+/// 整形に手を出さないコードか。
+///
+/// つぶやき GLSL は別の言語なので、Processing の文法を当てにした整形を掛けると
+/// 壊れる。`#version` のようなプリプロセッサ行を字下げされるだけでも通らなく
+/// なる。読めないものは触らない。
+fn leave_alone(source: &str) -> bool {
+    crate::dialect::looks_like_glsl(source)
 }
 
 /// 文と括弧の対応から、改行と字下げを決める。折り返しはまだしない。
@@ -338,6 +350,9 @@ fn split_top_level(chars: &[char]) -> Vec<String> {
 ///
 /// 名前の付け替えはしない。意味を変えずに減らせるぶんだけを減らす。
 pub fn compress(source: &str) -> String {
+    if leave_alone(source) {
+        return source.to_string();
+    }
     let mut out = String::new();
     let mut previous = String::new();
     let mut pending_newline = false;
@@ -623,6 +638,14 @@ mod tests {
     use super::*;
     use crate::compiler::compile;
     use crate::parser::parse;
+
+    /// つぶやき GLSL には触らない。整形は Processing の文法を当てにしている。
+    #[test]
+    fn a_shader_is_left_exactly_as_it_is() {
+        let source = "float i, e;\nfor (; i++< 1e2;) {\n  vec3 p = vec3(FC.xy / r, 1);\n  e += length(p);\n}\no += e;\n";
+        assert_eq!(expand(source), source);
+        assert_eq!(compress(source), source);
+    }
 
     /// どちらの方言でもよいので Bytecode まで通す。
     ///

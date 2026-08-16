@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use crate::batch::{BatchRenderer, DEPTH_FORMAT, SAMPLE_COUNT, depth_state};
-use crate::draw::Graphics;
+use crate::draw::{Color, Graphics, ShaderPaint};
 use crate::texture::MsaaTarget;
 
 /// テクスチャを描画先いっぱいに貼るシェーダー。頂点バッファを持たず、
@@ -168,6 +168,140 @@ impl Blit {
     }
 }
 
+/// つぶやき GLSL を画面いっぱいに塗るパス。
+///
+/// 作品ごとにパイプラインを 1 本作って持ち続ける。作り直しは高いので、
+/// 同じ作品を見ているあいだは使い回す。
+struct ShaderStage {
+    pipeline_layout: wgpu::PipelineLayout,
+    /// `r` `m` `t` `f`。std140 で 24 バイトだが、16 の倍数に切り上げて確保する。
+    uniforms: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    /// 鍵はシェーダーと描画先の組み合わせ。描画先ごとに別のパイプラインが要る。
+    pipelines: HashMap<(u64, wgpu::TextureFormat, u32), wgpu::RenderPipeline>,
+}
+
+/// uniform ブロックの大きさ。`vec2 r; vec2 m; float t; float f;` を 16 の倍数へ。
+const SHADER_UNIFORM_BYTES: u64 = 32;
+
+impl ShaderStage {
+    fn new(device: &wgpu::Device) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tsubu.shader.layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tsubu.shader.pipeline_layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tsubu.shader.uniforms"),
+            size: SHADER_UNIFORM_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tsubu.shader.bind"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            }],
+        });
+
+        Self { pipeline_layout, uniforms, bind, pipelines: HashMap::new() }
+    }
+
+    /// 作品の WGSL からパイプラインを作る。すでにあれば何もしない。
+    fn ensure_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        paint: &ShaderPaint,
+        format: wgpu::TextureFormat,
+        samples: u32,
+    ) {
+        let layout = &self.pipeline_layout;
+        self.pipelines.entry((paint.key, format, samples)).or_insert_with(|| {
+            // 翻訳のときに naga で検証済みなので、ここで転ぶことはない。
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("tsubu.shader.module"),
+                source: wgpu::ShaderSource::Wgsl(paint.wgsl.as_ref().into()),
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("tsubu.shader.pipeline"),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some(crate::shader::VERTEX_ENTRY),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(crate::shader::FRAGMENT_ENTRY),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        // 画面ぜんぶを自分で塗る。混ぜる相手はいない。
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                // 立体は積まないので深さは触らない。
+                depth_stencil: Some(depth_state(false)),
+                multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
+                multiview_mask: None,
+                cache: None,
+            })
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pass: &mut wgpu::RenderPass<'_>,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        paint: &ShaderPaint,
+        resolution: [f32; 2],
+    ) {
+        // std140 の並び。vec2 が 2 つで 16 バイト、そのあとに float が 2 つ。
+        let values: [f32; 8] = [
+            resolution[0],
+            resolution[1],
+            paint.mouse[0],
+            paint.mouse[1],
+            paint.time,
+            paint.frame,
+            0.0,
+            0.0,
+        ];
+        queue.write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&values));
+
+        self.ensure_pipeline(device, paint, format, samples);
+        let Some(pipeline) = self.pipelines.get(&(paint.key, format, samples)) else { return };
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
 /// 交互に使う 2 枚のうちの 1 枚。
 struct Face {
     texture: wgpu::Texture,
@@ -180,6 +314,8 @@ pub struct Canvas {
     format: wgpu::TextureFormat,
     msaa: MsaaTarget,
     blit: Blit,
+    /// つぶやき GLSL 用。使う作品を開くまで作らない。
+    shader: Option<ShaderStage>,
     faces: Vec<Face>,
     /// 立体の前後を決めるためのバッファ。フレームごとに消す。
     depth: Option<wgpu::TextureView>,
@@ -196,6 +332,7 @@ impl Canvas {
             format,
             msaa: MsaaTarget::new(SAMPLE_COUNT),
             blit: Blit::new(device),
+            shader: None,
             faces: Vec::new(),
             depth: None,
             size: (0, 0),
@@ -246,17 +383,23 @@ impl Canvas {
         self.ensure(device, width, height);
 
         // 消す色が指定されていなければ前のフレームを残す。ただし 1 枚目だけは
-        // 残すものが無いので、方言ごとの下地で始める。
-        let clear = list.clear.or((!self.painted).then_some(g.default_background()));
+        // 残すものが無いので、方言ごとの下地で始める。GLSL 作品は全画素を
+        // 自分で塗るため、前のフレームを敷き直す必要が無い。
+        let clear = match &list.shader {
+            Some(_) => Some(Color::BLACK),
+            None => list.clear.or((!self.painted).then_some(g.default_background())),
+        };
 
-        batch.prepare(
-            device,
-            queue,
-            list,
-            [width as f32, height as f32],
-            self.format,
-            SAMPLE_COUNT,
-        );
+        if list.shader.is_none() {
+            batch.prepare(
+                device,
+                queue,
+                list,
+                [width as f32, height as f32],
+                self.format,
+                SAMPLE_COUNT,
+            );
+        }
 
         let back = 1 - self.front;
         let msaa_view = self.msaa.view(device, width, height, self.format).clone();
@@ -297,17 +440,33 @@ impl Canvas {
                 multiview_mask: None,
             });
 
-            if clear.is_none() {
-                self.blit.draw(
-                    device,
-                    &mut pass,
-                    self.format,
-                    SAMPLE_COUNT,
-                    true,
-                    &self.faces[self.front].bind,
-                );
+            match &list.shader {
+                Some(paint) => {
+                    let stage = self.shader.get_or_insert_with(|| ShaderStage::new(device));
+                    stage.draw(
+                        device,
+                        queue,
+                        &mut pass,
+                        self.format,
+                        SAMPLE_COUNT,
+                        paint,
+                        [width as f32, height as f32],
+                    );
+                }
+                None => {
+                    if clear.is_none() {
+                        self.blit.draw(
+                            device,
+                            &mut pass,
+                            self.format,
+                            SAMPLE_COUNT,
+                            true,
+                            &self.faces[self.front].bind,
+                        );
+                    }
+                    batch.render(&mut pass);
+                }
             }
-            batch.render(&mut pass);
         }
 
         self.front = back;

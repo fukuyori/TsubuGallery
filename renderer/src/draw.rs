@@ -475,6 +475,24 @@ const BEHIND_THE_EYE: [f32; 3] = [0.0, 0.0, 2.0];
 /// 1 つの形に貯められる頂点の上限。
 const MAX_SHAPE_POINTS: usize = 20_000;
 
+/// GLSL 作品が 1 フレーム分の画面を塗るための指定。
+///
+/// つぶやき GLSL は図形を積まない。画面いっぱいの三角形 1 枚をフラグメント
+/// シェーダーで塗るだけなので、三角形の列とは別の道を通す。
+#[derive(Clone, Debug)]
+pub struct ShaderPaint {
+    /// 翻訳済みの WGSL ([`crate::shader::compile`])。作品ごとに 1 度だけ作る。
+    pub wgsl: std::sync::Arc<str>,
+    /// パイプラインを使い回すための鍵。同じ作品なら毎フレーム同じ値。
+    pub key: u64,
+    /// `t`。実行開始からの経過秒。
+    pub time: f32,
+    /// `f`。フレーム番号。
+    pub frame: f32,
+    /// `m`。マウス位置を 0..1 で。
+    pub mouse: [f32; 2],
+}
+
 /// 1 フレーム分の描画コマンドを三角形へ展開したもの。
 #[derive(Default, Debug)]
 pub struct DrawList {
@@ -487,11 +505,13 @@ pub struct DrawList {
     pub indices: Vec<u32>,
     /// 合成方法ごとの区間。ふつうは 1 つだけ。
     pub batches: Vec<Batch>,
+    /// GLSL 作品のフラグメントシェーダー。設定されていれば図形の代わりに使う。
+    pub shader: Option<ShaderPaint>,
 }
 
 impl DrawList {
     pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
+        self.indices.is_empty() && self.shader.is_none()
     }
 
     /// 確保済みバッファを保持したまま内容だけ捨てる。
@@ -500,6 +520,7 @@ impl DrawList {
         self.vertices.clear();
         self.indices.clear();
         self.batches.clear();
+        self.shader = None;
     }
 }
 
@@ -743,6 +764,14 @@ impl Graphics {
 
     pub fn draw_list(&self) -> &DrawList {
         &self.list
+    }
+
+    /// このフレームをフラグメントシェーダーで塗る (つぶやき GLSL)。
+    ///
+    /// 図形は積まれないので、[`Graphics`] の塗りや線の設定は効かない。
+    /// 毎フレーム呼び直す。
+    pub fn paint_with_shader(&mut self, paint: ShaderPaint) {
+        self.list.shader = Some(paint);
     }
 
     /// スケッチを切り替えるときに呼ぶ。スタイルまで含めて初期状態へ戻す。

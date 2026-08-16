@@ -4,6 +4,7 @@
   "app.link_failed": "リンクを開けませんでした",
   "app.lock_failed": "多重起動を防げませんでした。二重に開かないよう注意してください。",
   "common.cancel": "キャンセル",
+  "dialect.glsl": "つぶやき GLSL として読みました。ただし、フラグメントシェーダーとして受け付けられない書き方があります。",
   "dialect.ignored_api": "受け付けるが、まだ効かない API (blendMode)",
   "dialect.line": "行",
   "dialect.no_3d": "3D のうち、視点の指定と立方体・球以外の立体はまだ",

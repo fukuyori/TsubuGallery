@@ -303,3 +303,87 @@ fn lights_shade_the_faces_differently() {
         "面の向きで明るさが変わりません: {front} と {side}"
     );
 }
+
+/// つぶやき GLSL が本当に GPU で塗られていることを、読み戻して確かめる。
+///
+/// 翻訳が通っただけでは分からない。パイプラインを組んで描くところまで通し、
+/// uniform の `r` と `t` が届いているかを画素で見る。
+#[test]
+fn a_tweet_sized_shader_paints_the_whole_frame() {
+    let Some((device, queue)) = gpu() else {
+        eprintln!("GPU が無いので飛ばします");
+        return;
+    };
+    let mut batch = BatchRenderer::new(&device);
+    let mut capturer = Capturer::new();
+    let mut g = Graphics::new();
+
+    // 左下を原点に、x は横位置、y は縦位置、青は t で決まる。
+    let wgsl = tsubu_renderer::shader::compile("o = vec4(FC.xy / r, t, 1.);").expect("通る");
+    let paint = tsubu_renderer::ShaderPaint {
+        wgsl: wgsl.into(),
+        key: 1,
+        time: 0.5,
+        frame: 0.0,
+        mouse: [0.0, 0.0],
+    };
+
+    capturer.begin();
+    g.begin_frame(W as f32, H as f32);
+    g.paint_with_shader(paint);
+    capturer.draw(&device, &queue, &mut batch, &g, W, H);
+    let image = capturer.read(&device, &queue, W, H).expect("読み戻せる");
+
+    // 図形を 1 つも積んでいないのに、四隅まで塗られている。
+    let (left, _, _) = pixel(&image, 2, 32);
+    let (right, _, _) = pixel(&image, 61, 32);
+    assert!(left < 40 && right > 215, "FC.x が横に伸びていない: {left} {right}");
+
+    // GLSL の gl_FragCoord は左下原点。上のほうが明るくなる。
+    let (_, top, _) = pixel(&image, 32, 2);
+    let (_, bottom, _) = pixel(&image, 32, 61);
+    assert!(top > 215 && bottom < 40, "上下が逆になっています: {top} {bottom}");
+
+    // t は uniform で届く。0.5 なので青は中くらい。
+    let (_, _, blue) = pixel(&image, 32, 32);
+    assert!((100..=155).contains(&blue), "t が届いていません: {blue}");
+}
+
+/// 同じキャンバスで GLSL と図形を行き来しても壊れない。
+///
+/// Viewer は 1 つのキャンバスを全作品で使い回す。GLSL の作品から Processing の
+/// 作品へ切り替えたときに、前のシェーダーが残っていては困る。
+#[test]
+fn switching_from_a_shader_back_to_shapes_works() {
+    let Some((device, queue)) = gpu() else {
+        eprintln!("GPU が無いので飛ばします");
+        return;
+    };
+    let mut batch = BatchRenderer::new(&device);
+    let mut capturer = Capturer::new();
+    let mut g = Graphics::new();
+
+    let wgsl = tsubu_renderer::shader::compile("o = vec4(1, 0, 0, 1);").expect("通る");
+    capturer.begin();
+    g.begin_frame(W as f32, H as f32);
+    g.paint_with_shader(tsubu_renderer::ShaderPaint {
+        wgsl: wgsl.into(),
+        key: 2,
+        time: 0.0,
+        frame: 0.0,
+        mouse: [0.0, 0.0],
+    });
+    capturer.draw(&device, &queue, &mut batch, &g, W, H);
+    let image = capturer.read(&device, &queue, W, H).expect("読み戻せる");
+    assert!(pixel(&image, 32, 32).0 > 200, "シェーダーが赤で塗っていない");
+
+    // 次のフレームはシェーダー無し。begin_frame で消えている。
+    g.begin_frame(W as f32, H as f32);
+    g.background(0.0);
+    g.no_stroke();
+    g.fill_rgb(0.0, 255.0, 0.0);
+    g.rect(0.0, 0.0, 64.0, 64.0);
+    capturer.draw(&device, &queue, &mut batch, &g, W, H);
+    let image = capturer.read(&device, &queue, W, H).expect("読み戻せる");
+    assert!(pixel(&image, 32, 32).1 > 200, "図形へ戻れていない: {:?}", pixel(&image, 32, 32));
+}
