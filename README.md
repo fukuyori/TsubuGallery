@@ -67,11 +67,12 @@ appear in the gallery. Drop more `.pde` files there to add your own.
 | `→` / `PageDown` | Next sketch |
 | `←` / `PageUp` | Previous sketch |
 | `Space` | Pause / resume |
+| `↑` / `↓` | Playback speed up / down (0.25× – 4×) |
 | `P` | Start / stop the slideshow |
 | `R` | Random |
 | `T` | Update the thumbnail |
 | `E` | Edit this sketch |
-| `I` | Info overlay (author / link / fps / **CPU load** / sketch time / instructions and triangles per frame / frameCount / switch time) |
+| `I` | Info overlay (author / link / fps / playback speed / sketch clock / **CPU load** / sketch time / instructions and triangles per frame / frameCount / switch time) |
 | `O` | Open the link in a browser |
 | `F` / `F11` | Fullscreen |
 | `L` | Switch the UI language |
@@ -361,7 +362,7 @@ Changes take effect immediately and are written to the `setting` table in
 |---|---|
 | General | Language / theme (dark, light) / start screen |
 | Gallery | View mode / card size / sort order / show titles |
-| Viewer | Open fullscreen / **canvas fit** / frame rate / next-sketch order / preload neighbours / slideshow interval / screensaver |
+| Viewer | Open fullscreen / **canvas fit** / frame rate / playback speed / next-sketch order / preload neighbours / slideshow interval / screensaver |
 | Thumbnail | Capture frame / image quality |
 | Runtime | Per-frame instruction limit |
 
@@ -385,10 +386,33 @@ to the default, so hand-editing the table cannot stop the app from starting.
 | Sketch time | How long `draw()` took: the VM plus building the geometry |
 | Instructions/frame | Bytecode instructions the sketch executed. The per-frame budget (Settings → Runtime) is measured in these |
 | Triangles/frame | What the GPU was handed |
+| Sketch clock | Seconds elapsed as the sketch sees them, accumulated at the playback speed. This is GLSL's `t` |
 
 Together they say where a slow sketch is slow. A high instruction count with few
 triangles is the language being asked to do too much; the reverse is the
 renderer.
+
+### Playback speed
+
+`↑` / `↓` steps through five settings from 0.25× to 4×. It is also in Settings,
+and the choice is saved.
+
+It is not the frame rate setting (30 / 60 fps).
+
+| | What it decides |
+|---|---|
+| Frame rate | How many times per second the frame is drawn |
+| Playback speed | How many real seconds one sketch second takes |
+
+The viewer accumulates each sketch's clock itself rather than reading the wall
+clock, so:
+
+- `Space` freezes a GLSL sketch's `t` too
+- `R`, or saving an edit, restarts it from zero
+- it does not run on while you are looking at another sketch
+
+Thumbnails are always captured at 1×, regardless of the setting, so the same
+sketch always yields the same image (design §7.1).
 
 ### View modes (design §6.2)
 

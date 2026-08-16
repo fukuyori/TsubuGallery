@@ -7,7 +7,7 @@ use tsubu_core::Locales;
 use tsubu_core::locale::LanguagePreference;
 use tsubu_core::settings::{
     CAPTURE_FRAME_RANGE, CanvasFit, CardSize, Choice, ExecutionBudget, FrameRate, ImageQuality,
-    Navigation,
+    Navigation, PlaybackSpeed,
     SLIDESHOW_INTERVAL_RANGE, ScreenSaver, Settings, SortOrder, StartScreen, Theme, ViewMode,
 };
 
@@ -118,6 +118,13 @@ pub fn build(root: &mut egui::Ui, state: &mut SettingsUi<'_>) -> Vec<SettingsAct
                     &t("settings.frame_rate"),
                     &mut state.settings.frame_rate,
                 );
+                choice_row::<PlaybackSpeed>(
+                    ui,
+                    state.locales,
+                    &t("settings.playback_speed"),
+                    &mut state.settings.playback_speed,
+                );
+                note(ui, &t("settings.playback_speed.note"));
                 choice_row::<Navigation>(
                     ui,
                     state.locales,
@@ -384,6 +391,8 @@ mod tests {
             "settings.canvas_fit",
             "settings.canvas_fit.note",
             "settings.frame_rate",
+            "settings.playback_speed",
+            "settings.playback_speed.note",
             "settings.navigation",
             "settings.preload",
             "settings.preload.note",

@@ -3,7 +3,7 @@
 //! 全作品のインスタンスを常駐させ、切り替えではプロセスもランタイムも作り直さない。
 //! 各作品はそれぞれの `frameCount` を保持するので、戻ってきたときも続きから動く。
 
-use tsubu_core::settings::{FrameRate, Navigation, Settings};
+use tsubu_core::settings::{FrameRate, Navigation, PlaybackSpeed, Settings};
 use std::time::Instant;
 
 use tsubu_processing_lite::LoadedSketch;
@@ -25,6 +25,8 @@ fn smooth(previous: f32, now: f32) -> f32 {
 pub struct Stats {
     pub fps: f32,
     pub frame_count: u64,
+    /// 作品にとっての経過秒。再生速度をかけて積んだもので、GLSL の `t`。
+    pub sketch_time: f32,
     /// 最後の作品切り替えに要した時間 (ms)。
     pub last_switch_ms: f32,
     /// 作品を 1 フレーム進めるのにかかった時間 (ms)。VM と図形の組み立て。
@@ -67,7 +69,12 @@ pub struct Viewer {
     overflowed: Vec<bool>,
 
     paused: bool,
-    started: Instant,
+    /// 作品ごとの経過秒。壁時計ではなく、再生速度をかけて積んだもの。
+    ///
+    /// GLSL 作品の `t` はここから来る。壁時計をそのまま渡すと、一時停止しても
+    /// 動き続け、作り直しても続きから始まってしまう。frameCount と同じく
+    /// 作品ごとに持ち、同じ場面で止めたり戻したりできるようにする。
+    clocks: Vec<f32>,
     last_frame: Instant,
     fps: f32,
     last_switch_ms: f32,
@@ -82,6 +89,8 @@ pub struct Viewer {
 
     /// 設計書 §24 の Viewer / Runtime 設定。
     frame_rate: FrameRate,
+    /// 作品の時計にかける倍率。フレームレートとは別物 (設計書 §24)。
+    speed: PlaybackSpeed,
     navigation: Navigation,
     preload: bool,
     /// 目標フレームレートに合わせるため、次に進めてよくなる時刻。
@@ -92,6 +101,7 @@ impl Viewer {
     /// 作品 0 本でも作れる。すべて削除された Gallery でも成立させるため。
     pub fn new(sketches: Vec<LoadedSketch>) -> Self {
         let frame_counts = vec![0; sketches.len()];
+        let clocks = vec![0.0; sketches.len()];
         let states = vec![None; sketches.len()];
         let leans_on_the_canvas = vec![false; sketches.len()];
         let overflowed = vec![false; sketches.len()];
@@ -106,7 +116,7 @@ impl Viewer {
             graphics: Graphics::new(),
             warmup: Graphics::new(),
             paused: false,
-            started: Instant::now(),
+            clocks,
             last_frame: Instant::now(),
             fps: 0.0,
             last_switch_ms: 0.0,
@@ -117,6 +127,7 @@ impl Viewer {
             width: 1.0,
             height: 1.0,
             frame_rate: FrameRate::default(),
+            speed: PlaybackSpeed::default(),
             navigation: Navigation::default(),
             preload: true,
             next_step: Instant::now(),
@@ -151,6 +162,7 @@ impl Viewer {
     /// 設定を反映する (設計書 §24)。
     pub fn apply_settings(&mut self, settings: &Settings) {
         self.frame_rate = settings.frame_rate;
+        self.speed = settings.playback_speed;
         self.navigation = settings.navigation;
         self.preload = settings.preload;
         // 正方形の作品を横長の画面へ出すときの当てはめ方。
@@ -203,6 +215,7 @@ impl Viewer {
         if let Some(slot) = self.sketches.get_mut(index) {
             *slot = sketch;
             self.frame_counts[index] = 0;
+            self.clocks[index] = 0.0;
             self.states[index] = None;
             self.leans_on_the_canvas[index] = false;
             self.overflowed[index] = false;
@@ -216,6 +229,7 @@ impl Viewer {
         let index = index.min(self.sketches.len());
         self.sketches.insert(index, sketch);
         self.frame_counts.insert(index, 0);
+        self.clocks.insert(index, 0.0);
         self.states.insert(index, None);
         self.leans_on_the_canvas.insert(index, false);
         self.overflowed.insert(index, false);
@@ -231,6 +245,7 @@ impl Viewer {
         }
         self.sketches.remove(index);
         self.frame_counts.remove(index);
+        self.clocks.remove(index);
         self.states.remove(index);
         self.leans_on_the_canvas.remove(index);
         self.overflowed.remove(index);
@@ -248,6 +263,11 @@ impl Viewer {
         self.paused
     }
 
+    /// 表示中の作品にとっての経過秒。GLSL の `t` に渡っている値。
+    pub fn sketch_time(&self) -> f32 {
+        self.clocks.get(self.current).copied().unwrap_or(0.0)
+    }
+
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
     }
@@ -256,6 +276,7 @@ impl Viewer {
         Stats {
             fps: self.fps,
             frame_count: self.frame_counts.get(self.current).copied().unwrap_or(0),
+            sketch_time: self.sketch_time(),
             last_switch_ms: self.last_switch_ms,
             sketch_ms: self.sketch_ms,
             frame_ms: self.frame_ms,
@@ -320,8 +341,10 @@ impl Viewer {
         // 作品を進めるかどうかだけをここで決める (設計書 §24 の Frame Rate)。
         let due = now >= self.next_step;
         if due {
-            // 遅れを引きずらないよう、次の締め切りは今から数える。
-            self.next_step = now + self.frame_rate.interval();
+            // 遅れを引きずらないよう、次の締め切りは今から数える。倍率で割るのは
+            // frameCount 基準の作品も同じ速さで動かすため。2× なら締め切りが
+            // 半分になり、1 秒あたり倍のフレームを進める。
+            self.next_step = now + self.frame_rate.interval().div_f32(self.speed.multiplier());
         }
         // `noLoop()` を呼んだ作品はフレームを進めない。進めると、乱数を使う
         // 作品が毎フレーム違う絵になってちらつく。
@@ -329,8 +352,13 @@ impl Viewer {
         // 同じところで溢れるだけで、そのあいだ画面は止まったままになる。
         let stopped = self.overflowed[self.current];
         let looping = self.graphics.is_looping();
-        if !self.paused && due && looping && !stopped {
-            self.frame_counts[self.current] += 1;
+        if !self.paused && looping && !stopped {
+            // 時計は毎フレーム進める。frameCount は目標フレームレートの
+            // 刻みだが、GLSL の `t` は連続なので、刻むとかくつく。
+            self.clocks[self.current] += dt * self.speed.multiplier();
+            if due {
+                self.frame_counts[self.current] += 1;
+            }
         }
         if stopped {
             return Some(&self.graphics);
@@ -338,7 +366,7 @@ impl Viewer {
 
         self.graphics.begin_frame(width, height);
         self.graphics.frame_count = self.frame_counts[self.current];
-        self.graphics.time = self.started.elapsed().as_secs_f32();
+        self.graphics.time = self.clocks[self.current];
         let t0 = Instant::now();
         self.sketches[self.current].step(&mut self.graphics);
         self.sketch_ms = smooth(self.sketch_ms, t0.elapsed().as_secs_f32() * 1000.0);
@@ -360,6 +388,7 @@ impl Viewer {
         if let Some(sketch) = self.sketches.get_mut(self.current) {
             sketch.restart();
             self.frame_counts[self.current] = 0;
+            self.clocks[self.current] = 0.0;
             self.states[self.current] = None;
             self.leans_on_the_canvas[self.current] = false;
             // 動かし直せば、また最初のフレームから試させる。作品を直したあとの
@@ -505,6 +534,60 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// 何フレームか進めて、作品の時計を動かす。
+    fn run(v: &mut Viewer, frames: usize) {
+        for _ in 0..frames {
+            v.render_frame(64.0, 64.0);
+        }
+    }
+
+    /// 一時停止したら作品の時計も止まる。
+    ///
+    /// GLSL 作品の `t` はここから来る。壁時計のままだと、Space を押しても
+    /// 絵が動き続ける。
+    #[test]
+    fn pausing_freezes_the_clock() {
+        let mut v = viewer_of(2);
+        run(&mut v, 8);
+        assert!(v.sketch_time() > 0.0, "動いていない");
+
+        v.toggle_pause();
+        run(&mut v, 2);
+        let stopped_at = v.sketch_time();
+        run(&mut v, 8);
+        assert_eq!(v.sketch_time(), stopped_at, "止めたのに進んでいる");
+
+        v.toggle_pause();
+        run(&mut v, 8);
+        assert!(v.sketch_time() > stopped_at, "再開しても止まったまま");
+    }
+
+    /// 動かし直したら時計も 0 から。
+    #[test]
+    fn restarting_puts_the_clock_back_to_zero() {
+        let mut v = viewer_of(2);
+        run(&mut v, 8);
+        assert!(v.sketch_time() > 0.0);
+        v.restart_current();
+        assert_eq!(v.sketch_time(), 0.0);
+    }
+
+    /// 時計は作品ごと。別の作品を見ているあいだは進まない。
+    #[test]
+    fn each_sketch_keeps_its_own_clock() {
+        let mut v = viewer_of(2);
+        run(&mut v, 8);
+        let first = v.sketch_time();
+        assert!(first > 0.0);
+
+        v.switch_to(1);
+        assert_eq!(v.sketch_time(), 0.0, "2 本目は 0 から始まる");
+        run(&mut v, 8);
+
+        v.switch_to(0);
+        assert_eq!(v.sketch_time(), first, "見ていないあいだに進んでいる");
     }
 
     /// 絞り込んだ結果がそのまま再生範囲になる (設計書 §27)。

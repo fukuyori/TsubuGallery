@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tsubu_core::repository::{self, CompileStatus, Repository, SketchMeta};
-use tsubu_core::settings::{Choice, Settings, StartScreen, ViewMode};
+use tsubu_core::settings::{Choice, PlaybackSpeed, Settings, StartScreen, ViewMode};
 use tsubu_core::{DataPaths, InstanceLock, LanguagePreference, Locales, LockError};
 use tsubu_gallery::model::{GalleryItem, SketchStatus, ThumbnailState};
 use tsubu_gallery::{GalleryView, Move};
@@ -424,6 +424,19 @@ impl App {
     /// 表示方式を順に切り替える (設計書 §6.2)。
     ///
     /// 設定画面からも変えられるが、見比べたいものなので一覧から直接切り替える。
+    /// 再生速度を 1 段変える。設定画面で選ぶのと同じもので、保存もされる。
+    ///
+    /// 見ている最中に「もっとゆっくり」と思ったときに設定画面まで行かせない。
+    fn change_speed(&mut self, step: fn(PlaybackSpeed) -> PlaybackSpeed) {
+        let next = step(self.settings.playback_speed);
+        if next == self.settings.playback_speed {
+            return;
+        }
+        self.settings.playback_speed = next;
+        log::debug!("再生速度を {next}× にしました");
+        self.apply_settings();
+    }
+
     fn cycle_view_mode(&mut self) {
         let all = <ViewMode as Choice>::ALL;
         let next = all
@@ -1140,6 +1153,10 @@ impl App {
                 self.advance(-1);
             }
             KeyCode::Space => self.viewer.toggle_pause(),
+            // ↑↓ にしているのは配列に依らないから。`[` `]` は JIS 配列だと
+            // 物理位置がずれ、刻印と逆のキーを押すことになる。
+            KeyCode::ArrowUp => self.change_speed(PlaybackSpeed::faster),
+            KeyCode::ArrowDown => self.change_speed(PlaybackSpeed::slower),
             KeyCode::KeyR => {
                 self.viewer.random(&self.playlist());
                 self.gallery.select(self.viewer.current_index());
@@ -1439,6 +1456,7 @@ impl App {
                 index: self.viewer.current_index(),
                 total: self.viewer.len(),
                 paused: self.viewer.is_paused(),
+                speed: settings.playback_speed,
                 stats: self.viewer.stats(),
                 alpha: ui.overlay_alpha(),
                 show_info: self.show_info,

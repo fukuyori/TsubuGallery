@@ -4,6 +4,7 @@
 //! 情報表示 (`I`) だけは明示トグルなので自動非表示の対象外。
 
 use tsubu_core::Locales;
+use tsubu_core::settings::{Choice, PlaybackSpeed};
 
 use crate::ui::panel;
 use crate::viewer::Stats;
@@ -13,6 +14,8 @@ pub struct ViewerOverlay<'a> {
     pub index: usize,
     pub total: usize,
     pub paused: bool,
+    /// 作品の時計にかける倍率。等倍でないときだけ画面に出す。
+    pub speed: PlaybackSpeed,
     pub stats: Stats,
     /// 0.0 なら操作系オーバーレイを描かない。
     pub alpha: f32,
@@ -94,6 +97,12 @@ fn title_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) 
             panel(ui, |ui| {
                 ui.label(egui::RichText::new(info.title).size(22.0).strong().color(fade));
                 let mut sub = format!("{} / {}", info.index + 1, info.total);
+                // 等倍でないことは絵からは読み取りにくい。[ / ] を押した直後に
+                // ここが出るので、何倍になったかが分かる。
+                if info.speed != PlaybackSpeed::Normal {
+                    sub.push_str("  ·  ");
+                    sub.push_str(&format!("{}×", info.speed.key()));
+                }
                 if info.slideshow {
                     // 自動で絵が変わる理由が分かるようにする。
                     sub.push_str("  ·  ");
@@ -124,6 +133,7 @@ fn hint_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
                         ("←", locales.t("viewer.previous")),
                         ("→", locales.t("viewer.next")),
                         ("Space", pause_label),
+                        ("↑↓", locales.t("viewer.speed")),
                         ("P", locales.t("viewer.slideshow")),
                         ("R", locales.t("viewer.random")),
                         ("T", locales.t("viewer.update_thumbnail")),
@@ -183,7 +193,12 @@ fn info_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
                             row(locales.t("viewer.stat.dialect"), dialect.to_string());
                         }
                         row(locales.t("viewer.stat.frame_rate"), format!("{:.1} fps", info.stats.fps));
+                        row(locales.t("viewer.speed"), format!("{}×", info.speed.key()));
                         row(locales.t("viewer.stat.frame"), info.stats.frame_count.to_string());
+                        row(
+                            locales.t("viewer.stat.sketch_clock"),
+                            format!("{:.2} s", info.stats.sketch_time),
+                        );
                         // 仕事の時間をフレームの間隔で割ったもの。1 に近いほど
                         // 余裕が無く、超えると目標のフレームレートに届かない。
                         row(

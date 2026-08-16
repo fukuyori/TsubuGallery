@@ -130,6 +130,17 @@ choice!(
 );
 
 choice!(
+    /// 作品の時計を何倍で進めるか。
+    ///
+    /// フレームレートとは別物。フレームレートは「1 秒に何回描くか」で、こちらは
+    /// 「作品にとっての 1 秒が実時間の何秒か」。速い作品をゆっくり眺めたり、
+    /// 動きの遅い作品を早送りしたりするためのもの。
+    PlaybackSpeed, "settings.playback_speed",
+    { Quarter => "0.25", Half => "0.5", Normal => "1", Double => "2", Quadruple => "4" },
+    default = Normal
+);
+
+choice!(
     /// 無操作から自動再生を始めるまでの時間 (設計書 §27 のスクリーンセーバーモード)。
     ScreenSaver, "settings.screensaver",
     { Off => "off", After1 => "1", After3 => "3", After5 => "5", After10 => "10" },
@@ -211,6 +222,36 @@ impl FrameRate {
     }
 }
 
+impl PlaybackSpeed {
+    /// 作品の時計にかける倍率。
+    pub fn multiplier(self) -> f32 {
+        match self {
+            PlaybackSpeed::Quarter => 0.25,
+            PlaybackSpeed::Half => 0.5,
+            PlaybackSpeed::Normal => 1.0,
+            PlaybackSpeed::Double => 2.0,
+            PlaybackSpeed::Quadruple => 4.0,
+        }
+    }
+
+    /// 1 段速いほう。いちばん速ければそのまま。
+    pub fn faster(self) -> Self {
+        Self::step(self, 1)
+    }
+
+    /// 1 段遅いほう。いちばん遅ければそのまま。
+    pub fn slower(self) -> Self {
+        Self::step(self, -1)
+    }
+
+    /// 端で止める。巡回させると、4× の次に 0.25× が来て見失う。
+    fn step(self, by: isize) -> Self {
+        let at = Self::ALL.iter().position(|v| *v == self).unwrap_or(0) as isize;
+        let next = (at + by).clamp(0, Self::ALL.len() as isize - 1) as usize;
+        Self::ALL[next]
+    }
+}
+
 /// サムネイルを撮るフレーム番号の範囲。
 pub const CAPTURE_FRAME_RANGE: std::ops::RangeInclusive<u64> = 1..=600;
 
@@ -233,6 +274,8 @@ pub struct Settings {
     /// キャンバスを画面へ収めるか、埋めるか。
     pub canvas_fit: CanvasFit,
     pub frame_rate: FrameRate,
+    /// 作品の時計にかける倍率。フレームレートとは別に効く。
+    pub playback_speed: PlaybackSpeed,
     pub navigation: Navigation,
     pub preload: bool,
     /// スライドショーで次へ送るまでの秒数 (設計書 §27)。
@@ -259,6 +302,7 @@ impl Default for Settings {
             fullscreen: false,
             canvas_fit: CanvasFit::default(),
             frame_rate: FrameRate::default(),
+            playback_speed: PlaybackSpeed::default(),
             navigation: Navigation::default(),
             preload: true,
             slideshow_interval: 10,
@@ -293,6 +337,7 @@ impl Settings {
             ("fullscreen", bool_key(self.fullscreen).into()),
             ("canvas_fit", self.canvas_fit.key().into()),
             ("frame_rate", self.frame_rate.key().into()),
+            ("playback_speed", self.playback_speed.key().into()),
             ("navigation", self.navigation.key().into()),
             ("preload", bool_key(self.preload).into()),
             ("slideshow_interval", self.slideshow_interval.to_string()),
@@ -324,6 +369,7 @@ impl Settings {
                 "fullscreen" => set_bool(&mut s.fullscreen, value),
                 "canvas_fit" => set(&mut s.canvas_fit, value),
                 "frame_rate" => set(&mut s.frame_rate, value),
+                "playback_speed" => set(&mut s.playback_speed, value),
                 "navigation" => set(&mut s.navigation, value),
                 "preload" => set_bool(&mut s.preload, value),
                 "slideshow_interval" => {
@@ -394,6 +440,7 @@ mod tests {
             fullscreen: true,
             canvas_fit: CanvasFit::Cover,
             frame_rate: FrameRate::Fps30,
+            playback_speed: PlaybackSpeed::Double,
             navigation: Navigation::Random,
             preload: false,
             slideshow_interval: 45,
@@ -476,6 +523,31 @@ mod tests {
         check::<ImageQuality>();
         check::<ExecutionBudget>();
         check::<FrameRate>();
+        check::<PlaybackSpeed>();
         check::<SortOrder>();
+    }
+
+    /// 倍率は表示している数字のとおり。
+    #[test]
+    fn the_speed_is_the_number_on_the_label() {
+        for speed in <PlaybackSpeed as Choice>::ALL {
+            let shown: f32 = speed.key().parse().expect("数字のキー");
+            assert_eq!(speed.multiplier(), shown);
+        }
+    }
+
+    /// 端で止まる。巡回すると 4× の次に 0.25× が来て、押しすぎに気付けない。
+    #[test]
+    fn stepping_the_speed_stops_at_the_ends() {
+        let mut speed = PlaybackSpeed::Normal;
+        for _ in 0..5 {
+            speed = speed.faster();
+        }
+        assert_eq!(speed, PlaybackSpeed::Quadruple);
+        for _ in 0..9 {
+            speed = speed.slower();
+        }
+        assert_eq!(speed, PlaybackSpeed::Quarter);
+        assert_eq!(speed.slower(), PlaybackSpeed::Quarter);
     }
 }
