@@ -14,6 +14,9 @@
 #ifndef SourceExe
   #error SourceExe が未定義。build-installer.ps1 から実行すること。
 #endif
+#ifndef OutputBaseFilename
+  #error OutputBaseFilename が未定義。build-installer.ps1 から実行すること。
+#endif
 
 #define AppName "TsubuGallery"
 #define AppExe "tsubugallery.exe"
@@ -52,7 +55,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 
 OutputDir={#OutputDir}
-OutputBaseFilename={#AppName}-{#AppVersion}-x64-setup
+; 出す名前は build-installer.ps1 が決める。あちらは同じ名前のファイルが
+; できたか確認するので、二重に書くと食い違う。
+OutputBaseFilename={#OutputBaseFilename}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

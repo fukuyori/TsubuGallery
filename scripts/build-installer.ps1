@@ -101,10 +101,14 @@ if (-not $iscc) { throw 'ISCC.exe が見つかりません。Inno Setup 6 を入
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-& $iscc "/DAppVersion=$Version" "/DSourceExe=$Exe" "/DOutputDir=$OutputDir" $Script
+# 名前に OS を入れておく。ダウンロードフォルダに並んだときも、リリースページに
+# 並んだときも、どの環境のものか名前だけで分かるようにする。
+$BaseName = "TsubuGallery-$Version-windows-x64"
+
+& $iscc "/DAppVersion=$Version" "/DSourceExe=$Exe" "/DOutputDir=$OutputDir" "/DOutputBaseFilename=$BaseName" $Script
 if ($LASTEXITCODE -ne 0) { throw "ISCC が失敗しました (exit $LASTEXITCODE)" }
 
-$Setup = Join-Path $OutputDir "TsubuGallery-$Version-x64-setup.exe"
+$Setup = Join-Path $OutputDir "$BaseName.exe"
 if (-not (Test-Path $Setup)) { throw "$Setup が作られていません。" }
 
 # インストーラ自身にも署名する。SmartScreen が見るのはこちら。
