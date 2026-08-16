@@ -1134,3 +1134,41 @@ cargo clippy --workspace --all-targets
 egui の画面 (Gallery / Editor) はウィンドウを開かずにテストしている。合成した
 `RawInput` を流して 1 フレーム組み立て、実際に頂点が出ているか、ショートカットが
 繋がっているかを確認する (`app/src/editor_ui.rs`, `app/src/gallery_ui.rs` のテスト)。
+
+### アイコン
+
+`scripts/make-icon.py` が `app/assets/icon.ico` と `icon.png` を描く。絵そのもの
+ではなく描く手順を置いているので、色や粒の数を変えたいときは元絵を探さずに
+このスクリプトを直す。
+
+```sh
+python scripts/make-icon.py
+```
+
+`.ico` は `app/build.rs` が `winresource` 経由で exe へ埋める。同時に版情報
+(ProductName / FileVersion) も入るので、プロパティ画面にも出る。`.png` は winit
+のウィンドウアイコンとして `include_bytes!` で取り込む。Windows は exe に埋めた
+ほうを使うが、Linux では渡さないと既定の絵になる。
+
+### Windows インストーラ
+
+```powershell
+powershell -File scripts\build-installer.ps1
+```
+
+release ビルド → (証明書を渡せば) 署名 → Inno Setup 6、の順に流して
+`target\installer\` へ出す。版番号は `Cargo.toml` から読むので渡さなくてよい。
+
+```powershell
+powershell -File scripts\build-installer.ps1 -CertPath cert.pfx -CertPassword $env:CERT_PASSWORD
+```
+
+配る中身は `tsubugallery.exe` 1 つだけ。翻訳も同梱作品も SQLite も exe へ
+取り込んであり、フォントは OS のものを借りるので添えるファイルは無い。唯一の
+外部依存は `VCRUNTIME140.dll` で、無い環境ではインストーラが先に警告を出す。
+
+既定は管理者不要のユーザー単位インストール。アンインストール時、`%APPDATA%` の
+作品・設定を消すかはその場で訊く (既定は「いいえ」)。
+
+`scripts/*.ps1` と `*.iss` は **UTF-8 BOM 付き**。BOM を落とすと Windows
+PowerShell 5.1 も ISCC も日本語を Shift_JIS と誤読して、構文エラーで止まる。

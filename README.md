@@ -1213,3 +1213,46 @@ The egui screens (gallery, editor) are tested without opening a window:
 synthesised `RawInput` is fed in, one frame is built, and the test checks that
 vertices actually come out and that the shortcuts are wired
 (see the tests in `app/src/editor_ui.rs` and `app/src/gallery_ui.rs`).
+
+### The icon
+
+`scripts/make-icon.py` draws `app/assets/icon.ico` and `icon.png`. What lives in
+the repository is the recipe rather than the artwork, so changing the colours or
+the number of grains means editing the script, not hunting for a source file.
+
+```sh
+python scripts/make-icon.py
+```
+
+`app/build.rs` embeds the `.ico` into the executable through `winresource`,
+along with the version info (ProductName / FileVersion) that shows up in the
+properties dialog. The `.png` is pulled in with `include_bytes!` as the winit
+window icon: Windows uses the embedded resource, but on Linux nothing is shown
+unless it is handed over explicitly.
+
+### Windows installer
+
+```powershell
+powershell -File scripts\build-installer.ps1
+```
+
+Release build → sign (if a certificate is passed) → Inno Setup 6, landing in
+`target\installer\`. The version is read from `Cargo.toml`, so it never has to be
+repeated.
+
+```powershell
+powershell -File scripts\build-installer.ps1 -CertPath cert.pfx -CertPassword $env:CERT_PASSWORD
+```
+
+What ships is `tsubugallery.exe` and nothing else. Translations, the bundled
+sketches and SQLite are all compiled in, and fonts are borrowed from the OS. The
+one external dependency is `VCRUNTIME140.dll`; where it is missing the installer
+says so up front.
+
+The default is a per-user install that needs no administrator. On uninstall it
+asks whether to delete the sketches and settings under `%APPDATA%` (defaulting
+to "no").
+
+`scripts/*.ps1` and `*.iss` are **UTF-8 with a BOM**. Drop the BOM and both
+Windows PowerShell 5.1 and ISCC read the Japanese as Shift_JIS and stop with a
+syntax error.

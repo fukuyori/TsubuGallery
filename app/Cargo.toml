@@ -26,3 +26,6 @@ log.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true

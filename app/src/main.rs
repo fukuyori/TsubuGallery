@@ -35,7 +35,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{Fullscreen, Icon, Window, WindowId};
 
 use editor::Editor;
 use editor_ui::EditorAction;
@@ -183,6 +183,27 @@ fn capture_all_target() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// ウィンドウとタスクバーに出すアイコン。
+///
+/// Windows では exe に埋めた資源が使われるのでこれが無くても出るが、Linux では
+/// 渡さないと環境ごとの既定の絵になる。同じ 1 枚を両方に使う。
+///
+/// 読めなくても起動は続ける。絵が出ないだけで、できることは変わらない。
+fn window_icon() -> Option<Icon> {
+    let png = include_bytes!("../assets/icon.png");
+    let image = match image::load_from_memory_with_format(png, image::ImageFormat::Png) {
+        Ok(image) => image.into_rgba8(),
+        Err(e) => {
+            log::warn!("アイコンを読めませんでした: {e}");
+            return None;
+        }
+    };
+    let (width, height) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), width, height)
+        .inspect_err(|e| log::warn!("アイコンを作れませんでした: {e}"))
+        .ok()
 }
 
 /// 表示中の画面。ホームは Gallery (設計書 §6.1)。
@@ -1758,6 +1779,7 @@ impl ApplicationHandler for App {
         let attributes = Window::default_attributes()
             // アプリ名はローカライズしない (設計書 §2)。
             .with_title("TsubuGallery")
+            .with_window_icon(window_icon())
             .with_inner_size(winit::dpi::LogicalSize::new(1100.0, 720.0));
 
         let window = match event_loop.create_window(attributes) {

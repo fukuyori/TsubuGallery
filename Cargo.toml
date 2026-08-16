@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -28,6 +28,8 @@ winit = "0.30"
 # 起動できなかったことを OS のダイアログで伝えるためだけに使う。winit が
 # 既に同じ版を引いているので、依存は増えない。
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+# exe へアイコンと版情報を埋める。ビルド時にしか使わない。
+winresource = "0.1"
 egui = "0.36"
 egui-wgpu = "0.36"
 egui-winit = "0.36"
