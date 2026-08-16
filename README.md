@@ -2,8 +2,10 @@
 
 English · [日本語](README.ja.md)
 
-A cross-platform gallery for storing, running and watching short Processing
-sketches.
+A cross-platform gallery for storing, running and watching つぶやきProcessing
+sketches — Processing written short enough to fit in a post.
+
+![The gallery screen, showing sketches as a grid of thumbnails](images/screenshot.png)
 
 See [`docs/TsubuGallery_Design.md`](docs/TsubuGallery_Design.md) for the design
 (written in Japanese). This repository implements all of **Prototypes A–E** from
@@ -135,7 +137,7 @@ The guess is only a guess, so **code that compiles is never commented on**.
 
 #### Expand and compress
 
-`#つぶやきProcessing` (tweet-sized Processing) is usually folded onto one line to
+`#つぶやきProcessing` is usually folded onto one line to
 save characters. **Expand** to read it, **compress** to post it. The character
 count is always shown at the bottom of the editor.
 
@@ -229,7 +231,7 @@ bottom right of the card and become filter choices.
 ### Author and link
 
 Filled in from the editor's **Author** and **Link** fields. They are not in the
-table in design §19.1, but for tweet-sized work it matters whose post a sketch
+table in design §19.1, but for つぶやき work it matters whose post a sketch
 came from. The author shows at the bottom right of the card, in the list view and
 in the viewer's info overlay (`I`), and the search box matches it.
 
@@ -381,7 +383,7 @@ Changes take effect immediately and are written to the `setting` table in
 | Runtime | Per-frame instruction limit |
 
 **Canvas fit** decides what happens when a sketch declares a canvas whose shape
-does not match the window. Tweet-sized sketches are usually square, so a wide
+does not match the window. つぶやき sketches are usually square, so a wide
 window leaves a band of empty space on each side. *Contain* (the default) keeps
 the whole canvas visible; *Cover* scales it up until the window is full and lets
 whatever overflows fall outside. The setting applies to thumbnails as well, so a
@@ -518,7 +520,7 @@ it is simply whether its last frame cleared.
 ### The canvas persists across frames
 
 If `draw()` does not call `background()`, the previous frame stays on screen,
-matching Processing and p5.js. The staple of tweet-sized Processing —
+matching Processing and p5.js. The staple of つぶやきProcessing —
 
 ```java
 void draw() {
@@ -549,20 +551,20 @@ a supposedly frozen picture keep darkening.
 ## Three dialects
 
 Drop in a `.pde` and it runs. **Processing (Java Mode)**, **p5.js** and
-**tweet-sized GLSL** are all accepted, and which one it is gets detected
+**つぶやきGLSL** are all accepted, and which one it is gets detected
 automatically — you never have to say (design §23.2, swappable frontends).
 
 ```text
 Processing Lite ─┐
                  ├─ AST → bytecode → VM ─┐
 p5.js subset ────┘                        ├─ renderer
-tweet-sized GLSL ── naga → WGSL → wgpu ───┘
+つぶやきGLSL     ── naga → WGSL → wgpu ───┘
 ```
 
 Everything below bytecode is shared; only the VM's value type was widened to
 cover arrays, objects and functions. GLSL is the exception: it never reaches the
 VM. A single fragment shader goes straight to the GPU, so it takes a different
-road from the one that builds triangles ([tweet-sized GLSL](#tweet-sized-glsl)).
+road from the one that builds triangles ([つぶやきGLSL](#つぶやきglsl)).
 
 ## Processing Lite (Java Mode)
 
@@ -684,7 +686,7 @@ array; sharing one would make a write to one row hit every row.
 
 A sketch with neither `setup()` nor `draw()` — just statements at the top level —
 runs too. The whole thing becomes the body of `setup()` and is drawn once, as in
-Processing. Short tweet-sized sketches are often written this way.
+Processing. Short つぶやき sketches are often written this way.
 
 ```processing
 float r, i, d;
@@ -918,7 +920,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 There is one number type, as in JavaScript (`7/2` is `3.5`).
 
 ```javascript
-// A staple of tweet-sized p5, running as written.
+// A staple of つぶやき p5, running as written.
 draw=_=>{t||createCanvas(W=600,W);t=(t||0)+.02;background(8);noStroke()
 for(i of [...Array(120).keys()]){
   [x,y]=[W/2+cos(i*.13+t)*(40+i*1.6), W/2+sin(i*.19+t)*(40+i*1.6)]
@@ -1016,7 +1018,7 @@ line 3, column 3: `;` expected
 A sketch that fails still appears in the list, with an error badge on its card.
 Opening it in the viewer shows why.
 
-## Tweet-sized GLSL
+## つぶやきGLSL
 
 `#つぶやきGLSL` (twigl's geekest mode) drops in as-is. Write one fragment shader
 and it paints the whole frame, every frame.
@@ -1062,7 +1064,7 @@ starts at `vec4(0)`, and `gl_FragColor` is treated as `o`.
 | | Why |
 |---|---|
 | No `#version` line | naga only accepts 440/450/460, so it is added here |
-| `o.a` is dropped and the output is always opaque | in tweet-sized GLSL the fourth channel holds loop counts or brightness, not transparency |
+| `o.a` is dropped and the output is always opaque | in つぶやきGLSL the fourth channel holds loop counts or brightness, not transparency |
 | No backbuffer `b` | not supported yet |
 | No `snoise4D` / `fsnoise` | not supported yet |
 | A trailing `#つぶやきGLSL` tag line is skipped | it is not a preprocessor directive, so it would not compile |
@@ -1124,7 +1126,7 @@ A cargo workspace matching the module boundaries in design §31.
 ```text
 core/              library / repository / locale / paths … shared layer, independent of UI and runtime
 renderer/          draw / batch / texture / capture / canvas / font … Processing API → triangles → wgpu
-                   shader … tweet-sized GLSL → naga → WGSL
+                   shader … つぶやきGLSL → naga → WGSL
 processing-lite/   lexer → parser → ast → compiler ─┐
                    js/{lexer,parser,ast,compiler} ──┴→ bytecode → vm
                    glsl_sketch … GLSL sketches / front … picks the dialect

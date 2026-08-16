@@ -2,7 +2,9 @@
 
 [English](README.md) ・ 日本語
 
-短い Processing 作品を保存・実行・鑑賞するマルチプラットフォーム・ギャラリー。
+つぶやきProcessing 作品を保存・実行・鑑賞するマルチプラットフォーム・ギャラリー。
+
+![作品をサムネイルの格子で並べた Gallery 画面](images/screenshot.png)
 
 設計は [`docs/TsubuGallery_Design.md`](docs/TsubuGallery_Design.md) を参照。
 このリポジトリは設計書 §29 の **Prototype A〜E** をすべて実装した段階にある。
@@ -486,7 +488,7 @@ Viewer は切り替えで何も作り直さずに済むよう、全作品をイ�
 ### キャンバスはフレームをまたいで残る
 
 `draw()` の中で `background()` を呼ばなければ、前のフレームの絵がそのまま残る。
-Processing と p5.js の挙動に合わせてある。つぶやき Processing の定番である
+Processing と p5.js の挙動に合わせてある。つぶやきProcessing の定番である
 
 ```java
 void draw() {
@@ -513,7 +515,7 @@ void draw() {
 
 ## 3 つの方言
 
-`.pde` を置けば動く。**Processing (Java Mode)**・**p5.js**・**つぶやき GLSL** の
+`.pde` を置けば動く。**Processing (Java Mode)**・**p5.js**・**つぶやきGLSL** の
 どれでも受ける。どれで書かれているかは自動で判定するので、書き分けの指定は
 要らない (設計書 §23.2 の Frontend 交換)。
 
@@ -521,12 +523,12 @@ void draw() {
 Processing Lite ─┐
                  ├─ AST → Bytecode → VM ─┐
 p5.js subset ────┘                        ├─ Renderer
-つぶやき GLSL ── naga → WGSL → wgpu ──────┘
+つぶやきGLSL ─── naga → WGSL → wgpu ──────┘
 ```
 
 Bytecode から下は共通で、VM の値だけ配列・オブジェクト・関数まで広げてある。
 GLSL だけは VM を通らない。フラグメントシェーダー 1 本を GPU へ渡すので、
-図形の列を組み立てる道とは別になる ([つぶやき GLSL](#つぶやき-glsl))。
+図形の列を組み立てる道とは別になる ([つぶやきGLSL](#つぶやきglsl))。
 
 ## Processing Lite (Java Mode)
 
@@ -944,7 +946,7 @@ Viewer へ制御を返し、3 フレーム続けて超えた作品は停止し�
 失敗した作品も一覧からは消えず、カードにエラーバッジが付く。Viewer で開くと理由が
 表示される。
 
-## つぶやき GLSL
+## つぶやきGLSL
 
 `#つぶやきGLSL` (twigl の geekest 相当) もそのまま置ける。フラグメント
 シェーダー 1 本を書けば、画面いっぱいを毎フレーム塗る。
@@ -990,7 +992,7 @@ GLSL → 前置きを足す → naga (glsl-in) → 検証 → WGSL → wgpu
 | | 理由 |
 |---|---|
 | `#version` は書かない | naga が受けるのは 440/450/460 だけなので、こちらで付ける |
-| `o.a` は捨てて必ず不透明で出す | つぶやき GLSL の 4 本目はループ回数や明るさの置き場で、透明度ではない |
+| `o.a` は捨てて必ず不透明で出す | つぶやきGLSL の 4 本目はループ回数や明るさの置き場で、透明度ではない |
 | バックバッファ `b` は無い | 未対応 |
 | `snoise4D` / `fsnoise` は無い | 未対応 |
 | 末尾の `#つぶやきGLSL` タグ行は読み飛ばす | プリプロセッサ指令ではないので、そのままでは通らない |
@@ -1050,7 +1052,7 @@ Windows と Linux 向けのクロスビルドには、その OS の C ツール�
 ```text
 core/              library / repository / locale / paths … UI とランタイムから独立した共通層
 renderer/          draw / batch / texture / capture … Processing API → 三角形 → wgpu
-                   shader … つぶやき GLSL → naga → WGSL
+                   shader … つぶやきGLSL → naga → WGSL
 processing-lite/   lexer → parser → ast → compiler ─┐
                    js/{lexer,parser,ast,compiler} ──┴→ bytecode → vm
                    glsl_sketch … GLSL 作品 / front … 方言を見分けて振り分ける
