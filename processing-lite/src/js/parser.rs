@@ -91,6 +91,22 @@ impl Parser {
         }
     }
 
+    /// プロパティ名。`.default` や `{class: 1}` のように、JavaScript では
+    /// 予約語もここに書ける。変数名としては使えないので [`Self::ident`] とは分ける。
+    fn property_name(&mut self) -> Result<String, CompileError> {
+        match self.peek().clone() {
+            Tok::Ident(name) => {
+                self.advance();
+                Ok(name)
+            }
+            Tok::Keyword(kw) => {
+                self.advance();
+                Ok(kw.text().to_string())
+            }
+            _ => Err(self.error("プロパティ名がありません")),
+        }
+    }
+
     /// 文の終わり。`;` があれば食べる。無くても、改行か `}` か終端なら通す。
     fn end_of_statement(&mut self) -> Result<(), CompileError> {
         if self.eat(&Tok::Semicolon) {
@@ -129,6 +145,7 @@ impl Parser {
             Tok::Keyword(Kw::If) => self.if_statement(),
             Tok::Keyword(Kw::For) => self.for_statement(),
             Tok::Keyword(Kw::While) => self.while_statement(),
+            Tok::Keyword(Kw::Switch) => self.switch_statement(),
             Tok::Keyword(Kw::Break) => {
                 let (line, column) = self.position();
                 self.advance();
@@ -240,6 +257,56 @@ impl Parser {
         self.expect(&Tok::RParen, "`)`")?;
         let body = Box::new(self.statement()?);
         Ok(Stmt::While { cond, body })
+    }
+
+    /// `switch (v) { case 1: ... default: ... }`。
+    ///
+    /// Java Mode ([`crate::parser`]) と同じ形にしてある。`break` を書かなければ
+    /// 次の case へ落ちるのも同じ。
+    fn switch_statement(&mut self) -> Result<Stmt, CompileError> {
+        let (line, column) = self.position();
+        self.advance();
+        self.expect(&Tok::LParen, "`(`")?;
+        let value = self.expression()?;
+        self.expect(&Tok::RParen, "`)`")?;
+        self.expect(&Tok::LBrace, "`{`")?;
+
+        let mut cases: Vec<SwitchCase> = Vec::new();
+        while !self.check(&Tok::RBrace) {
+            if self.check(&Tok::Eof) {
+                return Err(self.error("`}` がありません"));
+            }
+
+            let label = if self.eat(&Tok::Keyword(Kw::Case)) {
+                let label = self.expression()?;
+                self.expect(&Tok::Colon, "`:`")?;
+                Some(label)
+            } else if self.eat(&Tok::Keyword(Kw::Default)) {
+                self.expect(&Tok::Colon, "`:`")?;
+                if cases.iter().any(|c| c.label.is_none()) {
+                    return Err(self.error("default は 1 つだけです"));
+                }
+                None
+            } else {
+                return Err(self.error("case か default がありません"));
+            };
+
+            // 次のラベルか `}` までが、このラベルの中身。
+            let mut body = Vec::new();
+            while !self.check(&Tok::RBrace)
+                && !self.check(&Tok::Keyword(Kw::Case))
+                && !self.check(&Tok::Keyword(Kw::Default))
+            {
+                if self.check(&Tok::Eof) {
+                    return Err(self.error("`}` がありません"));
+                }
+                body.push(self.statement()?);
+            }
+            cases.push(SwitchCase { label, body });
+        }
+        self.expect(&Tok::RBrace, "`}`")?;
+
+        Ok(Stmt::Switch { value, cases, line, column })
     }
 
     fn for_statement(&mut self) -> Result<Stmt, CompileError> {
@@ -517,7 +584,7 @@ impl Parser {
             match self.peek() {
                 Tok::Dot => {
                     self.advance();
-                    let name = self.ident()?;
+                    let name = self.property_name()?;
                     expr = Expr::Member { object: Box::new(expr), name };
                 }
                 Tok::LBracket => {
@@ -663,15 +730,15 @@ impl Parser {
         if !self.check(&Tok::RBrace) {
             loop {
                 let key = match self.peek().clone() {
-                    Tok::Ident(name) => {
-                        self.advance();
-                        name
-                    }
                     Tok::Number(v) => {
                         self.advance();
                         v.to_string()
                     }
-                    _ => return Err(self.error("プロパティ名がありません")),
+                    Tok::Str(s) => {
+                        self.advance();
+                        s
+                    }
+                    _ => self.property_name()?,
                 };
                 // `{x}` は `{x: x}` の略記。
                 let value = if self.eat(&Tok::Colon) {

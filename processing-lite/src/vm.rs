@@ -30,6 +30,8 @@ pub enum Trap {
     DivideByZero,
     /// 関数でないものを呼ぼうとした。
     NotCallable(String),
+    /// 名前で呼んだ先に関数が入っていなかった。まだ持っていない API か、書き間違い。
+    NoSuchFunction(String),
     /// 配列に無いメソッドを呼ぼうとした。
     NoSuchMethod(String),
     /// 配列が大きくなりすぎた。
@@ -45,6 +47,7 @@ impl fmt::Display for Trap {
             Trap::CallDepthExceeded => write!(f, "関数の呼び出しが深すぎます"),
             Trap::DivideByZero => write!(f, "整数を 0 で割りました"),
             Trap::NotCallable(what) => write!(f, "{what} は関数として呼べません"),
+            Trap::NoSuchFunction(name) => write!(f, "{name}() という関数はありません"),
             Trap::NoSuchMethod(name) => write!(f, "{name}() というメソッドはありません"),
             Trap::ArrayTooLong => write!(f, "配列が大きくなりすぎました"),
             Trap::Internal(m) => write!(f, "内部エラー: {m}"),
@@ -498,6 +501,18 @@ impl Vm {
                     let split = self.split_at(argc as usize + 1)?;
                     let callee = self.stack.remove(split);
                     self.invoke(program, callee, argc, g)?;
+                }
+                Op::CallNamed(name, argc) => {
+                    let split = self.split_at(argc as usize + 1)?;
+                    let callee = self.stack.remove(split);
+                    // 中身が入っていない名前は、まだ持っていない API か書き間違い。
+                    // どちらにせよ、名前を出さないと直しようがない。
+                    self.invoke(program, callee, argc, g).map_err(|e| match e {
+                        Trap::NotCallable(_) => {
+                            Trap::NoSuchFunction(program.string(name).to_string())
+                        }
+                        other => other,
+                    })?;
                 }
                 Op::CallMethod(key, argc) => {
                     let split = self.split_at(argc as usize + 1)?;

@@ -736,7 +736,7 @@ default black stroke and would be invisible.
 
 | Category | Functions and variables |
 |---|---|
-| Screen | `size()` / `createCanvas()` (the declared canvas is scaled to fit), `width` `height` `frameCount` |
+| Screen | `size()` / `createCanvas()` (the declared canvas is scaled to fit), `width` `height` `frameCount`, and `windowWidth` / `windowHeight` for the display area itself (`innerWidth` `innerHeight` `displayWidth` `displayHeight` mean the same here) |
 | Basic shapes | `point() line() rect() ellipse() circle() triangle()`. A 5th argument onwards rounds `rect()` corners, and `rect(x, y, w)` is a square as in p5. `point()` is a round dot and thick lines get round ends, as in both originals |
 | Free-form shapes | `beginShape() vertex() curveVertex() bezierVertex() endShape()`, `arc() quad() bezier() curve()` |
 | Text | `text() textSize() textAlign() textWidth()`, `str() nf()`, `String.fromCodePoint()` |
@@ -751,7 +751,7 @@ default black stroke and would be invisible.
 | Maths | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
 | Random and noise | `random() randomGaussian() noise() randomSeed() millis()` |
 | Input | `mouseX` `mouseY` `mousePressed` `keyPressed` |
-| Constants | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
+| Constants | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `QUADS` `QUAD_STRIP` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
 
 `background()`, `fill()` and `stroke()` switch on argument count exactly as
 Processing does. **In Processing a single `int` argument is read as a packed
@@ -770,6 +770,17 @@ black anyway, so it looks the same.
 
 `beginShape()` fills concave shapes correctly. Fanning the vertices would spill
 outside the notches, so ear clipping is used instead.
+
+`QUADS` **closes** every group of four points into its own quad. Joining them
+into one polygon would leave no stroke where two faces meet, and the outline of
+a ribbon or a mesh disappears. `QUAD_STRIP` takes the points two at a time as
+cross-sections of a ribbon; each neighbouring pair makes one quad.
+
+Colours can also be written as text: the CSS colour names (147 of them) as in
+`fill('cyan')`, and `#rgb` `#rgba` `#rrggbb` `#rrggbbaa` hex. As in p5.js a
+textual colour ignores `colorMode()` — it is always read as CSS. A second
+argument still adds opacity, and that one is measured against the `colorMode()`
+maximum.
 
 `arc()` takes a seventh argument for how the shape closes, as in both originals.
 `OPEN` (the default) and `CHORD` close the fill with a straight chord between
@@ -928,13 +939,13 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | Spread | `[...xs]`, `[...a, b, ...c]`, and in a call's arguments: `stroke(...c, 9)`, `Math.max(...xs)` |
 | Strings | `"..."` `'...'` `` `...` ``, `${}` interpolation, `+` concatenation, `length charAt substring indexOf split repeat toUpperCase toLowerCase trim` |
 | Destructuring | `[a,b]=[1,2]`, swapping `[a,b]=[b,a]`, `[o.x,v[0]]=…` |
-| Objects | Literals (`{x:1}`, shorthand `{x}`), reading and writing `p.x`, `p.x+=v` |
+| Objects | Literals (`{x:1}`, shorthand `{x}`), reading and writing `p.x`, `p.x+=v`. Reserved words work as property names (`{default:1}.default`) |
 | Expressions | Assignment as an expression, comma operator, ternary, short-circuit, prefix and postfix `++` / `--`, exponentiation `**` and `**=` (binds tighter than `*`, groups to the right) |
 | Bitwise | `& \| ^ ~ << >> >>>`, compound assignment (`&=`, `<<=`, …) |
-| Control flow | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
+| Control flow | `if` / `else` / `for` / `while` / `switch` (`case` / `default`, falling through when there is no `break`) / `return` / `break` / `continue` / `for...of` |
 | Literals | decimal, hex (`0xFF6B35`), exponent |
 | Other | Semicolon insertion (ASI), numbers as truthiness (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` (including `WEBGL`) `colorMode(HSB)`, 3-argument `noise`, `drawingContext` shadows |
+| p5 API | `createCanvas` (including `WEBGL`) `colorMode(HSB)`, 3-argument `noise`, `drawingContext` shadows, `windowWidth` / `innerWidth` and friends for a full-screen canvas, CSS colours as in `fill('cyan')` |
 | Blend modes | `blendMode()` takes `BLEND ADD MULTIPLY SCREEN DIFFERENCE EXCLUSION DARKEST LIGHTEST SUBTRACT REPLACE` |
 | `push` / `pop` | Save and restore the transform **and** the style, as p5 does — unlike Processing's `pushMatrix()`, which is the transform alone. `pushStyle()` / `popStyle()` are there too |
 | `Math` | `Math.sin` and friends map to the built-ins. `Math.PI` `Math.hypot` `Math.sign` too, and `S=Math.sin` works as a value |
@@ -1218,6 +1229,15 @@ it.
   only on the GPU; there is no rasterised image on the CPU side. Sketches that
   read and write within the same frame (piling sand, growth, collision) would
   need a separate CPU rasteriser
+- **`beginShape()` vertices are 2-D**. `vertex(x, y, z)` is accepted but the z is
+  dropped, so a solid built out of free-form vertices comes out flat. `box()` and
+  `sphere()` are still 3-D
+- **p5's DOM widgets** (`createColorPicker` / `createSlider` / `createButton` …).
+  They create browser elements, and there is nowhere to put them here. Calling
+  one stops the sketch with an error naming the function
+- `blendMode()`'s `OVERLAY` `HARD_LIGHT` `SOFT_LIGHT` `DODGE` `BURN` `REMOVE`.
+  The GPU's blender only multiplies and adds, so a formula that reads the
+  destination back cannot be built. They are drawn as `BLEND`
 - Other p5 APIs: images (`image` / `loadImage`), `strokeCap` / `strokeJoin`,
   `frameRate()`
 - Import / export, GIF and video export (design §27)

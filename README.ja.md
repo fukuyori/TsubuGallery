@@ -694,7 +694,7 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
 
 | 分類 | 関数・変数 |
 |---|---|
-| 画面 | `size()` / `createCanvas()` (宣言したキャンバスを表示領域へ収める)、`width` `height` `frameCount` |
+| 画面 | `size()` / `createCanvas()` (宣言したキャンバスを表示領域へ収める)、`width` `height` `frameCount`、表示領域そのものを指す `windowWidth` / `windowHeight` (`innerWidth` `innerHeight` `displayWidth` `displayHeight` も同じ) |
 | 基本描画 | `point() line() rect() ellipse() circle() triangle()`。`rect()` は 5 個目以降の引数で角が丸くなり、p5 のように高さを省いた `rect(x, y, w)` は正方形になる。`point()` は丸い点で、太い線の端も丸い (どちらの本家もそう) |
 | 自由な形 | `beginShape() vertex() curveVertex() bezierVertex() endShape()`、`arc() quad() bezier() curve()` |
 | 文字 | `text() textSize() textAlign() textWidth()`、`str() nf()`、`String.fromCodePoint()` |
@@ -709,7 +709,7 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
 | 数学 | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
 | 乱数・ノイズ | `random() randomGaussian() noise() randomSeed() millis()` |
 | 入力 | `mouseX` `mouseY` `mousePressed` `keyPressed` |
-| 定数 | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
+| 定数 | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `QUADS` `QUAD_STRIP` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
 
 `background()` / `fill()` / `stroke()` は Processing と同じく引数の数で切り替わる。
 **Processing では、`stroke(-1)` のように int をひとつ渡すと詰めた色
@@ -727,6 +727,15 @@ Processing の規則を当てると、`stroke(500)` が `0x0001F4` — alpha が
 
 `beginShape()` は凹んだ形も正しく塗る。頂点を扇状に分けると凹みが外へはみ出す
 ので、耳切り法で三角形に分けている。
+
+`QUADS` は 4 点ずつを 1 枚の四角形として**閉じる**。まとめて 1 つの多角形に
+すると、面と面の境目に縁の線が引かれず、帯や網の輪郭が消える。`QUAD_STRIP`
+は 2 点ずつが帯の断面で、隣り合う 2 組が 1 枚になる。
+
+色は文字でも書ける。`fill('cyan')` の CSS の色名 (147 語) と、`#rgb` `#rgba`
+`#rrggbb` `#rrggbbaa` の 16 進。p5.js と同じく、文字で書いた色は
+`colorMode()` に従わない — つねに CSS の読み方をする。2 つめの引数で不透明度
+だけを足すときは、そこは `colorMode()` の最大値で測る。
 
 `arc()` は 7 つめで閉じ方を取る。どちらの本家とも同じ。`OPEN` (既定) と
 `CHORD` は両端を弦で結んで塗り、`PIE` は中心まで閉じて扇形にする。線は
@@ -864,13 +873,13 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | 展開 | `[...xs]`、`[...a, b, ...c]`、引数の並びでも: `stroke(...c, 9)`、`Math.max(...xs)` |
 | 文字列 | `"..."` `'...'` `` `...` ``、`${}` の展開、`+` で連結、`length charAt substring indexOf split repeat toUpperCase toLowerCase trim` |
 | 分割代入 | `[a,b]=[1,2]`、入れ替え `[a,b]=[b,a]`、`[o.x,v[0]]=…` |
-| オブジェクト | リテラル (`{x:1}`、略記 `{x}`)、`p.x` の読み書き、`p.x+=v` |
+| オブジェクト | リテラル (`{x:1}`、略記 `{x}`)、`p.x` の読み書き、`p.x+=v`。予約語もプロパティ名に使える (`{default:1}.default`) |
 | 式 | 代入は式、カンマ演算子、三項演算子、短絡評価、`++` / `--` の前置と後置、べき乗 `**` と `**=` (`*` より強く、右から結ぶ) |
 | ビット演算 | `& \| ^ ~ << >> >>>`、複合代入 (`&=` `<<=` など) |
-| 制御 | `if` / `else` / `for` / `while` / `return` / `break` / `continue` / `for...of` |
+| 制御 | `if` / `else` / `for` / `while` / `switch` (`case` / `default`、`break` が無ければ次へ落ちる) / `return` / `break` / `continue` / `for...of` |
 | リテラル | 10 進、16 進 (`0xFF6B35`)、指数 |
 | その他 | セミコロン省略 (ASI)、数値の真偽値化 (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` (`WEBGL` も) `colorMode(HSB)`、3 引数 `noise`、`drawingContext` の影 |
+| p5 API | `createCanvas` (`WEBGL` も) `colorMode(HSB)`、3 引数 `noise`、`drawingContext` の影、`windowWidth` / `innerWidth` などの画面いっぱいの大きさ、`fill('cyan')` の CSS の色 |
 | 合成方法 | `blendMode()` に `BLEND ADD MULTIPLY SCREEN DIFFERENCE EXCLUSION DARKEST LIGHTEST SUBTRACT REPLACE` |
 | `push` / `pop` | p5 と同じく座標変換**と**見た目の両方を退避する。座標変換だけの Processing の `pushMatrix()` とは違う。`pushStyle()` / `popStyle()` もある |
 | `Math` | `Math.sin` などを組み込みへ読み替える。`Math.PI` `Math.hypot` `Math.sign` も。`S=Math.sin` と値で持てる |
@@ -1139,6 +1148,14 @@ MSAA は 4x。Viewer もサムネイルも同じ `BatchRenderer` を通る。
   CPU 側にラスタライズされた像を持っていない。同じフレームの中で読み書きする
   作品 (砂が積もる、成長する、当たり判定を取る) を動かすには、CPU 側の
   ラスタライザを別に持つ必要がある
+- **`beginShape()` の頂点は 2 次元**。`vertex(x, y, z)` は受けるが z を捨てるので、
+  自由な形で組んだ立体は平らに出る。`box()` / `sphere()` は 3D のまま
+- **p5 の DOM 部品** (`createColorPicker` / `createSlider` / `createButton` …)。
+  ブラウザの要素を作る API で、ここには置く場所が無い。呼ぶと
+  「`createColorPicker()` という関数はありません」で止まる
+- `blendMode()` の `OVERLAY` `HARD_LIGHT` `SOFT_LIGHT` `DODGE` `BURN` `REMOVE`。
+  GPU の合成器は掛け算と足し算しか組めないので、下地を読み返す式は作れない。
+  指定しても `BLEND` として描く
 - 未実装のその他の p5 API: 画像 (`image` / `loadImage`)、`strokeCap` / `strokeJoin`、
   `frameRate()`
 - Import / Export、GIF・動画の書き出し (設計書 §27)

@@ -90,6 +90,9 @@ pub enum Kw {
     Else,
     For,
     While,
+    Switch,
+    Case,
+    Default,
     Return,
     Break,
     Continue,
@@ -112,6 +115,9 @@ impl Kw {
             "break" => Kw::Break,
             "continue" => Kw::Continue,
             "while" => Kw::While,
+            "switch" => Kw::Switch,
+            "case" => Kw::Case,
+            "default" => Kw::Default,
             "return" => Kw::Return,
             "true" => Kw::True,
             "false" => Kw::False,
@@ -119,6 +125,31 @@ impl Kw {
             "null" => Kw::Null,
             _ => return None,
         })
+    }
+
+    /// 元のつづり。JavaScript は予約語もプロパティ名に使えるので、
+    /// `.default` や `{if: 1}` を読むときに名前へ戻す。
+    pub fn text(self) -> &'static str {
+        match self {
+            Kw::Let => "let",
+            Kw::Const => "const",
+            Kw::Var => "var",
+            Kw::Function => "function",
+            Kw::If => "if",
+            Kw::Else => "else",
+            Kw::For => "for",
+            Kw::While => "while",
+            Kw::Switch => "switch",
+            Kw::Case => "case",
+            Kw::Default => "default",
+            Kw::Return => "return",
+            Kw::Break => "break",
+            Kw::Continue => "continue",
+            Kw::True => "true",
+            Kw::False => "false",
+            Kw::Undefined => "undefined",
+            Kw::Null => "null",
+        }
     }
 }
 

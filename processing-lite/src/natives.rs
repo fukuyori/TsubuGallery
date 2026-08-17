@@ -13,6 +13,12 @@ use crate::math::{self, Rng};
 pub enum BuiltinVar {
     Width,
     Height,
+    /// `windowWidth` / `innerWidth` / `displayWidth`。表示領域の幅。
+    /// キャンバスの幅 ([`BuiltinVar::Width`]) とは違い、`createCanvas()` の
+    /// あとも変わらない。
+    WindowWidth,
+    /// `windowHeight` / `innerHeight` / `displayHeight`。
+    WindowHeight,
     /// `drawingContext`。ブラウザのキャンバスそのもの。ここには無いので、
     /// 書き込みを受け取るだけの入れ物を渡す。
     DrawingContext,
@@ -42,6 +48,8 @@ pub enum BuiltinVar {
     Triangles,
     TriangleStrip,
     TriangleFan,
+    Quads,
+    QuadStrip,
 
     // rectMode() / ellipseMode() / angleMode() の指定。
     Corner,
@@ -83,6 +91,11 @@ impl BuiltinVar {
             "width" => BuiltinVar::Width,
             "drawingContext" => BuiltinVar::DrawingContext,
             "height" => BuiltinVar::Height,
+            // ブラウザの窓と画面の大きさ。`createCanvas(innerWidth, innerHeight)`
+            // のように、キャンバスを画面いっぱいに広げるために使われる。
+            // ここでは 3 つとも表示領域そのもの。
+            "windowWidth" | "innerWidth" | "displayWidth" => BuiltinVar::WindowWidth,
+            "windowHeight" | "innerHeight" | "displayHeight" => BuiltinVar::WindowHeight,
             "frameCount" => BuiltinVar::FrameCount,
             "mouseX" => BuiltinVar::MouseX,
             "mouseY" => BuiltinVar::MouseY,
@@ -105,6 +118,8 @@ impl BuiltinVar {
             "TRIANGLES" => BuiltinVar::Triangles,
             "TRIANGLE_STRIP" => BuiltinVar::TriangleStrip,
             "TRIANGLE_FAN" => BuiltinVar::TriangleFan,
+            "QUADS" => BuiltinVar::Quads,
+            "QUAD_STRIP" => BuiltinVar::QuadStrip,
             "CORNER" => BuiltinVar::Corner,
             "CORNERS" => BuiltinVar::Corners,
             "CENTER" => BuiltinVar::Center,
@@ -141,6 +156,10 @@ impl BuiltinVar {
             // size() を呼ばない作品も動くよう、width/height は実表示サイズを返す。
             BuiltinVar::Width => Value::Int(g.width as i32),
             BuiltinVar::Height => Value::Int(g.height as i32),
+            // 窓の大きさはキャンバスに影響されない。ブラウザなら別のものだが、
+            // ここでは表示領域がそのまま窓であり画面でもある。
+            BuiltinVar::WindowWidth => Value::Int(g.viewport().0 as i32),
+            BuiltinVar::WindowHeight => Value::Int(g.viewport().1 as i32),
             BuiltinVar::FrameCount => Value::Int(g.frame_count as i32),
             BuiltinVar::MouseX => Value::Int(g.mouse_x as i32),
             BuiltinVar::MouseY => Value::Int(g.mouse_y as i32),
@@ -166,6 +185,8 @@ impl BuiltinVar {
             BuiltinVar::Triangles => Value::Float(13.0),
             BuiltinVar::TriangleStrip => Value::Float(14.0),
             BuiltinVar::TriangleFan => Value::Float(15.0),
+            BuiltinVar::Quads => Value::Float(16.0),
+            BuiltinVar::QuadStrip => Value::Float(17.0),
             BuiltinVar::Corner => Value::Float(20.0),
             BuiltinVar::Corners => Value::Float(21.0),
             BuiltinVar::Center => Value::Float(22.0),
@@ -735,8 +756,11 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
         // 中身は `[r, g, b, a]` の配列。専用の型を足さずに済ませている。
         // `fill()` や `stroke()` は配列を受け取ったらそのまま色として使う。
         Native::MakeColor => {
-            let numbers: Vec<f32> = args.iter().map(Value::as_f32).collect();
-            let c = g.color_from(&numbers);
+            // 文字列は CSS の色。数の並びは colorMode に従う。
+            let c = match args.first() {
+                Some(Value::Str(_)) => resolve_color(args, g),
+                _ => g.color_from(&numbers(args)),
+            };
             Value::new_array(vec![
                 Value::Float(c.r * 255.0),
                 Value::Float(c.g * 255.0),
@@ -1124,6 +1148,19 @@ pub fn color_from_value(value: &Value, g: &Graphics) -> Color {
 }
 
 fn resolve_color(args: &[Value], g: &Graphics) -> Color {
+    // `fill('cyan')` や `background('#204')`。数として読める文字列 (`"128"`) は
+    // 下の数値の道へ落とす。読めない文字列は黒。NaN のまま GPU へ渡すと、
+    // 何色でもない三角形が出る。
+    if let Some(Value::Str(text)) = args.first()
+        && text.trim().parse::<f32>().is_err()
+    {
+        let color = Color::parse_css(text).unwrap_or(Color::BLACK);
+        return match args.get(1) {
+            // 2 つめの不透明度だけは colorMode の最大値で測る。p5 と同じ。
+            Some(v) => Color { a: (v.as_f32() / g.color_max()[3]).clamp(0.0, 1.0), ..color },
+            None => color,
+        };
+    }
     // `stroke(-1)` のように int をひとつ渡す書き方は、詰めた色 (0xAARRGGBB)。
     // Processing は型で見分けるので、こちらも int のときだけそう読む。
     // float の `fill(128.0)` は今までどおり明度。
@@ -1167,6 +1204,8 @@ fn shape_kind(arg: Option<&Value>) -> ShapeKind {
         Some(13.0) => ShapeKind::Triangles,
         Some(14.0) => ShapeKind::TriangleStrip,
         Some(15.0) => ShapeKind::TriangleFan,
+        Some(16.0) => ShapeKind::Quads,
+        Some(17.0) => ShapeKind::QuadStrip,
         _ => ShapeKind::Polygon,
     }
 }
@@ -1266,6 +1305,72 @@ mod tests {
         assert!(is_native("rect"));
         assert_eq!(accepted_arities("rect"), vec![3, 4, 5, 6, 7, 8]);
         assert_eq!(accepted_arities("fill"), vec![1, 2, 3, 4]);
+    }
+
+    /// `createCanvas(innerWidth, innerHeight)` が画面いっぱいになること。
+    ///
+    /// キャンバスを決めたあとも窓の大きさは変わらない。ここが `width` と同じ
+    /// 値を返すと、2 回目の `createCanvas()` でキャンバスが縮んでいく。
+    #[test]
+    fn the_window_size_is_the_display_and_not_the_canvas() {
+        let mut g = Graphics::new();
+        g.begin_frame(1920.0, 1080.0);
+        assert_eq!(BuiltinVar::WindowWidth.read(&g), Value::Int(1920));
+        assert_eq!(BuiltinVar::WindowHeight.read(&g), Value::Int(1080));
+
+        g.set_canvas(400.0, 400.0);
+        assert_eq!(BuiltinVar::Width.read(&g), Value::Int(400));
+        assert_eq!(BuiltinVar::WindowWidth.read(&g), Value::Int(1920), "窓は縮まない");
+    }
+
+    #[test]
+    fn window_size_answers_to_three_spellings() {
+        for name in ["windowWidth", "innerWidth", "displayWidth"] {
+            assert_eq!(BuiltinVar::resolve(name), Some(BuiltinVar::WindowWidth), "{name}");
+        }
+        for name in ["windowHeight", "innerHeight", "displayHeight"] {
+            assert_eq!(BuiltinVar::resolve(name), Some(BuiltinVar::WindowHeight), "{name}");
+        }
+    }
+
+    /// 文字列の色は CSS として読む。`colorMode()` には従わない。
+    #[test]
+    fn a_colour_can_be_written_as_text() {
+        let mut g = Graphics::new();
+        let mut rng = Rng::new(1);
+        g.begin_frame(100.0, 100.0);
+        g.color_mode(tsubu_renderer::ColorMode::Hsb, [360.0, 100.0, 100.0, 1.0]);
+
+        call(Native::Fill, &[Value::new_str("cyan")], &mut g, &mut rng);
+        assert_eq!(g.current_fill(), Some(Color::rgba(0.0, 1.0, 1.0, 1.0)));
+
+        call(Native::Fill, &[Value::new_str("#ff0000")], &mut g, &mut rng);
+        assert_eq!(g.current_fill(), Some(Color::rgba(1.0, 0.0, 0.0, 1.0)));
+
+        // 2 つめの不透明度は colorMode の最大値で測る。
+        call(Native::Fill, &[Value::new_str("white"), Value::Float(0.5)], &mut g, &mut rng);
+        assert_eq!(g.current_fill(), Some(Color::rgba(1.0, 1.0, 1.0, 0.5)));
+    }
+
+    /// 色として読めない文字列でも NaN を GPU へ流さない。
+    #[test]
+    fn an_unreadable_colour_falls_back_to_black() {
+        let mut g = Graphics::new();
+        let mut rng = Rng::new(1);
+        g.begin_frame(100.0, 100.0);
+        call(Native::Fill, &[Value::new_str("にじいろ")], &mut g, &mut rng);
+        assert_eq!(g.current_fill(), Some(Color::BLACK));
+    }
+
+    /// `color('#28EC4F')` も色になる。`red()` などで成分を取り出せること。
+    #[test]
+    fn color_accepts_text_too() {
+        let mut g = Graphics::new();
+        let mut rng = Rng::new(1);
+        let made = call(Native::MakeColor, &[Value::new_str("#28EC4F")], &mut g, &mut rng);
+        assert_eq!(call(Native::Red, std::slice::from_ref(&made), &mut g, &mut rng).as_f32(), 0x28 as f32);
+        assert_eq!(call(Native::Green, std::slice::from_ref(&made), &mut g, &mut rng).as_f32(), 0xEC as f32);
+        assert_eq!(call(Native::Blue, &[made], &mut g, &mut rng).as_f32(), 0x4F as f32);
     }
 
     #[test]

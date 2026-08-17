@@ -86,6 +86,14 @@ pub struct Viewer {
 
     width: f32,
     height: f32,
+    /// ウィンドウの大きさ。描く前から分かっている。
+    ///
+    /// [`Self::width`] は「最後に描いたときの大きさ」なので、まだ一度も
+    /// 描いていないあいだは当てにならない。それでも先読み ([`Self::preload_neighbours`])
+    /// は `setup()` を走らせてしまい、`createCanvas(innerWidth, innerHeight)` と
+    /// 書いた作品はそこで読んだ値をグローバルへ焼き付ける。`setup()` は
+    /// 二度と走らないので、間違った大きさはその作品の一生ついて回る。
+    display: (f32, f32),
 
     /// 設計書 §24 の Viewer / Runtime 設定。
     frame_rate: FrameRate,
@@ -126,6 +134,7 @@ impl Viewer {
             rng: Rng::new(0x0073_556E_6275_u64),
             width: 1.0,
             height: 1.0,
+            display: (1.0, 1.0),
             frame_rate: FrameRate::default(),
             speed: PlaybackSpeed::default(),
             navigation: Navigation::default(),
@@ -303,6 +312,14 @@ impl Viewer {
         self.frame_ms = smooth(self.frame_ms, elapsed.as_secs_f32() * 1000.0);
     }
 
+    /// ウィンドウの大きさを教える。Viewer をまだ一度も描いていなくても、
+    /// 先読みが正しい `innerWidth` / `innerHeight` を読めるようにする。
+    pub fn set_display_size(&mut self, width: f32, height: f32) {
+        if width > 0.0 && height > 0.0 {
+            self.display = (width, height);
+        }
+    }
+
     pub fn set_mouse(&mut self, x: f32, y: f32, pressed: bool) {
         self.graphics.mouse_x = x;
         self.graphics.mouse_y = y;
@@ -319,6 +336,7 @@ impl Viewer {
         let resized = (self.width - width).abs() > 0.5 || (self.height - height).abs() > 0.5;
         self.width = width;
         self.height = height;
+        self.set_display_size(width, height);
         if self.sketches.is_empty() {
             return None;
         }
@@ -500,7 +518,9 @@ impl Viewer {
                 continue;
             }
             self.warmup.reset_state();
-            self.warmup.begin_frame(self.width, self.height);
+            // 描いたときの大きさではなく、いまの窓の大きさで走らせる。Gallery から
+            // 初めて Viewer を開いた時点では、まだ 1 フレームも描いていない。
+            self.warmup.begin_frame(self.display.0, self.display.1);
             self.warmup.frame_count = self.frame_counts[index];
             self.sketches[index].step(&mut self.warmup);
             // 温めた時点で溢れたなら、開いても描けない。ここで印を付けておくと、
@@ -745,6 +765,49 @@ mod tests {
         let g = viewer.render_frame(200.0, 100.0).expect("描かれる");
         let c = g.draw_list().vertices.first().expect("線がある").color;
         assert_eq!((c[0], c[1], c[2]), (1.0, 1.0, 1.0), "先読みした作品の線が黒です");
+    }
+
+    /// 先読みされる作品も、`setup()` で本当の窓の大きさを読む。
+    ///
+    /// Gallery から初めて Viewer を開くと、その時点で隣の作品の `setup()` が
+    /// 走る。Viewer はまだ 1 フレームも描いていないので、描いたときの大きさを
+    /// 使うと 1×1 になる。`createCanvas(innerWidth, innerHeight)` と書いた作品は
+    /// その 1 をグローバルへ焼き付け、`setup()` は二度と走らないので、
+    /// そのあとずっと真っ黒のままになる。
+    #[test]
+    fn a_preloaded_sketch_sees_the_real_window_size() {
+        use tsubu_processing_lite::VmSketch;
+
+        let sketch = |id: &str, src: &str| {
+            LoadedSketch::new(
+                SketchInfo { id: id.into(), title: id.into(), thumbnail_frame: 1 },
+                Box::new(VmSketch::compile(src, 1).expect("コンパイルできる")),
+            )
+        };
+        let mut viewer = Viewer::new(vec![
+            sketch("first", "draw=_=>{background(0);circle(50,50,10)}"),
+            sketch("second", "draw=_=>{background(0);circle(50,50,10)}"),
+            // setup() で窓の幅を覚え、その幅いっぱいに帯を引く。
+            sketch(
+                "full",
+                "setup=_=>{W=innerWidth}\ndraw=_=>{background(0);rect(0,0,W,10)}",
+            ),
+        ]);
+
+        // 一度も描かないまま、Gallery から開いたときと同じ順で動かす。
+        // 1 へ移ると隣の 2 が先読みされ、そこで 2 の setup() が走る。
+        viewer.set_display_size(800.0, 600.0);
+        viewer.switch_to(1);
+        assert!(viewer.sketches[2].initialized, "先読みが走っていません");
+        viewer.switch_to(2);
+        let g = viewer.render_frame(800.0, 600.0).expect("描かれる");
+        let right = g
+            .draw_list()
+            .vertices
+            .iter()
+            .map(|v| v.pos[0])
+            .fold(f32::MIN, f32::max);
+        assert!(right > 700.0, "窓の幅を読めていません: 右端 {right}");
     }
 
     /// `setup()` の中だけで描く作品は、戻ってきたら描き直す。

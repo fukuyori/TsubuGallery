@@ -302,6 +302,12 @@ pub enum Op {
     SetIndex,
     /// スタックに積まれた値を関数として呼ぶ。
     CallValue(u8),
+    /// [`Op::CallValue`] と同じだが、呼ぼうとした名前を覚えている。
+    ///
+    /// `createColorPicker()` のように、このランタイムに無い API を呼んだときに
+    /// 「何が無いのか」を言えるようにするためだけの違い。1 番目は名前の
+    /// 文字列表の位置。
+    CallNamed(u16, u8),
     /// `[obj, args...]` → `[result]`。配列のメソッド呼び出し。
     CallMethod(u16, u8),
 }

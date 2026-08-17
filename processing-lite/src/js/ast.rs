@@ -186,8 +186,10 @@ pub enum Stmt {
         iterable: Expr,
         body: Box<Stmt>,
     },
+    /// `switch`。JavaScript も Java と同じく、`break` が無ければ次の case へ落ちる。
+    Switch { value: Expr, cases: Vec<SwitchCase>, line: u32, column: u32 },
     Return(Option<Expr>),
-    /// 一番内側のループを抜ける。
+    /// 一番内側のループ、または switch を抜ける。
     Break { line: u32, column: u32 },
     /// 一番内側のループの次の回へ進む。
     Continue { line: u32, column: u32 },
@@ -200,6 +202,14 @@ pub enum Stmt {
         line: u32,
         column: u32,
     },
+}
+
+/// `switch` の 1 ラベル分。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwitchCase {
+    /// `case 1:` の値。`default:` なら `None`。
+    pub label: Option<Expr>,
+    pub body: Vec<Stmt>,
 }
 
 /// プログラム全体。トップレベルの文の並び。

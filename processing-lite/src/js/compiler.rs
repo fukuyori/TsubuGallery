@@ -52,11 +52,22 @@ impl Slot {
     }
 }
 
-/// コンパイル中のループ 1 つ分。飛び先はループを組み終えてから埋める。
+/// `break` / `continue` の飛び先を集める入れ物。飛び先は組み終えてから埋める。
+///
+/// `switch` も `break` を受けるのでここへ積むが、`continue` は素通りして
+/// 外側のループへ行く。それを見分けるのが [`Self::is_loop`]。
 #[derive(Default)]
 struct LoopCtx {
+    /// ループなら真。`switch` なら偽。
+    is_loop: bool,
     breaks: Vec<usize>,
     continues: Vec<usize>,
+}
+
+impl LoopCtx {
+    fn loop_body() -> Self {
+        Self { is_loop: true, ..Self::default() }
+    }
 }
 
 struct Compiler {
@@ -265,7 +276,7 @@ impl Compiler {
                 self.expression(cond)?;
                 let jump_end = self.emit_jump(Op::JumpIfFalse(0));
 
-                self.loops.push(LoopCtx::default());
+                self.loops.push(LoopCtx::loop_body());
                 self.statement(body)?;
                 let ctx = self.loops.pop().expect("直前に積んだ");
 
@@ -292,7 +303,7 @@ impl Compiler {
                     }
                     None => None,
                 };
-                self.loops.push(LoopCtx::default());
+                self.loops.push(LoopCtx::loop_body());
                 self.statement(body)?;
                 let ctx = self.loops.pop().expect("直前に積んだ");
 
@@ -314,12 +325,57 @@ impl Compiler {
                 }
             }
 
+            // 振り分けだけを先に並べ、中身はそのあとへ続けて置く。break が
+            // 無ければ次の case へ落ちるのは JavaScript も Java と同じ。
+            Stmt::Switch { value, cases, .. } => {
+                let slot = self.hidden_slot("switch.value");
+                self.expression(value)?;
+                self.code.push(slot.store());
+
+                let mut entries = Vec::new();
+                for case in cases {
+                    let Some(label) = &case.label else { continue };
+                    self.code.push(slot.load());
+                    self.expression(label)?;
+                    self.code.push(Op::Eq);
+                    entries.push(self.emit_jump(Op::JumpIfTrue(0)));
+                }
+                let to_default = self.emit_jump(Op::Jump(0));
+
+                // break の行き先を集めるためにループとして積む。continue は
+                // switch では止まらないので、外側のループへ渡す。
+                self.loops.push(LoopCtx::default());
+                let mut default_at = None;
+                let mut entry = 0;
+                for case in cases {
+                    match case.label {
+                        Some(_) => {
+                            let at = entries[entry];
+                            let here = self.code.len() as u32;
+                            self.patch_to(at, here);
+                            entry += 1;
+                        }
+                        None => default_at = Some(self.code.len() as u32),
+                    }
+                    for stmt in &case.body {
+                        self.statement(stmt)?;
+                    }
+                }
+                let ctx = self.loops.pop().expect("直前に積んだ");
+
+                let end = self.code.len() as u32;
+                self.patch_to(to_default, default_at.unwrap_or(end));
+                for at in ctx.breaks {
+                    self.patch_to(at, end);
+                }
+            }
+
             Stmt::Break { line, column } => {
                 if self.loops.is_empty() {
                     return Err(CompileError::new(
                         *line,
                         *column,
-                        "break はループの中でしか使えません".to_string(),
+                        "break はループか switch の中でしか使えません".to_string(),
                     ));
                 }
                 let at = self.emit_jump(Op::Jump(0));
@@ -327,7 +383,8 @@ impl Compiler {
             }
 
             Stmt::Continue { line, column } => {
-                if self.loops.is_empty() {
+                // switch は素通りする。JavaScript の continue はループにしか効かない。
+                if !self.loops.iter().any(|c| c.is_loop) {
                     return Err(CompileError::new(
                         *line,
                         *column,
@@ -335,7 +392,13 @@ impl Compiler {
                     ));
                 }
                 let at = self.emit_jump(Op::Jump(0));
-                self.loops.last_mut().expect("空でないと確認済み").continues.push(at);
+                self.loops
+                    .iter_mut()
+                    .rev()
+                    .find(|c| c.is_loop)
+                    .expect("あると確認済み")
+                    .continues
+                    .push(at);
             }
 
             // `for (v of xs)`。配列と添字を隠し変数に置いて回す。
@@ -362,7 +425,7 @@ impl Compiler {
                 self.store(name);
                 self.code.push(Op::Pop);
 
-                self.loops.push(LoopCtx::default());
+                self.loops.push(LoopCtx::loop_body());
                 self.statement(body)?;
                 let ctx = self.loops.pop().expect("直前に積んだ");
 
@@ -902,12 +965,19 @@ impl Compiler {
             }
         }
 
-        // それ以外は値として呼ぶ。
+        // それ以外は値として呼ぶ。名前で呼んでいるなら、その名前も覚えておく。
+        // 中身が空だったときに「何が無いのか」を言えるのはここだけ。
         self.expression(callee)?;
         for arg in args {
             self.expression(arg)?;
         }
-        self.code.push(Op::CallValue(argc));
+        match callee {
+            Expr::Ident(name) => {
+                let index = self.intern(name);
+                self.code.push(Op::CallNamed(index, argc));
+            }
+            _ => self.code.push(Op::CallValue(argc)),
+        }
         Ok(())
     }
 
@@ -1091,6 +1161,15 @@ impl Names {
                 }
                 self.expression(iterable);
                 self.statement(body);
+            }
+            Stmt::Switch { value, cases, .. } => {
+                self.expression(value);
+                for case in cases {
+                    if let Some(label) = &case.label {
+                        self.expression(label);
+                    }
+                    self.statements(&case.body);
+                }
             }
             Stmt::Return(value) => {
                 if let Some(value) = value {

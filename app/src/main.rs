@@ -1816,6 +1816,12 @@ impl ApplicationHandler for App {
             self.locales.set_preference(LanguagePreference::Explicit("en-US".into()));
         }
 
+        // Viewer を一度も描かないうちに Gallery から作品を開くと、そこで隣の
+        // 作品の `setup()` が走る。窓の大きさを先に教えておかないと、
+        // `createCanvas(innerWidth, innerHeight)` が 1×1 を読んでしまう。
+        let size = window.inner_size();
+        self.viewer.set_display_size(size.width as f32, size.height as f32);
+
         self.window = Some(window);
         self.gfx = Some(gfx);
         ui.set_theme(self.settings.theme);
@@ -1863,6 +1869,7 @@ impl ApplicationHandler for App {
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.resize(size.width, size.height);
                 }
+                self.viewer.set_display_size(size.width as f32, size.height as f32);
             }
 
             WindowEvent::CursorMoved { position, .. } => {

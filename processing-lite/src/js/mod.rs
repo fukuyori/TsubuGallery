@@ -187,6 +187,53 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
     }
 
     #[test]
+    fn switch_picks_a_case_and_falls_through() {
+        // break で止まる。
+        assert_eq!(eval("(f=n=>{switch(n){case 1:return 10;case 2:return 20}return 0},f(2))"), 20.0);
+        // break が無ければ次の case へ落ちる。Java Mode と同じ。
+        assert_eq!(eval("(n=0,(()=>{switch(1){case 1:n++;case 2:n++;break;case 3:n++}})(),n)"), 2.0);
+        // どれにも当たらなければ default。
+        assert_eq!(eval("(f=n=>{switch(n){case 1:return 1;default:return 9}},f(7))"), 9.0);
+        // default が無く、当たらなければ何もしない。
+        assert_eq!(eval("(n=5,(()=>{switch(0){case 1:n=1}})(),n)"), 5.0);
+    }
+
+    /// `switch` の中の `continue` は、switch ではなく外のループに効く。
+    #[test]
+    fn continue_inside_a_switch_belongs_to_the_loop() {
+        assert_eq!(
+            eval("(n=0,(()=>{for(i=0;i<4;i++){switch(i%2){case 0:continue}n++}})(),n)"),
+            2.0
+        );
+    }
+
+    /// ループの外の `continue` は、switch の中にあっても通さない。
+    #[test]
+    fn continue_outside_a_loop_is_still_refused() {
+        let source = "draw=_=>{switch(1){case 1:continue}}";
+        let script = crate::js::parse(source).expect("パースは通る");
+        assert!(crate::js::compile(&script).is_err(), "continue が通ってしまった");
+    }
+
+    /// JavaScript では予約語もプロパティ名に書ける。
+    #[test]
+    fn a_keyword_can_be_a_property_name() {
+        assert_eq!(eval("({default:3}).default"), 3.0);
+        assert_eq!(eval("({if:1,for:2}).for"), 2.0);
+    }
+
+    #[test]
+    fn a_missing_function_is_named() {
+        let mut sketch =
+            VmSketch::compile("setup=_=>{createColorPicker('#fff')}\ndraw=_=>{}", 1).expect("通る");
+        let mut g = Graphics::new();
+        g.begin_frame(100.0, 100.0);
+        sketch.setup(&mut g);
+        let error = sketch.error().expect("止まるはず");
+        assert!(error.contains("createColorPicker"), "{error}");
+    }
+
+    #[test]
     fn a_syntax_error_reports_a_position() {
         let Err(e) = crate::js::parse("draw=_=>{circle(1,2}") else {
             panic!("パースは失敗するはず");
