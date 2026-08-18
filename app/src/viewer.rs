@@ -228,8 +228,14 @@ impl Viewer {
             self.states[index] = None;
             self.leans_on_the_canvas[index] = false;
             self.overflowed[index] = false;
-            self.graphics.reset_state();
-            self.epoch += 1;
+            // Graphics は全作品で共有しているが、いま入っているのは表示中の
+            // 作品の状態。Gallery で別の作品を編集しただけなら、それを消しては
+            // いけない。setup() は済んでいるので createCanvas() などが戻らず、
+            // 次に開いたとき座標が左上へ寄ってしまう。
+            if index == self.current {
+                self.graphics.reset_state();
+                self.epoch += 1;
+            }
         }
     }
 
@@ -252,6 +258,7 @@ impl Viewer {
         if index >= self.sketches.len() {
             return;
         }
+        let removed_current = index == self.current;
         self.sketches.remove(index);
         self.frame_counts.remove(index);
         self.clocks.remove(index);
@@ -264,8 +271,23 @@ impl Viewer {
             self.current -= 1;
         }
         self.current = self.current.min(self.sketches.len().saturating_sub(1));
-        self.graphics.reset_state();
-        self.epoch += 1;
+
+        // 前後の作品を消しただけなら、表示中の Graphics とキャンバスはその
+        // 作品のもののまま使える。表示中の作品を消したときだけ、繰り上がって
+        // きた作品の setup() 済みの状態を戻してキャンバスを描き直す。
+        if removed_current {
+            let state = self.states.get(self.current).cloned().flatten();
+            self.graphics.reset_state();
+            if let Some(state) = state {
+                self.graphics.set_state(state);
+            }
+            if self.leans_on_the_canvas(self.current) {
+                self.sketches[self.current].restart();
+                self.states[self.current] = None;
+                self.graphics.reset_state();
+            }
+            self.epoch += 1;
+        }
     }
 
     pub fn is_paused(&self) -> bool {
@@ -910,6 +932,87 @@ mod tests {
         // 見ているものを消したら、その位置に繰り上がってきたものを見る。
         viewer.remove(2);
         assert_eq!(viewer.current_index(), 2.min(viewer.len().saturating_sub(1)));
+    }
+
+    /// 別の作品を編集しても、表示中の作品の createCanvas() は消さない。
+    ///
+    /// createCanvas() を初回だけ呼ぶのはつぶやき p5 でよくある書き方。
+    /// Graphics を初期化すると再実行されず、図形が左上へ寄る。
+    #[test]
+    fn replacing_another_sketch_keeps_the_current_canvas() {
+        use tsubu_processing_lite::VmSketch;
+
+        let sketch = |id: &str| {
+            LoadedSketch::new(
+                SketchInfo { id: id.into(), title: id.into(), thumbnail_frame: 1 },
+                Box::new(
+                    VmSketch::compile(
+                        "f=0\ndraw=_=>{f++||createCanvas(W=100,W);background(0);noStroke();rect(0,0,W,W)}",
+                        1,
+                    )
+                    .expect("コンパイルできる"),
+                ),
+            )
+        };
+        let bounds = |g: &Graphics| {
+            let vertices = &g.draw_list().vertices;
+            let x0 = vertices.iter().map(|v| v.pos[0]).fold(f32::MAX, f32::min);
+            let x1 = vertices.iter().map(|v| v.pos[0]).fold(f32::MIN, f32::max);
+            (x0, x1)
+        };
+
+        let mut viewer = Viewer::new(vec![sketch("shown"), sketch("edited")]);
+        assert_eq!(bounds(viewer.render_frame(200.0, 100.0).expect("描ける")), (50.0, 150.0));
+
+        viewer.replace(1, sketch("edited-again"));
+        assert_eq!(
+            bounds(viewer.render_frame(200.0, 100.0).expect("描ける")),
+            (50.0, 150.0),
+            "表示中のキャンバスが消えて左上へ寄りました"
+        );
+
+        viewer.remove(1);
+        assert_eq!(
+            bounds(viewer.render_frame(200.0, 100.0).expect("描ける")),
+            (50.0, 150.0),
+            "別の作品の削除で表示中のキャンバスが消えました"
+        );
+    }
+
+    /// 表示中の作品を消したら、次の作品の setup() 済みの状態を戻す。
+    #[test]
+    fn removing_the_current_sketch_restores_the_next_canvas() {
+        use tsubu_processing_lite::VmSketch;
+
+        let sketch = |id: &str| {
+            LoadedSketch::new(
+                SketchInfo { id: id.into(), title: id.into(), thumbnail_frame: 1 },
+                Box::new(
+                    VmSketch::compile(
+                        "f=0\ndraw=_=>{f++||createCanvas(W=100,W);background(0);noStroke();rect(0,0,W,W)}",
+                        1,
+                    )
+                    .expect("コンパイルできる"),
+                ),
+            )
+        };
+        let left = |g: &Graphics| {
+            g.draw_list().vertices.iter().map(|v| v.pos[0]).fold(f32::MAX, f32::min)
+        };
+
+        let mut viewer = Viewer::new(vec![sketch("first"), sketch("second")]);
+        viewer.render_frame(200.0, 100.0);
+        viewer.switch_to(1);
+        viewer.render_frame(200.0, 100.0);
+        viewer.switch_to(0);
+        viewer.render_frame(200.0, 100.0);
+
+        viewer.remove(0);
+        assert_eq!(
+            left(viewer.render_frame(200.0, 100.0).expect("描ける")),
+            50.0,
+            "繰り上がった作品のキャンバスが戻っていません"
+        );
     }
 
     /// 地を一度しか塗らない作品も、戻ってきたら描き直す。
