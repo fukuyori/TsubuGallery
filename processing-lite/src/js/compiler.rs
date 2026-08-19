@@ -640,6 +640,12 @@ impl Compiler {
                     self.code.push(op);
                     return Ok(());
                 }
+                // `$.map(p5.Vector.random3D)` のように、呼ばずに値として
+                // 渡す書き方もある。
+                if let Some(native) = self.vector_static(object, name) {
+                    self.code.push(Op::ConstNativeFn(native));
+                    return Ok(());
+                }
                 let key = self.key(name);
                 self.expression(object)?;
                 self.code.push(Op::GetProp(key));
@@ -758,6 +764,18 @@ impl Compiler {
             // 関数として持ち回る書き方 (`S=Math.sin`) にも応える。
             other => Op::ConstNativeFn(natives::resolve_any(math_name(other))?),
         })
+    }
+
+    /// `p5.Vector.random3D` のような静的メソッドを組み込みへ読み替える。
+    ///
+    /// `p5` も `p5.Vector` も値としては持っていない。名前の並びだけを見て、
+    /// 対応する組み込みへ差し替える。`Math.sin` と同じやり方。
+    fn vector_static(&self, object: &Expr, name: &str) -> Option<natives::Native> {
+        let Expr::Member { object, name: class } = object else { return None };
+        if class != "Vector" || !is_namespace(object, "p5") || self.globals.contains_key("p5") {
+            return None;
+        }
+        natives::resolve_any(&format!("p5.Vector.{name}"))
     }
 
     /// スタックトップの値を的へ書き込む。書いた値はスタックに残る。
@@ -904,6 +922,18 @@ impl Compiler {
         if let Expr::Member { object, name } = callee
             && (is_math(object) || is_namespace(object, "String"))
             && let Some(native) = natives::resolve(math_name(name), argc)
+        {
+            for arg in args {
+                self.expression(arg)?;
+            }
+            self.code.push(Op::CallNative(native, argc));
+            return Ok(());
+        }
+
+        // `p5.Vector.add(a, b)` のような静的メソッド。`p5.Vector` という値は
+        // 持っていないので、メソッド呼び出しへ回す前にここで受ける。
+        if let Expr::Member { object, name } = callee
+            && let Some(native) = self.vector_static(object, name)
         {
             for arg in args {
                 self.expression(arg)?;

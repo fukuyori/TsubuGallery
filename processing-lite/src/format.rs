@@ -7,6 +7,12 @@
 //! どちらも **意味を変えない** ことが唯一の要件なので、[`crate::highlight::tokens`]
 //! が返すトークン列を並べ替えずに、あいだの空白だけを作り直す。変換の前後で
 //! Bytecode が一致することはテストで固定してある。
+//!
+//! つぶやき GLSL も同じ扱いで通す。文の区切りも括弧の対応も C 系で共通なので、
+//! 空白を作り直すぶんには方言を見分ける必要がない。例外は `#` で始まる行で、
+//! `#version` のようなプリプロセッサ指令は 1 行で完結していなければ通らず、
+//! `#つぶやきGLSL` のようなタグは書いたとおりに残したい。どちらも行ごと
+//! そのまま通す。
 
 use crate::highlight::{TokenClass, tokens};
 
@@ -25,19 +31,7 @@ const MAX_WRAP_DEPTH: u32 = 8;
 ///
 /// 文の区切りで改行して字下げしたあと、まだ長すぎる行は括弧の中で折り返す。
 pub fn expand(source: &str) -> String {
-    if leave_alone(source) {
-        return source.to_string();
-    }
     wrap_long_lines(&lay_out(source))
-}
-
-/// 整形に手を出さないコードか。
-///
-/// つぶやき GLSL は別の言語なので、Processing の文法を当てにした整形を掛けると
-/// 壊れる。`#version` のようなプリプロセッサ行を字下げされるだけでも通らなく
-/// なる。読めないものは触らない。
-fn leave_alone(source: &str) -> bool {
-    crate::dialect::looks_like_glsl(source)
 }
 
 /// 文と括弧の対応から、改行と字下げを決める。折り返しはまだしない。
@@ -77,6 +71,17 @@ fn lay_out(source: &str) -> String {
                     close_single_statements(&mut out, &mut single_statement_depth);
                 }
             }
+        }
+
+        // プリプロセッサ行。1 行で完結していないと通らないので、字下げも
+        // 折り返しも入れずにそのまま置く。
+        if piece.directive {
+            out.newline();
+            let indent = std::mem::take(&mut out.indent);
+            out.push(text);
+            out.indent = indent;
+            out.newline();
+            continue;
         }
 
         match piece.class {
@@ -130,7 +135,7 @@ fn lay_out(source: &str) -> String {
                     if pieces.previous_is_control_keyword(index) {
                         out.space();
                     }
-                    out.push("(");
+                    out.push_tight("(");
                     paren_depth += 1;
                 }
                 ")" => {
@@ -196,13 +201,20 @@ fn lay_out(source: &str) -> String {
             TokenClass::Operator => {
                 if text == "." {
                     // プロパティの区切り。両側とも空けない。
-                    out.push(".");
+                    out.push_tight(".");
                 } else if pieces.is_unary(index) {
                     // 単項は右にくっつける。`-1`, `!ok`
                     out.space_unless_line_start();
-                    out.push(text);
+                    out.push_tight(text);
                 } else if matches!(text, "++" | "--") {
-                    out.push(text);
+                    // 前置 (`++i`) は右に、後置 (`i++`) は左にくっつく。
+                    // 後置のあとは `i++ < 9` のように空ける。
+                    if pieces.follows_value(index) {
+                        out.push(text);
+                    } else {
+                        out.space_unless_line_start();
+                        out.push_tight(text);
+                    }
                 } else {
                     out.space_unless_line_start();
                     out.push(text);
@@ -244,6 +256,12 @@ fn wrap_long_lines(text: &str) -> String {
 }
 
 fn wrap_line(line: &str, depth: u32, out: &mut String) {
+    // `#` の行は割れない。`#define f(x) (x*2)` の括弧に手を出さない。
+    if line.starts_with('#') {
+        out.push_str(line);
+        out.push('\n');
+        return;
+    }
     if line.chars().count() <= MAX_WIDTH || depth >= MAX_WRAP_DEPTH {
         out.push_str(line);
         out.push('\n');
@@ -350,15 +368,27 @@ fn split_top_level(chars: &[char]) -> Vec<String> {
 ///
 /// 名前の付け替えはしない。意味を変えずに減らせるぶんだけを減らす。
 pub fn compress(source: &str) -> String {
-    if leave_alone(source) {
-        return source.to_string();
-    }
     let mut out = String::new();
     let mut previous = String::new();
     let mut pending_newline = false;
     let mut group_depth = 0i32;
+    // 改行を文の区切りとして残すか。`;` を省ける p5.js だけの都合で、GLSL は
+    // 必ず `;` で終わるので全部詰めてよい。
+    let keeps_newlines = !crate::dialect::looks_like_glsl(source);
 
     for piece in Pieces::new(source).iter() {
+        // プリプロセッサ行は詰められない。前後の改行ごと残す。
+        if piece.directive {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(piece.text.trim());
+            out.push('\n');
+            previous.clear();
+            pending_newline = false;
+            continue;
+        }
+
         let text = match piece.class {
             TokenClass::Comment => continue,
             TokenClass::Plain => {
@@ -375,19 +405,23 @@ pub fn compress(source: &str) -> String {
             continue;
         }
 
-        match text.as_str() {
-            "(" | "[" => group_depth += 1,
-            ")" | "]" => group_depth -= 1,
-            _ => {}
+        if matches!(text.as_str(), "(" | "[") {
+            group_depth += 1;
         }
 
         // セミコロンを書かない p5.js では改行が文の区切り。消すと繋がってしまう。
-        if pending_newline && group_depth == 0 && ends_statement(&previous) {
+        if keeps_newlines && pending_newline && group_depth == 0 && ends_statement(&previous) {
             out.push('\n');
         } else if needs_space(&previous, &text) {
             out.push(' ');
         }
         pending_newline = false;
+
+        // 閉じ括弧を数えるのは、改行を決めたあと。先に減らすと、括弧の中に
+        // あった改行が文の区切りに見えて `)` の手前で行が割れる。
+        if matches!(text.as_str(), ")" | "]") {
+            group_depth -= 1;
+        }
 
         out.push_str(&text);
         previous = text;
@@ -406,10 +440,16 @@ fn needs_space(previous: &str, next: &str) -> bool {
     let Some(a) = previous.chars().last() else { return false };
     let Some(b) = next.chars().next() else { return false };
 
-    let wordish = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+    let wordish = |c: char| c.is_alphanumeric() || c == '_';
 
-    // `int x` を `intx` にしてはいけない。数値の `1 .5` も同じ。
+    // `int x` を `intx` にしてはいけない。
     if wordish(a) && wordish(b) {
+        return true;
+    }
+
+    // 点は数の一部にも、プロパティの区切りにもなる。`1` と `.5` を詰めると
+    // `1.5` になって値が変わるが、`p` と `.x` は詰めてよい。
+    if (a == '.' && b.is_ascii_digit()) || (b == '.' && a.is_ascii_digit()) {
         return true;
     }
 
@@ -454,6 +494,15 @@ struct Piece<'a> {
     class: TokenClass,
     /// 直前のコードと同じ行にあるか。行末コメントの判定に使う。
     same_line_as_previous_code: bool,
+    /// `#` で始まる行 1 本ぶん。中は割らない。
+    directive: bool,
+}
+
+impl Piece<'_> {
+    /// 前後関係を見るときに数えるか。空白・コメント・プリプロセッサ行は数えない。
+    fn is_code(&self) -> bool {
+        !self.directive && !matches!(self.class, TokenClass::Plain | TokenClass::Comment)
+    }
 }
 
 struct Pieces<'a> {
@@ -464,8 +513,15 @@ impl<'a> Pieces<'a> {
     fn new(source: &'a str) -> Self {
         let mut pieces = Vec::new();
         let mut saw_code_on_this_line = false;
+        // プリプロセッサ行を 1 つにまとめたときの、その行の終わり。
+        let mut directive_end = 0usize;
 
         for span in tokens(source) {
+            // まとめた行の中身は読み飛ばす。
+            if span.start < directive_end {
+                continue;
+            }
+
             let text = &source[span.start..span.end];
             if span.class == TokenClass::Plain {
                 if text.contains('\n') {
@@ -475,7 +531,26 @@ impl<'a> Pieces<'a> {
                     text,
                     class: span.class,
                     same_line_as_previous_code: false,
+                    directive: false,
                 });
+                continue;
+            }
+
+            // `#version 450` や `#つぶやきGLSL`。`#` は演算子でも括弧でもない
+            // ので 1 文字の Unknown として出てくる。行の頭にあるものだけを
+            // 見るのは、行の途中に書かれた `#` を巻き込まないため。
+            if text == "#" && !saw_code_on_this_line {
+                let end = source[span.start..]
+                    .find('\n')
+                    .map_or(source.len(), |at| span.start + at);
+                directive_end = end;
+                pieces.push(Piece {
+                    text: source[span.start..end].trim_end(),
+                    class: span.class,
+                    same_line_as_previous_code: false,
+                    directive: true,
+                });
+                saw_code_on_this_line = true;
                 continue;
             }
 
@@ -483,6 +558,7 @@ impl<'a> Pieces<'a> {
                 text,
                 class: span.class,
                 same_line_as_previous_code: saw_code_on_this_line,
+                directive: false,
             });
             saw_code_on_this_line = true;
         }
@@ -494,38 +570,34 @@ impl<'a> Pieces<'a> {
         self.pieces.iter()
     }
 
-    /// 空白とコメントを飛ばして 1 つ前のコード。
-    fn previous_code(&self, index: usize) -> Option<&str> {
-        self.pieces[..index]
-            .iter()
-            .rev()
-            .find(|p| !matches!(p.class, TokenClass::Plain | TokenClass::Comment))
-            .map(|p| p.text)
+    /// 空白・コメント・プリプロセッサ行を飛ばして 1 つ前のコード。
+    fn previous_code(&self, index: usize) -> Option<&Piece<'a>> {
+        self.pieces[..index].iter().rev().find(|p| p.is_code())
     }
 
     fn next_code(&self, index: usize) -> Option<&str> {
-        self.pieces[index + 1..]
-            .iter()
-            .find(|p| !matches!(p.class, TokenClass::Plain | TokenClass::Comment))
-            .map(|p| p.text)
+        self.pieces[index + 1..].iter().find(|p| p.is_code()).map(|p| p.text)
     }
 
     fn previous_is_control_keyword(&self, index: usize) -> bool {
-        matches!(self.previous_code(index), Some("if" | "for" | "while"))
+        matches!(self.previous_code(index).map(|p| p.text), Some("if" | "for" | "while"))
     }
 
     /// その演算子が単項か。直前に値が無ければ単項。
     fn is_unary(&self, index: usize) -> bool {
-        let text = self.pieces[index].text;
-        if !matches!(text, "-" | "+" | "!") {
-            return false;
-        }
+        matches!(self.pieces[index].text, "-" | "+" | "!") && !self.follows_value(index)
+    }
+
+    /// 直前が値で終わっているか。単項と後置の見分けに使う。
+    fn follows_value(&self, index: usize) -> bool {
         match self.previous_code(index) {
-            None => true,
+            None => false,
             Some(prev) => {
-                let ends_value = prev.ends_with(|c: char| c.is_alphanumeric() || c == '_')
-                    || matches!(prev, ")" | "]");
-                !ends_value
+                // 数はそれだけで値。末尾の字だけで見ると `18.` を取り逃がす。
+                // GLSL は `2.-r` のようにここを踏む書き方が多い。
+                prev.class == TokenClass::Number
+                    || prev.text.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                    || matches!(prev.text, ")" | "]")
             }
         }
     }
@@ -537,11 +609,16 @@ struct Writer {
     indent: usize,
     /// 行頭 (まだ何も書いていない)。
     at_line_start: bool,
+    /// 直前に書いたものが、次にくっつくか。`(`・単項・`.`・前置の `++`。
+    ///
+    /// 書いた文字から見分けようとすると `9.` の小数点と `p.` の区切り、
+    /// 前置の `++i` と後置の `i++` が区別できない。書いた側が言う。
+    tight: bool,
 }
 
 impl Writer {
     fn new() -> Self {
-        Self { out: String::new(), indent: 0, at_line_start: true }
+        Self { out: String::new(), indent: 0, at_line_start: true, tight: false }
     }
 
     fn push(&mut self, text: &str) {
@@ -552,6 +629,13 @@ impl Writer {
             self.at_line_start = false;
         }
         self.out.push_str(text);
+        self.tight = false;
+    }
+
+    /// 次のトークンをくっつけて書く。
+    fn push_tight(&mut self, text: &str) {
+        self.push(text);
+        self.tight = true;
     }
 
     /// 直前の空白を取り消す。
@@ -569,12 +653,8 @@ impl Writer {
 
     /// 行頭では字下げが空白の代わりになるので、何もしない。
     fn space_unless_line_start(&mut self) {
-        if !self.at_line_start {
-            // 開き括弧・単項・プロパティの区切りの直後は空けない。
-            let ends_open = self.out.ends_with(['(', '!', '-', '+', '.']);
-            if !ends_open {
-                self.space();
-            }
+        if !self.at_line_start && !self.tight {
+            self.space();
         }
     }
 
@@ -639,12 +719,62 @@ mod tests {
     use crate::compiler::compile;
     use crate::parser::parse;
 
-    /// つぶやき GLSL には触らない。整形は Processing の文法を当てにしている。
+    /// 実際に貼られたつぶやき GLSL。1 行のままでは読めない。
+    const SHADER: &str = "for(float i,g,e,s;++i<18.;){vec3 p=vec3((FC.xy*2.-r)/r.y*(9.+cos(t*.5)*3.),g+.2)*rotate3D(t*.5,vec3(-4,sin(t)+7.,0));s=1.;for(int i;i++<9;p=vec3(1.5,4,3)-abs(abs(p)*e-vec3(1,1.2,3)))s*=e=max(.95,9./dot(p,p));g+=mod(length(p.yy),p.y)/s*.5;o.rgb+=hsv(.59,.4-g,s/4e3);}";
+
     #[test]
-    fn a_shader_is_left_exactly_as_it_is() {
-        let source = "float i, e;\nfor (; i++< 1e2;) {\n  vec3 p = vec3(FC.xy / r, 1);\n  e += length(p);\n}\no += e;\n";
-        assert_eq!(expand(source), source);
-        assert_eq!(compress(source), source);
+    fn a_shader_gets_laid_out() {
+        let expanded = expand(SHADER);
+        assert!(expanded.lines().count() > 5, "1 行のままです:\n{expanded}");
+        assert!(expanded.contains("\n  vec3 p = vec3("), "字下げが入っていません:\n{expanded}");
+    }
+
+    /// 整形しても同じシェーダーであること。トークンの比較では
+    /// 「くっつけてはいけないものをくっつけた」を見つけられない。
+    #[test]
+    fn a_formatted_shader_still_compiles() {
+        for source in [SHADER, &expand(SHADER), &compress(&expand(SHADER))] {
+            crate::glsl_sketch::GlslSketch::compile(source)
+                .unwrap_or_else(|e| panic!("{}行{}列 {}\n{source}", e.line, e.column, e.message));
+        }
+    }
+
+    #[test]
+    fn a_shader_goes_back_to_one_line() {
+        // GLSL は必ず `;` で終わるので、詰めるときに改行を残す理由が無い。
+        assert_eq!(compress(&expand(SHADER)), SHADER);
+    }
+
+    /// `#` の行は 1 行で完結していなければ通らない。字下げも折り返しもしない。
+    #[test]
+    fn a_hash_line_is_left_alone() {
+        let source = "#define S(a) smoothstep(0.,1.,a)\nvoid main(){o=vec4(S(FC.x/r.x));}\n#つぶやきGLSL";
+        for text in [expand(source), compress(&expand(source))] {
+            assert!(
+                text.contains("\n#つぶやきGLSL") || text.starts_with("#つぶやきGLSL"),
+                "タグが崩れました:\n{text}"
+            );
+            assert!(text.contains("#define S(a) smoothstep(0.,1.,a)\n"), "{text}");
+        }
+    }
+
+    /// 小数点はプロパティの区切りではない。
+    ///
+    /// `2.` は「値の途中」に見えるので、次の `-` が単項に、`/` の前の空白が
+    /// 落ちる。GLSL は `2.-r` や `9./d` と書くので、ここを踏み続ける。
+    #[test]
+    fn a_decimal_point_does_not_swallow_the_next_operator() {
+        assert_eq!(expand("o=vec4(2.-r);").trim(), "o = vec4(2. - r);");
+        assert_eq!(expand("s=9./dot(p,p);").trim(), "s = 9. / dot(p, p);");
+        // プロパティの区切りのほうは、これまでどおり詰める。
+        assert_eq!(expand("o.rgb=p.yy;").trim(), "o.rgb = p.yy;");
+    }
+
+    /// 後置の `++` は値の終わり。前置の `++` は次にくっつく。
+    #[test]
+    fn an_increment_knows_which_side_it_belongs_to() {
+        assert_eq!(expand("for(int i;i++<9;)f();").trim(), "for (int i; i++ < 9;)\n  f();");
+        assert_eq!(expand("for(float i;++i<18.;)f();").trim(), "for (float i; ++i < 18.;)\n  f();");
     }
 
     /// どちらの方言でもよいので Bytecode まで通す。
@@ -862,6 +992,16 @@ mod tests {
         let out = expand("draw=_=>{p={x:1};circle(p.x,0,1)}");
         assert!(out.contains("p.x"), "\n{out}");
         assert!(!out.contains("p . x"), "\n{out}");
+    }
+
+    /// 詰めるときも同じ。`.` を数の一部と同じに扱うと、逆に伸びる。
+    #[test]
+    fn member_access_is_not_spaced_when_compressing() {
+        let out = compress("draw=_=>{circle(p.x, 0, 1)}");
+        assert!(out.contains("p.x"), "\n{out}");
+        // `1` と `.5` を詰めると `1.5` になってしまう。ここは空けたまま。
+        assert!(needs_space("1", ".5"), "数どうしはくっつけられない");
+        assert!(!needs_space("p", "."), "プロパティの区切りは詰めてよい");
     }
 
     #[test]

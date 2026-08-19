@@ -7,7 +7,8 @@ sketches — Processing written short enough to fit in a post.
 
 ![The gallery screen, showing sketches as a grid of thumbnails](images/screenshot.png)
 
-See [`docs/TsubuGallery_Design.md`](docs/TsubuGallery_Design.md) for the design
+What changed in each release is in [CHANGELOG.md](CHANGELOG.md). See
+[`docs/TsubuGallery_Design.md`](docs/TsubuGallery_Design.md) for the design
 (written in Japanese). This repository implements all of **Prototypes A–E** from
 §29 of that document.
 
@@ -192,6 +193,12 @@ Neither direction reorders tokens, so meaning is preserved. Tests pin that the
 bytecode is identical before and after for every bundled sketch, and that a round
 trip is stable. Even for code that does not parse, the token sequence is
 guaranteed unchanged.
+
+つぶやきGLSL is formatted the same way. Statement separators and brackets work
+alike in every C-family language, so the dialect does not have to be told apart.
+The exception is a line starting with `#`: a preprocessor directive such as
+`#version` only works if it stays on one line, and a tag such as `#つぶやきGLSL`
+should be left exactly as written. Both are passed through as whole lines.
 
 The viewer's control overlay fades out after 2.6 s without input (§8.2).
 
@@ -742,6 +749,7 @@ default black stroke and would be invisible.
 | Text | `text() textSize() textAlign() textWidth()`, `str() nf()`, `String.fromCodePoint()` |
 | Shape modes | `rectMode() ellipseMode() angleMode()`, `square()` |
 | Vectors | `createVector()`, `add sub mult div set copy mag magSq normalize limit setMag heading rotate dist dot cross lerp angleBetween` |
+| Vectors (static) | `p5.Vector.random2D random3D fromAngle add sub mult div lerp cross normalize dot dist mag angleBetween`. These leave their arguments alone and return a new vector |
 | Looping | `noLoop() loop()` `clear()` |
 | Colour values | `color() lerpColor()`, components `red() green() blue() alpha() hue() saturation() brightness()` |
 | Colour and stroke | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
@@ -936,7 +944,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | Functions | Arrow functions (`=>` `⇒` `→`), `function` declarations, functions as values (`B=blendMode`) |
 | Arrays | Literals, indexed read/write, `length`, `Array(n)` |
 | Array methods | `push pop shift unshift at slice splice concat reverse fill flat join indexOf lastIndexOf includes sort keys entries`, and the callback ones `map forEach filter flatMap find findLast findIndex some every reduce` |
-| Spread | `[...xs]`, `[...a, b, ...c]`, and in a call's arguments: `stroke(...c, 9)`, `Math.max(...xs)` |
+| Spread | `[...xs]`, `[...a, b, ...c]`, and in a call's arguments: `stroke(...c, 9)`, `Math.max(...xs)`. A string spreads into its characters (`[...'abc']`) |
 | Strings | `"..."` `'...'` `` `...` ``, `${}` interpolation, `+` concatenation, `length charAt substring indexOf split repeat toUpperCase toLowerCase trim` |
 | Destructuring | `[a,b]=[1,2]`, swapping `[a,b]=[b,a]`, `[o.x,v[0]]=…` |
 | Objects | Literals (`{x:1}`, shorthand `{x}`), reading and writing `p.x`, `p.x+=v`. Reserved words work as property names (`{default:1}.default`) |
@@ -1262,9 +1270,10 @@ vertices actually come out and that the shortcuts are wired
 
 ### The icon
 
-`scripts/make-icon.py` draws `app/assets/icon.ico` and `icon.png`. What lives in
-the repository is the recipe rather than the artwork, so changing the colours or
-the number of grains means editing the script, not hunting for a source file.
+`scripts/make-icon.py` draws three files into `app/assets/`: `icon.ico`,
+`icon.png` (256px) and `icon-1024.png`. What lives in the repository is the
+recipe rather than the artwork, so changing the colours or the number of grains
+means editing the script, not hunting for a source file.
 
 ```sh
 python scripts/make-icon.py
@@ -1272,9 +1281,25 @@ python scripts/make-icon.py
 
 `app/build.rs` embeds the `.ico` into the executable through `winresource`,
 along with the version info (ProductName / FileVersion) that shows up in the
-properties dialog. The `.png` is pulled in with `include_bytes!` as the winit
-window icon: Windows uses the embedded resource, but on Linux nothing is shown
-unless it is handed over explicitly.
+properties dialog. That resource is what Explorer shows, though — **it does
+nothing for the window itself**.
+
+The `.png` is pulled in with `include_bytes!` as the winit window icon. Windows
+keeps a separate icon for the title bar and for the taskbar, so the same image
+is handed to both (`with_window_icon` sets `ICON_SMALL`, `with_taskbar_icon` sets
+`ICON_BIG`). winit actively clears an `ICON_BIG` that was not supplied, so
+leaving it out means no icon in the taskbar or in Alt+Tab. On Linux nothing is
+shown either unless it is handed over explicitly.
+
+The icon is then set **once more after the first frame** (`App::settle_icon`).
+Explorer asks a newly appeared window for its icon with a short timeout, and
+startup — bringing up the GPU and loading the library — blocks the message loop
+past it, at which point Explorer settles for the placeholder and never asks
+again. A `WM_SETICON` makes it read the icon again.
+
+`icon-1024.png` is what the macOS `.icns` is baked from by
+`scripts/build-macos-installer.sh`. The Dock and the Finder go up to 1024px, so
+scaling the 256px one up would look soft.
 
 ### Windows installer
 

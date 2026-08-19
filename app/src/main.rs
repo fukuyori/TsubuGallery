@@ -187,8 +187,9 @@ fn capture_all_target() -> Option<std::path::PathBuf> {
 
 /// ウィンドウとタスクバーに出すアイコン。
 ///
-/// Windows では exe に埋めた資源が使われるのでこれが無くても出るが、Linux では
-/// 渡さないと環境ごとの既定の絵になる。同じ 1 枚を両方に使う。
+/// exe に埋めた資源 (`app/build.rs`) はエクスプローラが使うもので、窓には
+/// 効かない。Windows はタイトルバーとタスクバーで別々のアイコンを持つので、
+/// 同じ 1 枚を両方へ渡す。Linux でも渡さないと環境ごとの既定の絵になる。
 ///
 /// 読めなくても起動は続ける。絵が出ないだけで、できることは変わらない。
 fn window_icon() -> Option<Icon> {
@@ -282,6 +283,9 @@ struct App {
     collections: Vec<String>,
     /// コレクションの割り当て中なら、その作品。
     assigning: Option<usize>,
+
+    /// アイコンを貼り直したか ([`App::settle_icon`])。1 度で足りる。
+    icon_settled: bool,
 
     screen: Screen,
     show_info: bool,
@@ -404,6 +408,7 @@ impl App {
             capturer: Capturer::new(),
             repository,
             tags,
+            icon_settled: false,
             screen: Screen::initial(&settings),
             show_info: false,
             fullscreen: settings.fullscreen,
@@ -1608,7 +1613,31 @@ impl App {
         self.apply_editor_actions(&editor_actions);
         self.apply_settings_actions(&settings_actions);
         self.sync_runtime_errors();
+        self.settle_icon();
         self.viewer.note_frame_work(frame_started.elapsed().saturating_sub(vsync_wait));
+    }
+
+    /// 1 フレーム描き終えたところで、アイコンを貼り直す。
+    ///
+    /// 窓が出た直後、explorer は短い待ち時間つきで `WM_GETICON` を送ってくる。
+    /// 起動処理 (GPU の用意と作品の読み込み) がメッセージループを塞いでいると
+    /// 間に合わず、explorer は既定の絵を出したまま二度と訊きに来ない。
+    /// `WM_SETICON` を送れば読み直すので、手が空いてから 1 度だけ送る。
+    ///
+    /// 塞いでいなければ既に正しい絵が出ているが、同じ絵を送り直すだけなので
+    /// 見た目は変わらない。
+    fn settle_icon(&mut self) {
+        if self.icon_settled {
+            return;
+        }
+        self.icon_settled = true;
+        let Some(window) = self.window.as_ref() else { return };
+        window.set_window_icon(window_icon());
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::WindowExtWindows;
+            window.set_taskbar_icon(window_icon());
+        }
     }
 
     fn apply_settings_actions(&mut self, actions: &[SettingsAction]) {
@@ -1789,6 +1818,16 @@ impl ApplicationHandler for App {
             .with_title("TsubuGallery")
             .with_window_icon(window_icon())
             .with_inner_size(winit::dpi::LogicalSize::new(1100.0, 720.0));
+
+        // Windows のタスクバーが見るのは ICON_BIG で、`with_window_icon()` が
+        // 設定するのは ICON_SMALL (タイトルバー) だけ。しかも winit は
+        // 渡さなかった ICON_BIG を空にしにいくので、ここで渡さないと
+        // タスクバーと Alt+Tab だけ既定の絵になる。exe に埋めた資源も使われない。
+        #[cfg(windows)]
+        let attributes = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attributes.with_taskbar_icon(window_icon())
+        };
 
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Arc::new(w),

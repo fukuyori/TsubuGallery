@@ -425,12 +425,19 @@ impl Vm {
                 Op::ArrayExtend => {
                     let other = self.pop()?;
                     let array = self.peek()?;
-                    let (Value::Array(target), Value::Array(source)) = (&array, &other) else {
-                        // 展開できるのは配列だけ。文字列はまだ無い。
+                    let Value::Array(target) = &array else {
                         return Err(Trap::NoSuchMethod("...".into()));
                     };
-                    // 自分自身を展開しても止まるよう、先に写しを取る。
-                    let items: Vec<Value> = source.borrow().clone();
+                    let items: Vec<Value> = match &other {
+                        // 自分自身を展開しても止まるよう、先に写しを取る。
+                        Value::Array(source) => source.borrow().clone(),
+                        // 文字列は 1 文字ずつに割れる。`[...'あいう']` は
+                        // 3 要素。字数を数えるのに使われる書き方でもある。
+                        Value::Str(text) => {
+                            text.chars().map(|c| Value::new_str(c.to_string())).collect()
+                        }
+                        _ => return Err(Trap::NoSuchMethod("...".into())),
+                    };
                     if target.borrow().len() + items.len() > MAX_ARRAY_LENGTH {
                         return Err(Trap::ArrayTooLong);
                     }
@@ -827,8 +834,7 @@ impl Vm {
                     self.stack.push(acc);
                     self.stack.push(item);
                     self.stack.push(Value::Float(index as f32));
-                    self.invoke(program, callback.clone(), 3, g)?;
-                    self.run_until(program, g)?;
+                    self.call_callback(program, callback.clone(), 3, g)?;
                     acc = self.pop()?;
                 }
                 self.stack.push(acc);
@@ -846,8 +852,7 @@ impl Vm {
                     // コールバックは 1 要素ずつ、その場で最後まで走らせる。
                     self.stack.push(item.clone());
                     self.stack.push(Value::Float(index as f32));
-                    self.invoke(program, callback.clone(), 2, g)?;
-                    self.run_until(program, g)?;
+                    self.call_callback(program, callback.clone(), 2, g)?;
                     let produced = self.pop()?;
                     let hit = produced.truthy();
 
@@ -917,8 +922,7 @@ impl Vm {
         while i < left.len() && j < right.len() {
             self.stack.push(left[i].clone());
             self.stack.push(right[j].clone());
-            self.invoke(program, cmp.clone(), 2, g)?;
-            self.run_until(program, g)?;
+            self.call_callback(program, cmp.clone(), 2, g)?;
             // 0 以下なら左が先。JavaScript の決まり。
             if self.pop()?.as_f32() <= 0.0 {
                 out.push(left[i].clone());
@@ -934,6 +938,28 @@ impl Vm {
     }
 
     /// いま積んだフレームが終わるまで回す。コールバックの実行に使う。
+    /// 作品から渡された関数を 1 回呼び、答えが出るまで走らせる。引数は
+    /// あらかじめスタックへ積んでおく。
+    ///
+    /// 組み込みを渡されたとき (`$.map(p5.Vector.random3D)`) はフレームが
+    /// 積まれず、[`Self::invoke`] だけで答えが出ている。それを
+    /// [`Self::run_until`] に掛けると、床が呼び出し元のフレームになるので、
+    /// 呼び出し元の続きまで走ってしまう。
+    fn call_callback(
+        &mut self,
+        program: &Program,
+        callee: Value,
+        argc: u8,
+        g: &mut Graphics,
+    ) -> Result<(), Trap> {
+        let depth = self.frames.len();
+        self.invoke(program, callee, argc, g)?;
+        if self.frames.len() > depth {
+            self.run_until(program, g)?;
+        }
+        Ok(())
+    }
+
     fn run_until(&mut self, program: &Program, g: &mut Graphics) -> Result<(), Trap> {
         let floor = self.frames.len();
         if floor == 0 {

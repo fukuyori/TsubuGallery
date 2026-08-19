@@ -222,6 +222,30 @@ pub enum Native {
     ArrayOf,
     /// `createVector()` / `new PVector()`。
     CreateVector,
+
+    // `p5.Vector` の静的メソッド。インスタンスのメソッド
+    // ([`crate::vm`] の `vector_method`) と違い、渡されたベクトルは変えず、
+    // 新しいものを返す。p5.js と同じ。
+    /// `p5.Vector.random2D()`。XY 平面の単位ベクトル。
+    VectorRandom2D,
+    /// `p5.Vector.random3D()`。単位球の上の 1 点。
+    VectorRandom3D,
+    /// `p5.Vector.fromAngle(angle, [len])`。
+    VectorFromAngle,
+    VectorAdd,
+    VectorSub,
+    /// `p5.Vector.mult(v, n)`。n はベクトルでも数でもよい。
+    VectorMult,
+    VectorDiv,
+    VectorLerp,
+    VectorCross,
+    VectorNormalize,
+    // ここから下は数を返す。
+    VectorDot,
+    VectorDist,
+    VectorMag,
+    VectorAngleBetween,
+
     FromCodePoint,
     Text,
     TextSize,
@@ -457,6 +481,26 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "max", native: Native::Max, arities: &[2] },
     Signature { name: "Array", native: Native::ArrayOf, arities: &[1] },
     Signature { name: "createVector", native: Native::CreateVector, arities: &[0, 1, 2, 3] },
+    // `p5.Vector` の静的メソッド。名前に `.` が入っているので、変数名として
+    // 引かれることはない。読み替えるのは JS フロントエンドの `vector_static`。
+    Signature { name: "p5.Vector.random2D", native: Native::VectorRandom2D, arities: &[0] },
+    Signature { name: "p5.Vector.random3D", native: Native::VectorRandom3D, arities: &[0] },
+    Signature { name: "p5.Vector.fromAngle", native: Native::VectorFromAngle, arities: &[1, 2] },
+    Signature { name: "p5.Vector.add", native: Native::VectorAdd, arities: &[2] },
+    Signature { name: "p5.Vector.sub", native: Native::VectorSub, arities: &[2] },
+    Signature { name: "p5.Vector.mult", native: Native::VectorMult, arities: &[2] },
+    Signature { name: "p5.Vector.div", native: Native::VectorDiv, arities: &[2] },
+    Signature { name: "p5.Vector.lerp", native: Native::VectorLerp, arities: &[3] },
+    Signature { name: "p5.Vector.cross", native: Native::VectorCross, arities: &[2] },
+    Signature { name: "p5.Vector.normalize", native: Native::VectorNormalize, arities: &[1] },
+    Signature { name: "p5.Vector.dot", native: Native::VectorDot, arities: &[2] },
+    Signature { name: "p5.Vector.dist", native: Native::VectorDist, arities: &[2] },
+    Signature { name: "p5.Vector.mag", native: Native::VectorMag, arities: &[1] },
+    Signature {
+        name: "p5.Vector.angleBetween",
+        native: Native::VectorAngleBetween,
+        arities: &[2],
+    },
     Signature { name: "fromCodePoint", native: Native::FromCodePoint, arities: &[1] },
     Signature { name: "fromCharCode", native: Native::FromCodePoint, arities: &[1] },
     Signature { name: "text", native: Native::Text, arities: &[3] },
@@ -545,6 +589,25 @@ fn axis_of(value: &Value) -> Option<[f32; 3]> {
     }
 }
 
+/// `p5.Vector` の静的メソッドが受け取る値を `[x, y, z]` にする。
+///
+/// ベクトルと配列のほか、数もそのまま受ける。`p5.Vector.mult(v, 2)` の 2 は
+/// 全成分に掛かるので、`[2, 2, 2]` として扱えばそれで済む。
+fn xyz(value: &Value) -> [f32; 3] {
+    match axis_of(value) {
+        Some(v) => v,
+        None => {
+            let n = value.as_f32();
+            [n, n, n]
+        }
+    }
+}
+
+/// ベクトルの長さ。
+fn magnitude(v: [f32; 3]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
 /// `drawingContext` の影が乗る図形。
 ///
 /// 影は同じ形をずらして重ねて作るので、呼び直しても副作用の無いものに
@@ -591,6 +654,8 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
     // 値として呼ばれた場合 (`B = blendMode; B(ADD)`) は引数の数を検証していない。
     // 足りない分は 0 として扱い、範囲外アクセスで落ちないようにする。
     let f = |i: usize| args.get(i).map_or(0.0, Value::as_f32);
+    // ベクトルを受け取るものは値のまま見る。数へ潰すと成分が失われる。
+    let v = |i: usize| args.get(i).unwrap_or(&Value::Undefined);
 
     match native {
         // 宣言されたキャンバスは、縦横比を保ったまま表示領域へ収める。
@@ -956,6 +1021,83 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
         Native::Log2 => Value::Float(f(0).log2()),
         Native::Log10 => Value::Float(f(0).log10()),
         Native::CreateVector => Value::new_vector(f(0), f(1), f(2)),
+
+        // ---- p5.Vector の静的メソッド ----
+        // 渡されたベクトルは変えず、新しいものを返す。
+        Native::VectorRandom2D => {
+            let a = rng.random(std::f32::consts::TAU);
+            Value::new_vector(a.cos(), a.sin(), 0.0)
+        }
+        Native::VectorRandom3D => {
+            // 単位球の上で偏らないようにする。z を一様に選び、残りを
+            // その高さの円周へ回す (アルキメデスの定理)。p5.js と同じ。
+            let a = rng.random(std::f32::consts::TAU);
+            let z = rng.random_between(-1.0, 1.0);
+            let radius = (1.0 - z * z).max(0.0).sqrt();
+            Value::new_vector(radius * a.cos(), radius * a.sin(), z)
+        }
+        Native::VectorFromAngle => {
+            let len = if args.len() >= 2 { f(1) } else { 1.0 };
+            Value::new_vector(f(0).cos() * len, f(0).sin() * len, 0.0)
+        }
+        Native::VectorAdd => {
+            let (a, b) = (xyz(v(0)), xyz(v(1)));
+            Value::new_vector(a[0] + b[0], a[1] + b[1], a[2] + b[2])
+        }
+        Native::VectorSub => {
+            let (a, b) = (xyz(v(0)), xyz(v(1)));
+            Value::new_vector(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+        }
+        Native::VectorMult => {
+            let (a, b) = (xyz(v(0)), xyz(v(1)));
+            Value::new_vector(a[0] * b[0], a[1] * b[1], a[2] * b[2])
+        }
+        Native::VectorDiv => {
+            // 0 で割ると無限大になる。p5 と同じく落としはしない。
+            let (a, b) = (xyz(v(0)), xyz(v(1)));
+            Value::new_vector(a[0] / b[0], a[1] / b[1], a[2] / b[2])
+        }
+        Native::VectorLerp => {
+            let (a, b, t) = (xyz(v(0)), xyz(v(1)), f(2));
+            Value::new_vector(
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            )
+        }
+        Native::VectorCross => {
+            let (a, b) = (xyz(v(0)), xyz(v(1)));
+            Value::new_vector(
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            )
+        }
+        Native::VectorNormalize => {
+            let a = xyz(v(0));
+            let d = magnitude(a);
+            let d = if d > 1e-9 { d } else { 1.0 };
+            Value::new_vector(a[0] / d, a[1] / d, a[2] / d)
+        }
+        Native::VectorDot => {
+            let (a, b) = (xyz(v(0)), xyz(v(1)));
+            Value::Float(a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
+        }
+        Native::VectorDist => {
+            let (a, b) = (xyz(v(0)), xyz(v(1)));
+            Value::Float(magnitude([a[0] - b[0], a[1] - b[1], a[2] - b[2]]))
+        }
+        Native::VectorMag => Value::Float(magnitude(xyz(v(0)))),
+        Native::VectorAngleBetween => {
+            let (a, b) = (xyz(v(0)), xyz(v(1)));
+            let (ma, mb) = (magnitude(a), magnitude(b));
+            if ma < 1e-9 || mb < 1e-9 {
+                Value::Float(0.0)
+            } else {
+                let cos = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (ma * mb);
+                Value::Float(cos.clamp(-1.0, 1.0).acos())
+            }
+        }
 
         // `String.fromCodePoint(n)`。番号から 1 文字を作る。
         Native::FromCodePoint => {

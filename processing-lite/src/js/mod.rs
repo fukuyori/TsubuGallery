@@ -49,7 +49,12 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 
     /// 式を 1 つ評価して数値で返す。`out` グローバルへ書かせて読み出す。
     fn eval(expr: &str) -> f32 {
-        let source = format!("out=0\ndraw=_=>{{out={expr}}}");
+        eval_after("", expr)
+    }
+
+    /// トップレベルの宣言を先に置いてから、式を 1 つ評価する。
+    fn eval_after(prelude: &str, expr: &str) -> f32 {
+        let source = format!("{prelude}\nout=0\ndraw=_=>{{out={expr}}}");
         let program = crate::js::compile(&crate::js::parse(&source).expect("パース"))
             .expect("コンパイル");
         let mut vm = crate::vm::Vm::new(&program, 1);
@@ -231,6 +236,53 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
         sketch.setup(&mut g);
         let error = sketch.error().expect("止まるはず");
         assert!(error.contains("createColorPicker"), "{error}");
+    }
+
+    /// 文字列は 1 文字ずつに割れる。字数を数えるのにも使われる書き方。
+    #[test]
+    fn a_string_spreads_into_its_characters() {
+        assert_eq!(eval("[...'#つぶやきProcessing'].length"), 15.0);
+        assert_eq!(eval("[...'abc'][1]=='b'?7:0"), 7.0);
+        // 展開した先を並べ直しても崩れない。
+        assert_eq!(eval("[...[9],...'ab',...[8]].length"), 4.0);
+    }
+
+    /// `p5.Vector` の静的メソッド。`p5` という値は持っていないので、
+    /// 名前の並びを見て組み込みへ読み替えている。
+    #[test]
+    fn p5_vector_has_static_methods() {
+        // 単位球の上の点なので、長さは必ず 1。
+        assert!((eval("p5.Vector.random3D().mag()") - 1.0).abs() < 1e-5);
+        assert!((eval("p5.Vector.random2D().mag()") - 1.0).abs() < 1e-5);
+        assert_eq!(eval("p5.Vector.add(createVector(1,2),createVector(3,4)).y"), 6.0);
+        assert_eq!(eval("p5.Vector.dist(createVector(0,0),createVector(3,4))"), 5.0);
+        assert_eq!(eval("p5.Vector.mult(createVector(1,2),3).y"), 6.0);
+        assert_eq!(eval("p5.Vector.fromAngle(0,5).x"), 5.0);
+    }
+
+    /// 元のベクトルは変えない。ここがインスタンスのメソッドとの違い。
+    #[test]
+    fn a_static_vector_method_leaves_its_arguments_alone() {
+        assert_eq!(eval("(a=createVector(1,2),p5.Vector.add(a,createVector(9,9)),a.x)"), 1.0);
+        // インスタンスのほうは自分を書き換える。
+        assert_eq!(eval("(a=createVector(1,2),a.add(createVector(9,9)),a.x)"), 10.0);
+    }
+
+    /// 作品が `p5` という名前を使っていたら、そちらを優先する。
+    #[test]
+    fn a_sketch_can_still_name_something_p5() {
+        assert_eq!(eval_after("p5={Vector:{random3D:7}}", "p5.Vector.random3D"), 7.0);
+    }
+
+    /// コールバックに組み込みを渡せる。`$.map(p5.Vector.random3D)` の形。
+    ///
+    /// 組み込みはフレームを積まないので、作品の関数と同じに扱うと
+    /// 呼び出し元の続きまで走ってしまう。
+    #[test]
+    fn a_builtin_can_be_a_callback() {
+        assert_eq!(eval("[1,4,9].map(sqrt)[2]"), 3.0);
+        assert_eq!(eval("[...'ab'].map(p5.Vector.random3D).length"), 2.0);
+        assert_eq!(eval("[1,2,3].reduce(max)"), 3.0);
     }
 
     #[test]

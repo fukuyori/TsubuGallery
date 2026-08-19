@@ -6,7 +6,8 @@
 
 ![作品をサムネイルの格子で並べた Gallery 画面](images/screenshot.png)
 
-設計は [`docs/TsubuGallery_Design.md`](docs/TsubuGallery_Design.md) を参照。
+版ごとの変更は [CHANGELOG.ja.md](CHANGELOG.ja.md) に、
+設計は [`docs/TsubuGallery_Design.md`](docs/TsubuGallery_Design.md) にある。
 このリポジトリは設計書 §29 の **Prototype A〜E** をすべて実装した段階にある。
 
 | Prototype | 内容 | 状態 |
@@ -182,6 +183,11 @@ a = (
 どちらもトークンを並べ替えないので意味は変わらない。同梱作品すべてについて、変換の
 前後で Bytecode が一致すること、往復しても一致することをテストで固定してある。
 パースできないコードでも、トークン列が変わらないことは常に成り立つ。
+
+つぶやきGLSL にも同じ整形が効く。文の区切りも括弧の対応も C 系で共通なので、
+方言を見分ける必要がない。例外は `#` で始まる行で、`#version` のようなプリプロセッサ
+指令は 1 行で完結していないと通らず、`#つぶやきGLSL` のようなタグは書いたとおりに
+残したいので、どちらも行ごとそのまま通す。
 
 Viewer の操作オーバーレイは 2.6 秒操作がないと自動的に消える (§8.2)。
 
@@ -700,6 +706,7 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
 | 文字 | `text() textSize() textAlign() textWidth()`、`str() nf()`、`String.fromCodePoint()` |
 | 形の指定 | `rectMode() ellipseMode() angleMode()`、`square()` |
 | ベクトル | `createVector()`、`add sub mult div set copy mag magSq normalize limit setMag heading rotate dist dot cross lerp angleBetween` |
+| ベクトル (静的) | `p5.Vector.random2D random3D fromAngle add sub mult div lerp cross normalize dot dist mag angleBetween`。渡したベクトルは変えず、新しいものを返す |
 | 進行 | `noLoop() loop()` `clear()` |
 | 色の値 | `color() lerpColor()`、成分の取り出し `red() green() blue() alpha() hue() saturation() brightness()` |
 | 色と線 | `background() fill() stroke() noFill() noStroke() strokeWeight()` |
@@ -870,7 +877,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | 関数 | アロー関数 (`=>` `⇒` `→`)、`function` 宣言、関数を値として持つ (`B=blendMode`) |
 | 配列 | リテラル、添字の読み書き、`length`、`Array(n)` |
 | 配列のメソッド | `push pop shift unshift at slice splice concat reverse fill flat join indexOf lastIndexOf includes sort keys entries`、コールバックを取る `map forEach filter flatMap find findLast findIndex some every reduce` |
-| 展開 | `[...xs]`、`[...a, b, ...c]`、引数の並びでも: `stroke(...c, 9)`、`Math.max(...xs)` |
+| 展開 | `[...xs]`、`[...a, b, ...c]`、引数の並びでも: `stroke(...c, 9)`、`Math.max(...xs)`。文字列も 1 文字ずつに割れる (`[...'あいう']`) |
 | 文字列 | `"..."` `'...'` `` `...` ``、`${}` の展開、`+` で連結、`length charAt substring indexOf split repeat toUpperCase toLowerCase trim` |
 | 分割代入 | `[a,b]=[1,2]`、入れ替え `[a,b]=[b,a]`、`[o.x,v[0]]=…` |
 | オブジェクト | リテラル (`{x:1}`、略記 `{x}`)、`p.x` の読み書き、`p.x+=v`。予約語もプロパティ名に使える (`{default:1}.default`) |
@@ -1179,18 +1186,32 @@ egui の画面 (Gallery / Editor) はウィンドウを開かずにテストし�
 
 ### アイコン
 
-`scripts/make-icon.py` が `app/assets/icon.ico` と `icon.png` を描く。絵そのもの
-ではなく描く手順を置いているので、色や粒の数を変えたいときは元絵を探さずに
-このスクリプトを直す。
+`scripts/make-icon.py` が `app/assets/` へ `icon.ico`・`icon.png` (256px)・
+`icon-1024.png` の 3 つを描く。絵そのものではなく描く手順を置いているので、色や
+粒の数を変えたいときは元絵を探さずにこのスクリプトを直す。
 
 ```sh
 python scripts/make-icon.py
 ```
 
 `.ico` は `app/build.rs` が `winresource` 経由で exe へ埋める。同時に版情報
-(ProductName / FileVersion) も入るので、プロパティ画面にも出る。`.png` は winit
-のウィンドウアイコンとして `include_bytes!` で取り込む。Windows は exe に埋めた
-ほうを使うが、Linux では渡さないと既定の絵になる。
+(ProductName / FileVersion) も入るので、プロパティ画面にも出る。ただし**これは
+エクスプローラが使うもので、窓には効かない**。
+
+`.png` は winit のウィンドウアイコンとして `include_bytes!` で取り込む。Windows
+はタイトルバーとタスクバーで別のアイコンを持つので、同じ 1 枚を両方へ渡す
+(`with_window_icon` が `ICON_SMALL`、`with_taskbar_icon` が `ICON_BIG`)。渡さな
+かった `ICON_BIG` は winit が空にしにいくので、タスクバーと Alt+Tab だけ絵が
+出なくなる。Linux でも渡さないと環境ごとの既定の絵になる。
+
+窓を出したあと、**1 フレーム描き終えてからもう一度貼り直す** (`App::settle_icon`)。
+explorer は窓が現れた直後に短い待ち時間つきで `WM_GETICON` を送ってくるが、
+起動処理 (GPU の用意と作品の読み込み) がメッセージループを塞いでいると間に合わ
+ず、既定の絵を出したまま二度と訊きに来ない。`WM_SETICON` を送れば読み直す。
+
+`icon-1024.png` は macOS の `.icns` の元で、`scripts/build-macos-installer.sh`
+がここから各寸法を焼く。Dock と Finder が 1024px まで使うので、256px から
+引き伸ばすとぼやける。
 
 ### Windows インストーラ
 

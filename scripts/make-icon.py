@@ -1,17 +1,22 @@
 """アプリアイコンを描く。
 
-生成物は 2 つ。
+生成物は 3 つ。
 
-    app/assets/icon.ico   exe とインストーラへ埋める Windows 用
-    app/assets/icon.png   winit のウィンドウアイコン (256px)
+    app/assets/icon.ico       exe とインストーラへ埋める Windows 用
+    app/assets/icon.png       winit のウィンドウアイコン (256px)
+    app/assets/icon-1024.png  macOS の .icns の元 (1024px)
 
 描いた PNG をリポジトリへ置くのではなく、描く手順のほうを置いている。色や
 粒の数を変えたくなったとき、元絵を探さずにここだけ直せばよいため。
 
     python scripts/make-icon.py
 
+1024px を別に出すのは、macOS が Dock や Finder でその寸法まで使うため。
+256px から引き伸ばすとぼやけるので、同じ図案を大きいまま焼き直す
+(scripts/build-macos-installer.sh がこれを探す)。
+
 図案は「つぶ」が渦を描いて外へ散っていくところ。同梱作品の spiral.pde から
-取った。16px まで縮むことを考えて粒は 9 つに絞り、外へ行くほど大きくしている。
+取った。16px まで縮むことを考えて粒は 7 つに絞り、外へ行くほど大きくしている。
 数を増やすと小さい寸法で潰れて、ただの染みになる。
 """
 
@@ -24,6 +29,10 @@ import pathlib
 SUPERSAMPLE = 8
 BASE = 256
 CANVAS = BASE * SUPERSAMPLE
+
+# macOS が要る大きさ。CANVAS を超えない範囲で最大にしてある。ここを上げるなら
+# SUPERSAMPLE も一緒に上げないと、縮小ではなく引き伸ばしになる。
+LARGE = 1024
 
 # Gallery の地と同じ色 (app/src/main.rs の GALLERY_BACKGROUND)。
 BACKGROUND = (18, 18, 21)
@@ -59,7 +68,12 @@ def rounded_rect_mask(size: int, radius: float):
     return mask
 
 
-def draw() -> "Image.Image":
+def draw(size: int = BASE) -> "Image.Image":
+    """指定の寸法でアイコンを 1 枚描く。
+
+    どの寸法も `CANVAS` から縮めて作る。小さい絵を引き伸ばすと縁が濁るので、
+    出したい寸法ごとにここを呼び直す。
+    """
     from PIL import Image, ImageDraw
 
     image = Image.new("RGB", (CANVAS, CANVAS), BACKGROUND)
@@ -103,11 +117,11 @@ def draw() -> "Image.Image":
         color = tuple(int(round(c * 255)) for c in rgb)
         draw.ellipse([(x - r, y - r), (x + r, y + r)], fill=color)
 
-    image = image.resize((BASE, BASE), Image.LANCZOS)
+    image = image.resize((size, size), Image.LANCZOS)
 
     # 角丸は縮めたあとで抜く。先に抜くと縮小で縁が濁る。
-    out = Image.new("RGBA", (BASE, BASE), (0, 0, 0, 0))
-    out.paste(image, (0, 0), rounded_rect_mask(BASE, BASE * 0.22))
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(image, (0, 0), rounded_rect_mask(size, size * 0.22))
     return out
 
 
@@ -118,14 +132,18 @@ def main() -> None:
     png = ASSETS / "icon.png"
     icon.save(png)
 
+    # macOS 用。同じ図案を大きいまま焼き直す。
+    large = ASSETS / "icon-1024.png"
+    draw(LARGE).save(large)
+
     # ICO の各寸法は 256px からの縮小で作る。Pillow の save(sizes=...) に任せると
     # 縮小方法を選べないので、こちらで LANCZOS を指定して焼く。
     ico = ASSETS / "icon.ico"
     frames = [icon.resize((s, s), Image.LANCZOS) for s in ICO_SIZES]
     frames[-1].save(ico, format="ICO", sizes=[(s, s) for s in ICO_SIZES], append_images=frames[:-1])
 
-    print(f"{png}  {png.stat().st_size:,} bytes")
-    print(f"{ico}  {ico.stat().st_size:,} bytes")
+    for path in (png, large, ico):
+        print(f"{path}  {path.stat().st_size:,} bytes")
 
 
 if __name__ == "__main__":
