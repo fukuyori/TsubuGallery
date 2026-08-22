@@ -1026,6 +1026,10 @@ GLSL → 前置きを足す → naga (glsl-in) → 検証 → WGSL → wgpu
 `void main()` を自分で書いてもよい (twigl の geek / geeker)。その場合も `o` は
 `vec4(0)` から始まり、`gl_FragColor` は `o` として扱う。
 
+FragCoord / ShaderToy 形式の `void mainImage(out vec4, in vec2)` も使える。この
+入口を使う作品では、`iResolution` (`vec3`) を `r`、`iTime` (`float`) を `t` と
+同じ値で用意する。
+
 ### twigl との違い
 
 | | 理由 |

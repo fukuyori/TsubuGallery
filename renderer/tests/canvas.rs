@@ -349,6 +349,49 @@ fn a_tweet_sized_shader_paints_the_whole_frame() {
     assert!((100..=155).contains(&blue), "t が届いていません: {blue}");
 }
 
+/// FragCoord / ShaderToy 流の `mainImage` と、vec4 1 本から作る mat2 を使う作品を
+/// GPU まで通す。sketch 59 が使う互換経路の縮小版。
+#[test]
+fn a_main_image_shader_with_a_golfed_mat2_renders() {
+    let Some((device, queue)) = gpu() else {
+        eprintln!("GPU が無いので飛ばします");
+        return;
+    };
+    let mut batch = BatchRenderer::new(&device);
+    let mut capturer = Capturer::new();
+    let mut g = Graphics::new();
+    let source = r#"
+#define R(a) mat2(cos(a + vec4(0, 33, 11, 0)))
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 p = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
+    p *= R(iTime);
+    fragColor = vec4(abs(p), 0.5 + 0.5 * sin(iTime), 1.0);
+}
+"#;
+    let wgsl = tsubu_renderer::shader::compile(source).expect("sketch 59 互換 GLSL が通る");
+
+    capturer.begin();
+    g.begin_frame(W as f32, H as f32);
+    g.paint_with_shader(tsubu_renderer::ShaderPaint {
+        wgsl: wgsl.into(),
+        key: 59,
+        time: 0.5,
+        frame: 30.0,
+        mouse: [0.0, 0.0],
+    });
+    capturer.draw(&device, &queue, &mut batch, &g, W, H);
+    let image = capturer.read(&device, &queue, W, H).expect("読み戻せる");
+
+    let left = pixel(&image, 4, H / 2);
+    let right = pixel(&image, W - 5, H / 2);
+    assert_ne!(left, right, "iResolution を使った座標変化が出ていません");
+    let blue = pixel(&image, W / 2, H / 2).2;
+    assert!(
+        (175..=205).contains(&blue),
+        "iTime が届いていません: {blue}"
+    );
+}
+
 /// naga は GLSL のブロック変数を WGSL の関数先頭へ持ち上げる。明示的な初期化を
 /// 補わないと、外側ループへ入り直したときに内側のループ変数が前回値を引き継ぐ。
 #[test]

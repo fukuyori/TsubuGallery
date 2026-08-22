@@ -147,6 +147,28 @@ vec4 o;
 #define gl_FragColor o
 "#;
 
+/// ShaderToy / FragCoord の `mainImage` が前提にする uniform 名。
+///
+/// TsubuGallery が GPU へ渡している値は twigl の `r` / `t` と共通なので、
+/// `mainImage` を入口にする作品だけ別名を与える。通常のつぶやき GLSL へ常時
+/// 定義すると、作品自身の uniform 宣言をマクロ展開で壊すため入口ごとに分ける。
+const MAIN_IMAGE_COMPAT: &str = r#"#define iResolution vec3(r, 1.0)
+#define iTime t
+"#;
+
+/// naga 30 は標準 GLSL の `mat2(vec4)` を構文解析できるが、1 本の vec4 を
+/// matrix の component として残すため検証で落ちる。単一引数コンストラクタを
+/// このオーバーロードへ通し、値を一度だけ評価して 2 本の列へ分ける。
+const SINGLE_ARGUMENT_MAT2_COMPAT: &str = r#"
+mat2 tsubu_mat2_from_single(float v) { return mat2(v); }
+mat2 tsubu_mat2_from_single(int v) { return mat2(float(v)); }
+mat2 tsubu_mat2_from_single(uint v) { return mat2(float(v)); }
+mat2 tsubu_mat2_from_single(vec4 v) { return mat2(v.xy, v.zw); }
+mat2 tsubu_mat2_from_single(mat2 v) { return v; }
+mat2 tsubu_mat2_from_single(mat3 v) { return mat2(v[0].xy, v[1].xy); }
+mat2 tsubu_mat2_from_single(mat4 v) { return mat2(v[0].xy, v[1].xy); }
+"#;
+
 /// 画面を覆う三角形 1 枚を頂点番号から組み立てる頂点シェーダー。
 ///
 /// naga が吐くのはフラグメントシェーダーだけなので、対になる頂点側をここで
@@ -254,24 +276,32 @@ fn wrap(source: &str) -> Wrapped {
     // 0 から始まるが、naga はブロック内の変数を WGSL の関数先頭へ持ち上げる。
     // そのままだと外側ループの 2 周目以降で内側の i が前回の値を引き継ぐため、
     // GLSL の段階で初期値を補って Store を正しい位置に残す。
-    let body = initialize_for_loop_variables(&strip_hashtags(source));
-    let (prefix, suffix) = if declares_main(&body) {
+    let body =
+        normalize_single_argument_mat2(&initialize_for_loop_variables(&strip_hashtags(source)));
+    let main = find_void_function(&body, "main");
+    let main_image = find_void_function(&body, "mainImage");
+    let (prefix, suffix) = if main.is_some() {
         (
-            PREAMBLE.to_string(),
+            format!("{PREAMBLE}{SINGLE_ARGUMENT_MAT2_COMPAT}"),
             "\nvoid main() { o = vec4(0.0); tsubu_user_main(); tsubu_color = vec4(o.rgb, 1.0); }\n"
+                .to_string(),
+        )
+    } else if main_image.is_some() {
+        (
+            format!("{PREAMBLE}{SINGLE_ARGUMENT_MAT2_COMPAT}{MAIN_IMAGE_COMPAT}"),
+            "\nvoid main() { o = vec4(0.0); mainImage(o, FC.xy); tsubu_color = vec4(o.rgb, 1.0); }\n"
                 .to_string(),
         )
     } else {
         (
-            format!("{PREAMBLE}void main() {{\no = vec4(0.0);\n"),
+            format!("{PREAMBLE}{SINGLE_ARGUMENT_MAT2_COMPAT}void main() {{\no = vec4(0.0);\n"),
             "\ntsubu_color = vec4(o.rgb, 1.0);\n}\n".to_string(),
         )
     };
-    let body = if declares_main(&body) {
-        body.replacen("void main", "void tsubu_user_main", 1)
-    } else {
-        body
-    };
+    let mut body = body;
+    if let Some(name) = main {
+        body.replace_range(name, "tsubu_user_main");
+    }
 
     let lines_before = prefix.bytes().filter(|b| *b == b'\n').count() as u32;
     let start = prefix.len();
@@ -281,6 +311,141 @@ fn wrap(source: &str) -> Wrapped {
     text.push_str(&suffix);
 
     Wrapped { text, lines_before, body: start..end }
+}
+
+/// `void name(...)` という関数定義らしい並びから、関数名の範囲を返す。
+///
+/// コメントと空白を飛ばして識別子単位で見るため、`mainImage` やコメント中の
+/// `void main()` を `main()` と誤認しない。
+fn find_void_function(source: &str, wanted: &str) -> Option<Range<usize>> {
+    let bytes = source.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if starts_line_comment(bytes, at) {
+            at = skip_line_comment(bytes, at + 2);
+            continue;
+        }
+        if starts_block_comment(bytes, at) {
+            at = skip_block_comment(bytes, at + 2);
+            continue;
+        }
+        if !is_ident_start(bytes[at]) {
+            at += 1;
+            continue;
+        }
+        let word_end = skip_identifier(bytes, at + 1);
+        if &source[at..word_end] == "void"
+            && let Some(name_start) = next_code_byte(bytes, word_end)
+            && is_ident_start(bytes[name_start])
+        {
+            let name_end = skip_identifier(bytes, name_start + 1);
+            if &source[name_start..name_end] == wanted
+                && let Some(open) = next_code_byte(bytes, name_end).filter(|i| bytes[*i] == b'(')
+                && let Some(close) = matching_parenthesis(bytes, open)
+                && next_code_byte(bytes, close + 1).is_some_and(|brace| bytes[brace] == b'{')
+            {
+                return Some(name_start..name_end);
+            }
+        }
+        at = word_end;
+    }
+    None
+}
+
+/// `mat2(x)` のような単一引数コンストラクタだけを互換ヘルパーへ通す。
+/// `mat2(a, b)` や `mat2(a, b, c, d)` は naga がそのまま扱えるので触らない。
+fn normalize_single_argument_mat2(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut replacements = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if starts_line_comment(bytes, at) {
+            at = skip_line_comment(bytes, at + 2);
+            continue;
+        }
+        if starts_block_comment(bytes, at) {
+            at = skip_block_comment(bytes, at + 2);
+            continue;
+        }
+        if !is_ident_start(bytes[at]) {
+            at += 1;
+            continue;
+        }
+        let name_end = skip_identifier(bytes, at + 1);
+        if &source[at..name_end] == "mat2"
+            && let Some(open) = next_code_byte(bytes, name_end).filter(|i| bytes[*i] == b'(')
+            && let Some(close) = matching_parenthesis(bytes, open)
+            && !has_top_level_comma(bytes, open + 1, close)
+        {
+            replacements.push(at..name_end);
+            at = close + 1;
+            continue;
+        }
+        at = name_end;
+    }
+
+    if replacements.is_empty() {
+        return source.to_string();
+    }
+    let mut output = String::with_capacity(source.len() + replacements.len() * 18);
+    let mut copied = 0;
+    for range in replacements {
+        output.push_str(&source[copied..range.start]);
+        output.push_str("tsubu_mat2_from_single");
+        copied = range.end;
+    }
+    output.push_str(&source[copied..]);
+    output
+}
+
+fn matching_parenthesis(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 1u32;
+    let mut at = open + 1;
+    while at < bytes.len() {
+        if starts_line_comment(bytes, at) {
+            at = skip_line_comment(bytes, at + 2);
+            continue;
+        }
+        if starts_block_comment(bytes, at) {
+            at = skip_block_comment(bytes, at + 2);
+            continue;
+        }
+        match bytes[at] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+fn has_top_level_comma(bytes: &[u8], start: usize, end: usize) -> bool {
+    let mut depth = 0u32;
+    let mut at = start;
+    while at < end {
+        if starts_line_comment(bytes, at) {
+            at = skip_line_comment(bytes, at + 2).min(end);
+            continue;
+        }
+        if starts_block_comment(bytes, at) {
+            at = skip_block_comment(bytes, at + 2).min(end);
+            continue;
+        }
+        match bytes[at] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => return true,
+            _ => {}
+        }
+        at += 1;
+    }
+    false
 }
 
 /// `for(float i; ...)` を `for(float i = 0.0; ...)` にする。
@@ -497,11 +662,6 @@ fn skip_identifier(bytes: &[u8], mut at: usize) -> usize {
     at
 }
 
-/// 自分で `main()` を書いているか。
-fn declares_main(source: &str) -> bool {
-    source.contains("void main")
-}
-
 /// プリプロセッサ指令ではない `#` 行を空行にする。
 ///
 /// つぶやき GLSL は本文に `#つぶやきGLSL` のタグを添えて投稿される。行を消すと
@@ -551,6 +711,41 @@ mod tests {
         let wgsl = compile("void main() {\n  gl_FragColor = vec4(gl_FragCoord.xy / r, 0, 1);\n}")
             .expect("通る");
         assert!(wgsl.contains("@fragment"), "{wgsl}");
+    }
+
+    #[test]
+    fn main_image_uses_shadertoy_uniform_names() {
+        let source = r#"
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    fragColor = vec4(fragCoord / iResolution.xy, sin(iTime), 1.0);
+}
+"#;
+        let wgsl = compile(source).expect("mainImage と互換 uniform が通る");
+        assert!(wgsl.contains("@fragment"), "{wgsl}");
+    }
+
+    #[test]
+    fn main_image_is_not_mistaken_for_main() {
+        let source =
+            "// void main() {}\nvoid mainImage(out vec4 c, in vec2 p) { c = vec4(p, 0, 1); }";
+        assert!(find_void_function(source, "main").is_none());
+        assert!(find_void_function(source, "mainImage").is_some());
+        assert!(compile(source).is_ok(), "{:?}", compile(source));
+    }
+
+    #[test]
+    fn a_vec4_can_fill_a_mat2() {
+        let source = r#"
+#define R(a) mat2(cos(a + vec4(0, 33, 11, 0)))
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 p = (fragCoord - 0.5 * iResolution.xy) * R(iTime);
+    fragColor = vec4(abs(p), 0, 1);
+}
+"#;
+        assert!(compile(source).is_ok(), "{:?}", compile(source));
+        assert!(compile("o.xy *= mat2(1.0);").is_ok());
+        assert!(compile("o.xy *= mat2(1);").is_ok());
+        assert!(compile("o.xy *= mat2(vec2(1, 0), vec2(0, 1));").is_ok());
     }
 
     #[test]

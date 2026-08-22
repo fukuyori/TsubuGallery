@@ -1102,6 +1102,10 @@ All of this comes from the preamble, so none of it needs declaring.
 Writing your own `void main()` works too (twigl's geek / geeker). `o` still
 starts at `vec4(0)`, and `gl_FragColor` is treated as `o`.
 
+FragCoord / ShaderToy-style `void mainImage(out vec4, in vec2)` is accepted as
+well. For that entry point, `iResolution` (`vec3`) maps to `r`, and `iTime`
+(`float`) maps to `t`.
+
 ### Differences from twigl
 
 | | Why |

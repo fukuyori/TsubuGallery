@@ -8,6 +8,15 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.4.2 — 2026-08-22
+
+### Fixed
+
+- **FragCoord / ShaderToy-style GLSL such as sketch 59 did not run.**
+  `mainImage`, `iTime`, and `iResolution` now map to the twigl runtime, and a
+  compatibility conversion handles the single-vec4 `mat2` constructor that
+  naga could not validate
+
 ## 0.4.1 — 2026-08-22
 
 ### Added

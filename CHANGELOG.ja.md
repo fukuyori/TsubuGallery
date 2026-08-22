@@ -8,6 +8,14 @@
 版番号は `Cargo.toml` の `[workspace.package]` にひとつだけあり、5 つのクレート
 全部がそれを共有する。日付は版を切った日。
 
+## 0.4.2 — 2026-08-22
+
+### 修正
+
+- **sketch 59 のような FragCoord / ShaderToy 形式の GLSL が動かなかった。**
+  `mainImage`、`iTime`、`iResolution` を twigl の実行環境へ対応付け、naga が
+  検証できなかった vec4 1 本からの `mat2` 構築も互換変換するようにした
+
 ## 0.4.1 — 2026-08-22
 
 ### 追加
