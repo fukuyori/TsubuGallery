@@ -2819,7 +2819,7 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 
 [[package]]
 name = "tsubu-app"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -2839,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "tsubu-core"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "dirs",
  "env_logger",
@@ -2848,27 +2848,26 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "tsubu-gallery"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
- "log",
  "tsubu-core",
 ]
 
 [[package]]
 name = "tsubu-processing-lite"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
- "log",
  "tsubu-renderer",
 ]
 
 [[package]]
 name = "tsubu-renderer"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
  "log",

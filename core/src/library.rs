@@ -3,7 +3,9 @@
 //! Phase 7 で SQLite が入るまで、作品は `<data>/sketches/*.pde` に置く。ここは
 //! ファイルの並べ方だけを知っていて、中身が何語かは知らない。
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 作品ファイルの拡張子。Processing と同じ。
 pub const EXTENSION: &str = "pde";
@@ -62,7 +64,12 @@ pub fn load_all(dir: &Path) -> Vec<SketchFile> {
                     return None;
                 }
             };
-            Some(SketchFile { title: title_from_id(&id), id, source, path })
+            Some(SketchFile {
+                title: title_from_id(&id),
+                id,
+                source,
+                path,
+            })
         })
         .collect();
 
@@ -116,8 +123,85 @@ pub fn save(dir: &Path, id: &str, source: &str) -> std::io::Result<PathBuf> {
     }
     std::fs::create_dir_all(dir)?;
     let path = path_for(dir, id);
-    std::fs::write(&path, source)?;
+    atomic_write(&path, source.as_bytes())?;
     Ok(path)
+}
+
+/// 同じディレクトリへ最後まで書いてから、完成したファイルだけを目的地へ移す。
+///
+/// 目的地を直接 truncate すると、ディスクフルや強制終了が書き込みの途中で起きた
+/// ときに、それまで保存できていた作品まで失う。同じファイルシステム内の rename
+/// なら、古い内容か新しい内容のどちらかだけが見える。
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let mut last_collision = None;
+
+    for _ in 0..32 {
+        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let temp = dir.join(format!(".{name}.{}.{}.tmp", std::process::id(), serial));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_collision = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        let result = (|| {
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            replace_file(&temp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        return result;
+    }
+
+    Err(last_collision.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "一時ファイル名を確保できません",
+        )
+    }))
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: both paths are NUL-terminated UTF-16 buffers that remain alive for the call.
+    let moved = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// 作品を消す。既に無い場合も成功とする。
@@ -190,7 +274,10 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), "無視される").expect("書ける");
 
         let files = load_all(dir.path());
-        assert_eq!(files.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            files.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]
@@ -201,8 +288,7 @@ mod tests {
     #[test]
     fn seeding_fills_an_empty_directory() {
         let dir = TempDir::new("seed-empty");
-        let seeded =
-            seed_if_empty(dir.path(), &[("demo", "void draw() {}")]).expect("書き出せる");
+        let seeded = seed_if_empty(dir.path(), &[("demo", "void draw() {}")]).expect("書き出せる");
         assert!(seeded);
         assert_eq!(load_all(dir.path()).len(), 1);
     }
@@ -249,6 +335,24 @@ mod tests {
     }
 
     #[test]
+    fn saving_replaces_the_whole_file_without_leaving_a_temporary_file() {
+        let dir = TempDir::new("atomic-save");
+        save(dir.path(), "demo", "古い内容").expect("最初に保存できる");
+        save(dir.path(), "demo", "新しい内容").expect("置き換えられる");
+
+        assert_eq!(
+            std::fs::read_to_string(path_for(dir.path(), "demo")).expect("読める"),
+            "新しい内容"
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("一覧を読める")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("demo.pde")]);
+    }
+
+    #[test]
     fn save_rejects_an_unusable_id() {
         let dir = TempDir::new("save-invalid");
         assert!(save(dir.path(), "../escape", "void draw() {}").is_err());
@@ -260,8 +364,7 @@ mod tests {
         let dir = TempDir::new("seed-existing");
         std::fs::write(dir.path().join("mine.pde"), "void draw() {}").expect("書ける");
 
-        let seeded =
-            seed_if_empty(dir.path(), &[("demo", "void draw() {}")]).expect("処理できる");
+        let seeded = seed_if_empty(dir.path(), &[("demo", "void draw() {}")]).expect("処理できる");
         assert!(!seeded, "既存の作品があるなら何も書かない");
 
         let ids: Vec<String> = load_all(dir.path()).into_iter().map(|f| f.id).collect();

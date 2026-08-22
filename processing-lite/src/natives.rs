@@ -384,7 +384,7 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "colorMode", native: Native::ColorMode, arities: &[1, 2, 4, 5] },
     Signature { name: "blendMode", native: Native::BlendMode, arities: &[1] },
     Signature { name: "sq", native: Native::Square, arities: &[1] },
-    Signature { name: "mag", native: Native::Magnitude, arities: &[2] },
+    Signature { name: "mag", native: Native::Magnitude, arities: &[2, 3] },
     Signature { name: "atan", native: Native::Atan, arities: &[1] },
     Signature { name: "asin", native: Native::Asin, arities: &[1] },
     Signature { name: "acos", native: Native::Acos, arities: &[1] },
@@ -414,15 +414,15 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "noFill", native: Native::NoFill, arities: &[0] },
     Signature { name: "noStroke", native: Native::NoStroke, arities: &[0] },
     Signature { name: "strokeWeight", native: Native::StrokeWeight, arities: &[1] },
-    Signature { name: "point", native: Native::Point, arities: &[2] },
-    Signature { name: "line", native: Native::Line, arities: &[4] },
+    Signature { name: "point", native: Native::Point, arities: &[2, 3] },
+    Signature { name: "line", native: Native::Line, arities: &[4, 6] },
     // 3 個なら正方形。p5.js の rect() は高さを省ける。
     Signature { name: "rect", native: Native::Rect, arities: &[3, 4, 5, 6, 7, 8] },
     Signature { name: "ellipse", native: Native::Ellipse, arities: &[4] },
     Signature { name: "circle", native: Native::Circle, arities: &[3] },
     Signature { name: "triangle", native: Native::Triangle, arities: &[6] },
     Signature { name: "beginShape", native: Native::BeginShape, arities: &[0, 1] },
-    Signature { name: "vertex", native: Native::Vertex, arities: &[2] },
+    Signature { name: "vertex", native: Native::Vertex, arities: &[2, 3] },
     Signature { name: "endShape", native: Native::EndShape, arities: &[0, 1] },
     Signature { name: "arc", native: Native::Arc, arities: &[6, 7] },
     Signature { name: "quad", native: Native::Quad, arities: &[8] },
@@ -447,7 +447,7 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "hue", native: Native::Hue, arities: &[1] },
     Signature { name: "saturation", native: Native::Saturation, arities: &[1] },
     Signature { name: "brightness", native: Native::Brightness, arities: &[1] },
-    Signature { name: "randomGaussian", native: Native::RandomGaussian, arities: &[0] },
+    Signature { name: "randomGaussian", native: Native::RandomGaussian, arities: &[0, 1, 2] },
     Signature { name: "translate", native: Native::Translate, arities: &[2, 3] },
     // 2 個目は軸。p5.js は `rotate(a, [x, y, z])` のように配列で渡す。
     Signature { name: "rotate", native: Native::Rotate, arities: &[1, 2, 4] },
@@ -516,7 +516,7 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "floor", native: Native::Floor, arities: &[1] },
     Signature { name: "ceil", native: Native::Ceil, arities: &[1] },
     Signature { name: "round", native: Native::Round, arities: &[1] },
-    Signature { name: "dist", native: Native::Dist, arities: &[4] },
+    Signature { name: "dist", native: Native::Dist, arities: &[4, 6] },
     Signature { name: "lerp", native: Native::Lerp, arities: &[3] },
     Signature { name: "radians", native: Native::Radians, arities: &[1] },
     Signature { name: "degrees", native: Native::Degrees, arities: &[1] },
@@ -568,6 +568,27 @@ pub fn accepted_arities(name: &str) -> Vec<u8> {
         .find(|s| s.name == name)
         .map(|s| s.arities.to_vec())
         .unwrap_or_default()
+}
+
+/// 本家には意味のある形があるものの、まだ実装していない引数構成。
+///
+/// JavaScript は余分な引数を捨てるため、これを普通の「余分」と扱うと別の
+/// オーバーロードで黙って実行され、エラーより見つけにくい誤描画になる。
+pub fn unsupported_overload(native: Native, argc: u8) -> bool {
+    matches!(
+        (native, argc),
+        (Native::Vertex, 4..=5)
+            | (Native::CurveVertex, 3)
+            | (Native::BezierVertex, 9)
+            | (Native::Curve, 12)
+            | (Native::Bezier, 12)
+            | (Native::Quad, 12)
+            | (Native::Text, 4 | 5)
+    )
+}
+
+pub fn native_name(native: Native) -> &'static str {
+    SIGNATURES.iter().find(|signature| signature.native == native).map_or("API", |s| s.name)
 }
 
 /// 回転軸として渡された値を `[x, y, z]` にする。
@@ -707,11 +728,19 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
         }
 
         Native::Point => {
-            g.point(f(0), f(1));
+            if args.len() >= 3 {
+                g.point_3d(f(0), f(1), f(2));
+            } else {
+                g.point(f(0), f(1));
+            }
             Value::Void
         }
         Native::Line => {
-            g.line(f(0), f(1), f(2), f(3));
+            if args.len() >= 6 {
+                g.line_3d(f(0), f(1), f(2), f(3), f(4), f(5));
+            } else {
+                g.line(f(0), f(1), f(2), f(3));
+            }
             Value::Void
         }
         Native::Rect => {
@@ -742,7 +771,11 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
             Value::Void
         }
         Native::Vertex => {
-            g.vertex(f(0), f(1));
+            if args.len() >= 3 {
+                g.vertex_3d(f(0), f(1), f(2));
+            } else {
+                g.vertex(f(0), f(1));
+            }
             Value::Void
         }
         Native::EndShape => {
@@ -990,7 +1023,14 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
         Native::Degrees => Value::Float(f(0).to_degrees()),
         Native::Map => Value::Float(math::map(f(0), f(1), f(2), f(3), f(4))),
         Native::Lerp => Value::Float(f(0) + (f(1) - f(0)) * f(2)),
-        Native::Dist => Value::Float(((f(2) - f(0)).powi(2) + (f(3) - f(1)).powi(2)).sqrt()),
+        Native::Dist => {
+            let squared = if args.len() >= 6 {
+                (f(3) - f(0)).powi(2) + (f(4) - f(1)).powi(2) + (f(5) - f(2)).powi(2)
+            } else {
+                (f(2) - f(0)).powi(2) + (f(3) - f(1)).powi(2)
+            };
+            Value::Float(squared.sqrt())
+        }
 
         // Processing の floor/ceil/round は int を返す。
         Native::Floor => Value::Int(f(0).floor() as i32),
@@ -1160,11 +1200,14 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
                 _ => v * max[2],
             })
         }
-        // 平均 0、標準偏差 1 の正規乱数 (Box-Muller)。
+        // p5.js は平均と標準偏差を渡せる。Processing の引数なしも同じ経路。
         Native::RandomGaussian => {
             let u1 = rng.random(1.0).max(f32::MIN_POSITIVE);
             let u2 = rng.random(1.0);
-            Value::Float((-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos())
+            let standard = (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos();
+            let mean = args.first().map_or(0.0, Value::as_f32);
+            let deviation = args.get(1).map_or(1.0, Value::as_f32);
+            Value::Float(mean + standard * deviation)
         }
         Native::Min => extreme(args, false),
         Native::Max => extreme(args, true),
@@ -1232,7 +1275,10 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
         }
 
         Native::Square => Value::Float(f(0) * f(0)),
-        Native::Magnitude => Value::Float((f(0) * f(0) + f(1) * f(1)).sqrt()),
+        Native::Magnitude => Value::Float(
+            (f(0) * f(0) + f(1) * f(1) + args.get(2).map_or(0.0, |v| v.as_f32().powi(2)))
+                .sqrt(),
+        ),
         Native::Atan => Value::Float(g.from_radians(f(0).atan())),
         Native::Asin => Value::Float(g.from_radians(f(0).clamp(-1.0, 1.0).asin())),
         Native::Acos => Value::Float(g.from_radians(f(0).clamp(-1.0, 1.0).acos())),

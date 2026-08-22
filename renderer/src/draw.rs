@@ -472,7 +472,7 @@ pub enum ShapeKind {
 #[derive(Clone, Debug)]
 struct Shape {
     kind: ShapeKind,
-    points: Vec<[f32; 2]>,
+    points: Vec<[f32; 3]>,
     /// `curveVertex()` で与えられた制御点。
     curves: Vec<[f32; 2]>,
 }
@@ -1967,6 +1967,24 @@ impl Graphics {
         }
     }
 
+    /// `line(x1, y1, z1, x2, y2, z2)`。奥行きとモデル変換を保ったまま描く。
+    #[allow(clippy::too_many_arguments)]
+    pub fn line_3d(&mut self, x1: f32, y1: f32, z1: f32, x2: f32, y2: f32, z2: f32) {
+        let Some(color) = self.stroke else { return };
+        if self.stroke_weight <= 0.0 {
+            return;
+        }
+        if (x2 - x1).abs() + (y2 - y1).abs() + (z2 - z1).abs() < 1e-6 {
+            self.point_3d(x1, y1, z1);
+            return;
+        }
+        self.ensure_3d();
+        let Some(model) = self.space.as_ref().map(|space| space.model) else { return };
+        let was = std::mem::replace(&mut self.depth_write, true);
+        self.edge(model.point([x1, y1, z1]), model.point([x2, y2, z2]), color);
+        self.depth_write = was;
+    }
+
     // ---- 自由な形 (設計書 §14.2) ----------------------------------------
 
     /// `beginShape()`。以降の [`Graphics::vertex`] を貯め始める。
@@ -1976,10 +1994,15 @@ impl Graphics {
 
     /// `vertex(x, y)`。`beginShape()` の外で呼ばれたら黙って捨てる。
     pub fn vertex(&mut self, x: f32, y: f32) {
+        self.vertex_3d(x, y, 0.0);
+    }
+
+    /// `vertex(x, y, z)`。2D の形と同じ入れ物へ奥行きも保持する。
+    pub fn vertex_3d(&mut self, x: f32, y: f32, z: f32) {
         if let Some(shape) = &mut self.shape {
             // 際限なく貯めると 1 フレームでメモリを食うので上限を置く。
             if shape.points.len() < MAX_SHAPE_POINTS {
-                shape.points.push([x, y]);
+                shape.points.push([x, y, z]);
             }
         }
     }
@@ -2049,7 +2072,7 @@ impl Graphics {
         // curveVertex() で作った点は、ここで曲線へ均してから通常の頂点と繋ぐ。
         let mut points = shape.points;
         if shape.curves.len() >= 4 {
-            points.extend(catmull_rom(&shape.curves));
+            points.extend(catmull_rom(&shape.curves).into_iter().map(|p| [p[0], p[1], 0.0]));
         }
         if points.is_empty() {
             return;
@@ -2058,38 +2081,40 @@ impl Graphics {
         match shape.kind {
             ShapeKind::Points => {
                 for p in &points {
-                    self.point(p[0], p[1]);
+                    if self.space.is_some() || p[2] != 0.0 {
+                        self.point_3d(p[0], p[1], p[2]);
+                    } else {
+                        self.point(p[0], p[1]);
+                    }
                 }
             }
             ShapeKind::Lines => {
                 for pair in points.chunks_exact(2) {
-                    self.line(pair[0][0], pair[0][1], pair[1][0], pair[1][1]);
+                    self.shape_line(pair[0], pair[1]);
                 }
             }
             ShapeKind::Triangles => {
                 for tri in points.chunks_exact(3) {
-                    self.triangle(
-                        tri[0][0], tri[0][1], tri[1][0], tri[1][1], tri[2][0], tri[2][1],
-                    );
+                    self.shape_polygon(tri, true);
                 }
             }
             ShapeKind::TriangleStrip => {
                 for i in 2..points.len() {
                     let (a, b, c) = (points[i - 2], points[i - 1], points[i]);
-                    self.triangle(a[0], a[1], b[0], b[1], c[0], c[1]);
+                    self.shape_polygon(&[a, b, c], true);
                 }
             }
             ShapeKind::TriangleFan => {
                 for i in 2..points.len() {
                     let (a, b, c) = (points[0], points[i - 1], points[i]);
-                    self.triangle(a[0], a[1], b[0], b[1], c[0], c[1]);
+                    self.shape_polygon(&[a, b, c], true);
                 }
             }
             // 1 枚ずつ閉じた四角形にする。まとめて 1 つの多角形にすると、
             // 隣り合う面のあいだに縁の線が引かれない。
             ShapeKind::Quads => {
                 for quad in points.chunks_exact(4) {
-                    self.polygon(quad, true);
+                    self.shape_polygon(quad, true);
                 }
             }
             ShapeKind::QuadStrip => {
@@ -2097,10 +2122,52 @@ impl Graphics {
                 // 頂点の順が行き来するので、四角形として並べ替えてから渡す。
                 for pair in points.chunks_exact(2).collect::<Vec<_>>().windows(2) {
                     let quad = [pair[0][0], pair[0][1], pair[1][1], pair[1][0]];
-                    self.polygon(&quad, true);
+                    self.shape_polygon(&quad, true);
                 }
             }
-            ShapeKind::Polygon => self.polygon(&points, close),
+            ShapeKind::Polygon => self.shape_polygon(&points, close),
+        }
+    }
+
+    fn shape_line(&mut self, from: [f32; 3], to: [f32; 3]) {
+        if self.space.is_some() || from[2] != 0.0 || to[2] != 0.0 {
+            self.line_3d(from[0], from[1], from[2], to[0], to[1], to[2]);
+        } else {
+            self.line(from[0], from[1], to[0], to[1]);
+        }
+    }
+
+    fn shape_polygon(&mut self, points: &[[f32; 3]], close: bool) {
+        if self.space.is_none() && points.iter().all(|point| point[2] == 0.0) {
+            let flat: Vec<[f32; 2]> = points.iter().map(|point| [point[0], point[1]]).collect();
+            self.polygon(&flat, close);
+            return;
+        }
+
+        self.ensure_3d();
+        let projected: Vec<Option<[f32; 3]>> =
+            points.iter().map(|p| self.pt3(p[0], p[1], p[2])).collect();
+        let flat: Vec<[f32; 2]> = projected
+            .iter()
+            .map(|p| p.map_or([0.0, 0.0], |p| [p[0], p[1]]))
+            .collect();
+        let was = std::mem::replace(&mut self.depth_write, true);
+        if let Some(color) = self.fill {
+            for [a, b, c] in triangulate(&flat) {
+                if let (Some(a), Some(b), Some(c)) = (projected[a], projected[b], projected[c]) {
+                    self.tri(a, b, c, color);
+                }
+            }
+        }
+        self.depth_write = was;
+
+        if self.stroke.is_some() && self.stroke_weight > 0.0 {
+            for pair in points.windows(2) {
+                self.shape_line(pair[0], pair[1]);
+            }
+            if close && points.len() >= 3 {
+                self.shape_line(points[points.len() - 1], points[0]);
+            }
         }
     }
 
@@ -2357,6 +2424,29 @@ impl Graphics {
         let Some(c) = self.stroke else { return };
         let hw = (self.stroke_weight * 0.5).max(0.5 / self.scale_hint());
         self.round_cap(x, y, hw, c);
+    }
+
+    /// `point(x, y, z)`。投影後も指定された奥行きを保つ。
+    pub fn point_3d(&mut self, x: f32, y: f32, z: f32) {
+        let Some(color) = self.stroke else { return };
+        self.ensure_3d();
+        let Some(center) = self.pt3(x, y, z) else { return };
+        let radius = (self.stroke_weight * 0.5 * self.base.scale_hint()).max(0.5);
+        let steps = ((radius * 2.0) as usize).clamp(4, 32);
+        let was = std::mem::replace(&mut self.depth_write, true);
+        let base = self.list.vertices.len() as u32;
+        self.push_vertex(center, color);
+        for i in 0..steps {
+            let angle = std::f32::consts::TAU * i as f32 / steps as f32;
+            self.push_vertex(
+                [center[0] + angle.cos() * radius, center[1] + angle.sin() * radius, center[2]],
+                color,
+            );
+        }
+        for i in 0..steps as u32 {
+            self.emit(&[base, base + 1 + i, base + 1 + (i + 1) % steps as u32]);
+        }
+        self.depth_write = was;
     }
 
     /// 中心と半径で丸を 1 つ。線の端と `point()` に使う。

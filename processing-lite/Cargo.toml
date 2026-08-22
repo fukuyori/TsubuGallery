@@ -7,4 +7,3 @@ license.workspace = true
 
 [dependencies]
 tsubu-renderer.workspace = true
-log.workspace = true

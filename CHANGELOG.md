@@ -8,6 +8,39 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.5.0 — 2026-08-23
+
+### Added
+
+- P3D / WEBGL overloads for `point(x, y, z)`,
+  `line(x1, y1, z1, x2, y2, z2)`, and `vertex(x, y, z)`. Free-form shapes now
+  retain vertex depth
+- `mag(x, y, z)`, three-dimensional `dist()`, and
+  `randomGaussian(mean, sd)`
+
+### Fixed
+
+- Sketch files are now replaced atomically; a rename also rolls the new file
+  back if the old name cannot be removed
+- Thumbnail generation is spread across UI frames, while PNG loading and saving
+  run on a worker thread, so large galleries no longer stall interaction
+- Linux no longer prints the harmless `sctk_adwaita` warning for the unsupported
+  `menu` title-bar button
+- GPU canvas tests share one device, avoiding parallel driver initialisation
+  crashes on Linux
+- Unsupported p5.js 3-D and UV overloads no longer silently discard arguments
+  and render as a different overload; spread arguments receive the same runtime
+  diagnostic
+- Runtime errors other than a temporary execution-budget overrun now stop on
+  their first occurrence instead of being retried for three frames
+
+### Changed
+
+- Viewer state for each sketch is stored together, preventing its runtime,
+  frame count, clock, and canvas flags from getting out of sync
+- Repository read failures are logged and preserve the current Gallery filters
+  instead of silently replacing them with empty values
+
 ## 0.4.2 — 2026-08-22
 
 ### Fixed

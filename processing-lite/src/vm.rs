@@ -36,6 +36,8 @@ pub enum Trap {
     NoSuchMethod(String),
     /// 配列が大きくなりすぎた。
     ArrayTooLong,
+    /// 本家にはあるが、この引数構成はまだ実装していない。
+    UnsupportedOverload { name: &'static str, argc: u8 },
     /// VM 内部の不整合。コンパイラのバグ。
     Internal(String),
 }
@@ -50,6 +52,9 @@ impl fmt::Display for Trap {
             Trap::NoSuchFunction(name) => write!(f, "{name}() という関数はありません"),
             Trap::NoSuchMethod(name) => write!(f, "{name}() というメソッドはありません"),
             Trap::ArrayTooLong => write!(f, "配列が大きくなりすぎました"),
+            Trap::UnsupportedOverload { name, argc } => {
+                write!(f, "{name} の引数 {argc} 個の形式にはまだ対応していません")
+            }
             Trap::Internal(m) => write!(f, "内部エラー: {m}"),
         }
     }
@@ -318,7 +323,7 @@ impl Vm {
                         .ok_or_else(|| Trap::Internal("引数がスタックに足りません".into()))?;
                     self.args.clear();
                     self.args.extend(self.stack.drain(split..));
-                    let result = self.call_native(native, program, g);
+                    let result = self.call_native(native, program, g)?;
                     self.stack.push(result);
                 }
 
@@ -483,7 +488,7 @@ impl Vm {
                     if let Value::Array(items) = &args {
                         self.args.extend(items.borrow().iter().cloned());
                     }
-                    let result = self.call_native(native, program, g);
+                    let result = self.call_native(native, program, g)?;
                     self.stack.push(result);
                 }
                 Op::CallMethodSpread(key) => {
@@ -588,7 +593,7 @@ impl Vm {
                 let split = self.split_at(argc as usize)?;
                 self.args.clear();
                 self.args.extend(self.stack.drain(split..));
-                let result = self.call_native(native, program, g);
+                let result = self.call_native(native, program, g)?;
                 self.stack.push(result);
                 Ok(())
             }
@@ -636,7 +641,7 @@ impl Vm {
             let split = self.split_at(argc as usize)?;
             self.args.clear();
             self.args.extend(self.stack.drain(split..));
-            let result = self.call_native(native, program, g);
+            let result = self.call_native(native, program, g)?;
             self.stack.push(result);
             return Ok(());
         }
@@ -1024,7 +1029,19 @@ impl Vm {
     /// `drawingContext` を触っていない作品では何もしない。触った作品でも
     /// 見るのは 4 つの項目だけなので、図形ごとに呼んでも安い。
     /// ネイティブ関数をひとつ呼ぶ。`drawingContext` の面倒もここで見る。
-    fn call_native(&mut self, native: natives::Native, program: &Program, g: &mut Graphics) -> Value {
+    fn call_native(
+        &mut self,
+        native: natives::Native,
+        program: &Program,
+        g: &mut Graphics,
+    ) -> Result<Value, Trap> {
+        let argc = self.args.len().min(u8::MAX as usize) as u8;
+        if natives::unsupported_overload(native, argc) {
+            return Err(Trap::UnsupportedOverload {
+                name: natives::native_name(native),
+                argc,
+            });
+        }
         self.sync_drawing_context(program, g);
         let result = natives::call(native, &self.args, g, &mut self.rng);
         // まだ `drawingContext` を触っていなくても控えは取る。触るのが
@@ -1046,7 +1063,7 @@ impl Vm {
             }
             _ => {}
         }
-        result
+        Ok(result)
     }
 
     fn sync_drawing_context(&self, program: &Program, g: &mut Graphics) {

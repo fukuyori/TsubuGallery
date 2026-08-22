@@ -701,8 +701,8 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
 | 分類 | 関数・変数 |
 |---|---|
 | 画面 | `size()` / `createCanvas()` (宣言したキャンバスを表示領域へ収める)、`width` `height` `frameCount`、表示領域そのものを指す `windowWidth` / `windowHeight` (`innerWidth` `innerHeight` `displayWidth` `displayHeight` も同じ) |
-| 基本描画 | `point() line() rect() ellipse() circle() triangle()`。`rect()` は 5 個目以降の引数で角が丸くなり、p5 のように高さを省いた `rect(x, y, w)` は正方形になる。`point()` は丸い点で、太い線の端も丸い (どちらの本家もそう) |
-| 自由な形 | `beginShape() vertex() curveVertex() bezierVertex() endShape()`、`arc() quad() bezier() curve()` |
+| 基本描画 | `point() line() rect() ellipse() circle() triangle()`。P3D / WEBGL では `point(x,y,z)` と 6 引数の `line()` も使える。`rect()` は 5 個目以降の引数で角が丸くなり、p5 のように高さを省いた `rect(x, y, w)` は正方形になる。`point()` は丸い点で、太い線の端も丸い (どちらの本家もそう) |
+| 自由な形 | `beginShape() vertex() curveVertex() bezierVertex() endShape()`、`arc() quad() bezier() curve()`。P3D / WEBGL の `vertex(x,y,z)` は奥行きも保持する |
 | 文字 | `text() textSize() textAlign() textWidth()`、`str() nf()`、`String.fromCodePoint()` |
 | 形の指定 | `rectMode() ellipseMode() angleMode()`、`square()` |
 | ベクトル | `createVector()`、`add sub mult div set copy mag magSq normalize limit setMag heading rotate dist dot cross lerp angleBetween` |
@@ -713,8 +713,8 @@ p5.js なら白 (p5 のキャンバスは透明で、後ろのページの白が
 | 座標変換 | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`。`translate()` と `scale()` は 3 引数、`rotate()` は `(角度, x, y, z)` と、p5 の `(角度, [x, y, z])` も取る |
 | 3D | `size(w, h, P3D)`、`box() sphere() sphereDetail() rotateX() rotateY() rotateZ() lights() noLights()`。`sphere(半径, 経度, 緯度)` はその 1 個だけ分割数を変える |
 | 受けるだけ | `smooth() noSmooth()`。Renderer は常になめらかに描くので、指示は受けて何もしない |
-| 数学 | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
-| 乱数・ノイズ | `random() randomGaussian() noise() randomSeed() millis()` |
+| 数学 | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()`。`dist()` と `mag()` は 2D / 3D の両形式に対応 |
+| 乱数・ノイズ | `random() randomGaussian() noise() randomSeed() millis()`。`randomGaussian()` は平均と標準偏差も指定できる |
 | 入力 | `mouseX` `mouseY` `mousePressed` `keyPressed` |
 | 定数 | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `QUADS` `QUAD_STRIP` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
 
@@ -1159,25 +1159,22 @@ MSAA は 4x。Viewer もサムネイルも同じ `BatchRenderer` を通る。
   CPU 側にラスタライズされた像を持っていない。同じフレームの中で読み書きする
   作品 (砂が積もる、成長する、当たり判定を取る) を動かすには、CPU 側の
   ラスタライザを別に持つ必要がある
-- **`beginShape()` の頂点は 2 次元**。`vertex(x, y, z)` は受けるが z を捨てるので、
-  自由な形で組んだ立体は平らに出る。`box()` / `sphere()` は 3D のまま
 - **p5 の DOM 部品** (`createColorPicker` / `createSlider` / `createButton` …)。
   ブラウザの要素を作る API で、ここには置く場所が無い。呼ぶと
   「`createColorPicker()` という関数はありません」で止まる
 - `blendMode()` の `OVERLAY` `HARD_LIGHT` `SOFT_LIGHT` `DODGE` `BURN` `REMOVE`。
   GPU の合成器は掛け算と足し算しか組めないので、下地を読み返す式は作れない。
   指定しても `BLEND` として描く
-- 未実装のその他の p5 API: 画像 (`image` / `loadImage`)、`strokeCap` / `strokeJoin`、
-  `frameRate()`
+- 未実装のその他の p5 API: 画像・オフスクリーン描画 (`image` / `loadImage` /
+  `createGraphics`)、`strokeCap` / `strokeJoin`、`frameRate()`
 - Import / Export、GIF・動画の書き出し (設計書 §27)
 - OS のスクリーンセーバーとしての登録 (macOS `.saver` / Windows `.scr`)
 - Android / iOS (Phase 10, 11)
-- **GLSL のシェーダ** (twigl のような作品)
 
 ## 開発
 
 ```sh
-cargo test --workspace      # 485 tests
+cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 

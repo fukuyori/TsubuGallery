@@ -744,8 +744,8 @@ default black stroke and would be invisible.
 | Category | Functions and variables |
 |---|---|
 | Screen | `size()` / `createCanvas()` (the declared canvas is scaled to fit), `width` `height` `frameCount`, and `windowWidth` / `windowHeight` for the display area itself (`innerWidth` `innerHeight` `displayWidth` `displayHeight` mean the same here) |
-| Basic shapes | `point() line() rect() ellipse() circle() triangle()`. A 5th argument onwards rounds `rect()` corners, and `rect(x, y, w)` is a square as in p5. `point()` is a round dot and thick lines get round ends, as in both originals |
-| Free-form shapes | `beginShape() vertex() curveVertex() bezierVertex() endShape()`, `arc() quad() bezier() curve()` |
+| Basic shapes | `point() line() rect() ellipse() circle() triangle()`. P3D / WEBGL also supports `point(x,y,z)` and six-argument `line()`. A 5th argument onwards rounds `rect()` corners, and `rect(x, y, w)` is a square as in p5. `point()` is a round dot and thick lines get round ends, as in both originals |
+| Free-form shapes | `beginShape() vertex() curveVertex() bezierVertex() endShape()`, `arc() quad() bezier() curve()`. P3D / WEBGL `vertex(x,y,z)` retains depth |
 | Text | `text() textSize() textAlign() textWidth()`, `str() nf()`, `String.fromCodePoint()` |
 | Shape modes | `rectMode() ellipseMode() angleMode()`, `square()` |
 | Vectors | `createVector()`, `add sub mult div set copy mag magSq normalize limit setMag heading rotate dist dot cross lerp angleBetween` |
@@ -756,8 +756,8 @@ default black stroke and would be invisible.
 | Transforms | `translate() rotate() scale() pushMatrix() popMatrix() pushStyle() popStyle() resetMatrix()`. `translate()` and `scale()` also take 3 arguments, `rotate()` takes `(angle, x, y, z)` and p5's `(angle, [x, y, z])` |
 | 3D | `size(w, h, P3D)`, `box() sphere() sphereDetail() rotateX() rotateY() rotateZ() lights() noLights()`. `sphere(r, longitude, latitude)` changes the detail for that one sphere |
 | Accepted, ignored | `smooth() noSmooth()`. The renderer always antialiases, so the call is taken and does nothing |
-| Maths | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()` |
-| Random and noise | `random() randomGaussian() noise() randomSeed() millis()` |
+| Maths | `sin() cos() tan() atan() atan2() asin() acos() abs() min() max() map() norm() constrain() sqrt() sq() pow() exp() log() floor() ceil() round() dist() mag() lerp() radians() degrees() int() float() hypot() sign() cbrt() log2() log10()`. `dist()` and `mag()` support both 2-D and 3-D forms |
+| Random and noise | `random() randomGaussian() noise() randomSeed() millis()`. `randomGaussian()` also accepts a mean and standard deviation |
 | Input | `mouseX` `mouseY` `mousePressed` `keyPressed` |
 | Constants | `PI` `TWO_PI` `TAU` `HALF_PI` `QUARTER_PI` `RGB` `HSB` `CLOSE` `POINTS` `LINES` `TRIANGLES` `TRIANGLE_STRIP` `TRIANGLE_FAN` `QUADS` `QUAD_STRIP` `CORNER` `CORNERS` `CENTER` `RADIUS` `DEGREES` `RADIANS` `LEFT` `RIGHT` `TOP` `BOTTOM` `BASELINE` |
 
@@ -1241,26 +1241,22 @@ it.
   only on the GPU; there is no rasterised image on the CPU side. Sketches that
   read and write within the same frame (piling sand, growth, collision) would
   need a separate CPU rasteriser
-- **`beginShape()` vertices are 2-D**. `vertex(x, y, z)` is accepted but the z is
-  dropped, so a solid built out of free-form vertices comes out flat. `box()` and
-  `sphere()` are still 3-D
 - **p5's DOM widgets** (`createColorPicker` / `createSlider` / `createButton` …).
   They create browser elements, and there is nowhere to put them here. Calling
   one stops the sketch with an error naming the function
 - `blendMode()`'s `OVERLAY` `HARD_LIGHT` `SOFT_LIGHT` `DODGE` `BURN` `REMOVE`.
   The GPU's blender only multiplies and adds, so a formula that reads the
   destination back cannot be built. They are drawn as `BLEND`
-- Other p5 APIs: images (`image` / `loadImage`), `strokeCap` / `strokeJoin`,
-  `frameRate()`
+- Other p5 APIs: images and offscreen drawing (`image` / `loadImage` /
+  `createGraphics`), `strokeCap` / `strokeJoin`, `frameRate()`
 - Import / export, GIF and video export (design §27)
 - Registering as an OS screensaver (macOS `.saver` / Windows `.scr`)
 - Android / iOS (Phases 10 and 11)
-- **GLSL shaders** (twigl-style sketches)
 
 ## Development
 
 ```sh
-cargo test --workspace      # 485 tests
+cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 

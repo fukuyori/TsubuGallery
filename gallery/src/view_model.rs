@@ -235,6 +235,15 @@ impl GalleryView {
         }
     }
 
+    /// ワーカーが停止したとき、完了通知を待ち続ける項目を再試行可能に戻す。
+    pub fn reset_loading_thumbnails(&mut self) {
+        for item in &mut self.items {
+            if matches!(item.thumbnail, ThumbnailState::Loading) {
+                item.thumbnail = ThumbnailState::Missing;
+            }
+        }
+    }
+
     /// 作品を差し込む。ファイル名順を保つため位置を指定する。
     ///
     /// 選んでいた作品はそのまま選ばれ続ける。新しい作品を選びたい呼び出し側は
@@ -247,7 +256,11 @@ impl GalleryView {
 
         if let Some(previous) = selected {
             // 手前に差し込まれた分だけ添字がずれる。
-            let moved = if index <= previous { previous + 1 } else { previous };
+            let moved = if index <= previous {
+                previous + 1
+            } else {
+                previous
+            };
             self.select(moved);
         }
     }
@@ -264,7 +277,11 @@ impl GalleryView {
 
         match selected {
             Some(previous) if previous != index => {
-                let moved = if index < previous { previous - 1 } else { previous };
+                let moved = if index < previous {
+                    previous - 1
+                } else {
+                    previous
+                };
                 self.select(moved);
             }
             // 選んでいた作品が消えたときは、同じ位置の隣へ寄せる。
@@ -308,7 +325,9 @@ impl GalleryView {
     fn refresh(&mut self) {
         let selected_before = self.visible.get(self.cursor).copied();
 
-        self.visible = (0..self.items.len()).filter(|&i| self.filter.matches(&self.items[i])).collect();
+        self.visible = (0..self.items.len())
+            .filter(|&i| self.filter.matches(&self.items[i]))
+            .collect();
 
         match self.sort {
             SortOrder::Name => {
@@ -316,7 +335,10 @@ impl GalleryView {
             }
             SortOrder::RecentlyAdded => {
                 self.visible.sort_by(|&a, &b| {
-                    self.items[b].created_at.cmp(&self.items[a].created_at).then(a.cmp(&b))
+                    self.items[b]
+                        .created_at
+                        .cmp(&self.items[a].created_at)
+                        .then(a.cmp(&b))
                 });
             }
             SortOrder::RecentlyOpened => {
@@ -334,7 +356,8 @@ impl GalleryView {
         }
 
         // 同じ作品を選び続ける。消えていたら近い位置へ寄せる。
-        self.cursor = match selected_before.and_then(|i| self.visible.iter().position(|&v| v == i)) {
+        self.cursor = match selected_before.and_then(|i| self.visible.iter().position(|&v| v == i))
+        {
             Some(pos) => pos,
             None => self.cursor.min(self.visible.len().saturating_sub(1)),
         };
@@ -417,7 +440,10 @@ mod tests {
     fn hidden_sketches_still_get_their_thumbnails_eventually() {
         let mut v = view(3, 3);
         v.items[0].favorite = true;
-        v.set_filter(Filter { favorites_only: true, ..Default::default() });
+        v.set_filter(Filter {
+            favorites_only: true,
+            ..Default::default()
+        });
         assert_eq!(v.visible_len(), 1);
 
         v.set_thumbnail_state(0, ThumbnailState::Ready);
@@ -432,6 +458,23 @@ mod tests {
             v.set_thumbnail_state(i, ThumbnailState::Ready);
         }
         assert_eq!(v.next_missing_thumbnail(), None);
+    }
+
+    #[test]
+    fn stopped_worker_only_resets_loading_thumbnails() {
+        let mut v = view(3, 3);
+        v.set_thumbnail_state(0, ThumbnailState::Loading);
+        v.set_thumbnail_state(1, ThumbnailState::Ready);
+        v.set_thumbnail_state(2, ThumbnailState::Failed("broken".into()));
+
+        v.reset_loading_thumbnails();
+
+        assert_eq!(v.items()[0].thumbnail, ThumbnailState::Missing);
+        assert_eq!(v.items()[1].thumbnail, ThumbnailState::Ready);
+        assert_eq!(
+            v.items()[2].thumbnail,
+            ThumbnailState::Failed("broken".into())
+        );
     }
 
     #[test]
@@ -503,13 +546,22 @@ mod tests {
             GalleryItem::new("spiral", "Spiral", 0),
             GalleryItem::new("pulse-grid", "Pulse Grid", 0),
         ]);
-        v.set_filter(Filter { text: "SPI".into(), ..Default::default() });
+        v.set_filter(Filter {
+            text: "SPI".into(),
+            ..Default::default()
+        });
         assert_eq!(v.visible(), &[0]);
 
-        v.set_filter(Filter { text: "grid".into(), ..Default::default() });
+        v.set_filter(Filter {
+            text: "grid".into(),
+            ..Default::default()
+        });
         assert_eq!(v.visible(), &[1]);
 
-        v.set_filter(Filter { text: "見つからない".into(), ..Default::default() });
+        v.set_filter(Filter {
+            text: "見つからない".into(),
+            ..Default::default()
+        });
         assert!(v.visible().is_empty());
     }
 
@@ -519,10 +571,16 @@ mod tests {
         v.items[1].favorite = true;
         v.items[2].status = SketchStatus::Error("だめ".into());
 
-        v.set_filter(Filter { favorites_only: true, ..Default::default() });
+        v.set_filter(Filter {
+            favorites_only: true,
+            ..Default::default()
+        });
         assert_eq!(v.visible(), &[1]);
 
-        v.set_filter(Filter { errors_only: true, ..Default::default() });
+        v.set_filter(Filter {
+            errors_only: true,
+            ..Default::default()
+        });
         assert_eq!(v.visible(), &[2]);
     }
 
@@ -532,7 +590,10 @@ mod tests {
         v.items[0].tags.insert("circles".into());
         v.items[2].tags.insert("circles".into());
 
-        v.set_filter(Filter { tag: Some("circles".into()), ..Default::default() });
+        v.set_filter(Filter {
+            tag: Some("circles".into()),
+            ..Default::default()
+        });
         assert_eq!(v.visible(), &[0, 2]);
     }
 
@@ -575,7 +636,10 @@ mod tests {
         let mut v = view(5, 5);
         v.items[1].favorite = true;
         v.items[3].favorite = true;
-        v.set_filter(Filter { favorites_only: true, ..Default::default() });
+        v.set_filter(Filter {
+            favorites_only: true,
+            ..Default::default()
+        });
 
         v.move_selection(Move::First);
         assert_eq!(v.selected_index(), 1);
@@ -591,7 +655,10 @@ mod tests {
         v.items[2].favorite = true;
         v.select(2);
 
-        v.set_filter(Filter { favorites_only: true, ..Default::default() });
+        v.set_filter(Filter {
+            favorites_only: true,
+            ..Default::default()
+        });
         assert_eq!(v.selected_index(), 2, "残っているなら選択を維持する");
     }
 
@@ -600,7 +667,10 @@ mod tests {
         let mut v = view(3, 3);
         v.items[0].favorite = true;
         v.items[1].favorite = true;
-        v.set_filter(Filter { favorites_only: true, ..Default::default() });
+        v.set_filter(Filter {
+            favorites_only: true,
+            ..Default::default()
+        });
         v.select(1);
 
         v.toggle_favorite(1);
@@ -611,7 +681,10 @@ mod tests {
     #[test]
     fn everything_filtered_out_leaves_no_selection() {
         let mut v = view(3, 3);
-        v.set_filter(Filter { favorites_only: true, ..Default::default() });
+        v.set_filter(Filter {
+            favorites_only: true,
+            ..Default::default()
+        });
         assert_eq!(v.visible_len(), 0);
         assert!(v.selected().is_none());
         assert!(v.selected_item().is_none());
@@ -644,6 +717,10 @@ mod tests {
         v.insert(1, fresh);
 
         let first = v.visible().first().copied().expect("何かある");
-        assert_eq!(v.item(first).map(|i| i.id.as_str()), Some("new"), "先頭に来ません");
+        assert_eq!(
+            v.item(first).map(|i| i.id.as_str()),
+            Some("new"),
+            "先頭に来ません"
+        );
     }
 }

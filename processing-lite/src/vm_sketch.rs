@@ -13,7 +13,7 @@ use crate::parser::parse;
 use crate::sketch::Sketch;
 use crate::vm::{DEFAULT_FRAME_BUDGET, Trap, Vm};
 
-/// 連続でこの回数だけ打ち切られたら、実行を諦めてエラー表示に切り替える。
+/// 連続でこの回数だけ実行予算を超えたら、エラー表示に切り替える。
 ///
 /// 1 回の予算超過は重いフレームかもしれないが、続くなら無限ループとみなす。
 const MAX_CONSECUTIVE_TRAPS: u32 = 3;
@@ -71,18 +71,21 @@ impl VmSketch {
         self.vm.last_frame_ops
     }
 
-    /// 打ち切りを記録する。続けて起きるようならその作品は止める。
+    /// 実行結果を記録する。予算超過だけは一時的な重さを許容する。
     fn record(&mut self, result: Result<(), Trap>) {
         match result {
             Ok(()) => self.consecutive_traps = 0,
-            Err(trap) => {
+            Err(Trap::BudgetExceeded) => {
                 self.consecutive_traps += 1;
                 if self.consecutive_traps >= MAX_CONSECUTIVE_TRAPS {
                     // ここで諦めないと、暴走した作品が毎フレーム予算を使い切り、
                     // Gallery 全体の操作感を落とす (設計書 §21.1)。
-                    self.error = Some(trap.to_string());
+                    self.error = Some(Trap::BudgetExceeded.to_string());
                 }
             }
+            // 型・引数・添字などの確定的なエラーは次のフレームでも直らない。
+            // 数フレーム黙って再実行すると、誤描画と余計な副作用を生む。
+            Err(trap) => self.error = Some(trap.to_string()),
         }
     }
 }

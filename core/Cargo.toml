@@ -13,3 +13,6 @@ log.workspace = true
 env_logger.workspace = true
 thiserror.workspace = true
 rusqlite.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

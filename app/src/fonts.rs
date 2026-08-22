@@ -211,4 +211,3 @@ mod tests {
         assert!(!SYMBOL_NAMES.contains(&normalize("HackNerdFont-Regular.ttf").as_str()));
     }
 }
-

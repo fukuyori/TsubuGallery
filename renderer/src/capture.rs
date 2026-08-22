@@ -20,6 +20,8 @@ pub enum CaptureError {
     Map(#[from] wgpu::BufferAsyncError),
     #[error("GPU の待機に失敗しました: {0}")]
     Poll(String),
+    #[error("GPU の読み戻し完了通知を受け取れませんでした")]
+    CallbackDropped,
     #[error("読み出せる絵がありません")]
     Empty,
 }
@@ -43,7 +45,11 @@ impl Default for Capturer {
 
 impl Capturer {
     pub fn new() -> Self {
-        Self { canvas: None, format: wgpu::TextureFormat::Rgba8Unorm, readback: None }
+        Self {
+            canvas: None,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            readback: None,
+        }
     }
 
     pub fn format(&self) -> wgpu::TextureFormat {
@@ -70,10 +76,13 @@ impl Capturer {
         let width = width.max(1);
         let height = height.max(1);
         let format = self.format;
-        let canvas = self.canvas.get_or_insert_with(|| Canvas::new(device, format));
+        let canvas = self
+            .canvas
+            .get_or_insert_with(|| Canvas::new(device, format));
 
-        let mut encoder = device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tsubu.capture") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("tsubu.capture"),
+        });
         canvas.render(device, queue, batch, &mut encoder, g, width, height);
         queue.submit(Some(encoder.finish()));
     }
@@ -98,8 +107,9 @@ impl Capturer {
             .and_then(|c| c.front_texture())
             .ok_or(CaptureError::Empty)?;
 
-        let mut encoder = device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tsubu.readback") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("tsubu.readback"),
+        });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -115,7 +125,11 @@ impl Capturer {
                     rows_per_image: Some(height),
                 },
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit(Some(encoder.finish()));
 
@@ -126,12 +140,17 @@ impl Capturer {
             let _ = tx.send(result);
         });
         device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .map_err(|e| CaptureError::Poll(e.to_string()))?;
-        rx.recv().expect("map callback dropped")?;
+        rx.recv().map_err(|_| CaptureError::CallbackDropped)??;
 
         let rgba = {
-            let view = slice.get_mapped_range().map_err(|e| CaptureError::Poll(e.to_string()))?;
+            let view = slice
+                .get_mapped_range()
+                .map_err(|e| CaptureError::Poll(e.to_string()))?;
             let mut out = Vec::with_capacity((width * height * 4) as usize);
             for row in 0..height as usize {
                 let start = row * bytes_per_row as usize;
@@ -141,7 +160,11 @@ impl Capturer {
         };
         buffer.unmap();
 
-        Ok(CapturedImage { width, height, rgba })
+        Ok(CapturedImage {
+            width,
+            height,
+            rgba,
+        })
     }
 
     /// 1 枚だけ描いて読み戻す近道。

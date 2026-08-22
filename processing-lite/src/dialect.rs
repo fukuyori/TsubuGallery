@@ -86,9 +86,14 @@ const UNSUPPORTED_P5_API: &[&str] = &[
     "image",
     "loadImage",
     "createImage",
+    "createGraphics",
+    "imageMode",
+    "tint",
+    "noTint",
     "pixels",
     "loadPixels",
     "updatePixels",
+    "pixelDensity",
     "strokeCap",
     "strokeJoin",
     "redraw",
@@ -355,8 +360,14 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 
     #[test]
     fn p5_apis_we_do_not_have_are_listed() {
-        let keys = keys("draw=_=>{image(1,2,3)}");
-        assert!(keys.contains(&"dialect.unsupported_api"), "{keys:?}");
+        for source in [
+            "draw=_=>{image(1,2,3)}",
+            "draw=_=>{g=createGraphics(100,100)}",
+            "draw=_=>{loadPixels();pixelDensity(1)}",
+        ] {
+            let keys = keys(source);
+            assert!(keys.contains(&"dialect.unsupported_api"), "{source}: {keys:?}");
+        }
     }
 
     #[test]

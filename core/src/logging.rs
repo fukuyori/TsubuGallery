@@ -68,17 +68,19 @@ const DEFAULT_LEVEL: &str = "warn";
 ///
 /// 戻り値は書き込み先。ファイルへ出せなかったときは `None`。
 pub fn init(paths: &DataPaths) -> Option<PathBuf> {
-    let stderr = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(DEFAULT_LEVEL),
-    )
-    .build();
+    let stderr =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_LEVEL))
+            .build();
     let level = stderr.filter();
 
     let path = paths.logs().join(LOG_FILE);
     let sink = Sink::open(&path);
     let opened = sink.is_some();
 
-    let logger = Logger { stderr, sink: sink.map(Mutex::new) };
+    let logger = Logger {
+        stderr,
+        sink: sink.map(Mutex::new),
+    };
     if log::set_boxed_logger(Box::new(logger)).is_err() {
         // 既に誰かが入れている。テストから二度呼ばれた場合など。
         return None;
@@ -150,8 +152,7 @@ impl SketchRecord<'_> {
         }
         pairs.push(("message", self.message.to_string()));
 
-        let borrowed: Vec<(&str, &str)> =
-            pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let borrowed: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
         fields(&borrowed)
     }
 }
@@ -225,6 +226,13 @@ impl Log for Logger {
     }
 
     fn log(&self, record: &Record<'_>) {
+        // GNOME 系の button-layout には `menu` が入ることがあるが、winit が
+        // Wayland のクライアント側装飾に使う sctk-adwaita はそのボタンを描かず、
+        // 無視したことを warn にする。ウィンドウの動作には影響せず、こちらで
+        // 直す先もないので、標準エラーと永続ログの両方からこの 1 件だけ除く。
+        if is_known_platform_noise(record) {
+            return;
+        }
         // 絞り込みの判定は env_logger のものをそのまま使う。ファイルと画面で
         // 出るものが食い違わないようにするため。
         if !self.stderr.matches(record) {
@@ -247,6 +255,11 @@ impl Log for Logger {
         }
         self.stderr.flush();
     }
+}
+
+fn is_known_platform_noise(record: &Record<'_>) -> bool {
+    record.target() == "sctk_adwaita::buttons"
+        && record.args().to_string() == "Ignoring unknown button type: menu"
 }
 
 /// ファイルに書く 1 行を作る。改行は含めない。
@@ -287,9 +300,17 @@ impl Sink {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok()?;
         }
-        let file = OpenOptions::new().create(true).append(true).open(path).ok()?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()?;
         let written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Some(Self { path: path.to_path_buf(), file, written })
+        Some(Self {
+            path: path.to_path_buf(),
+            file,
+            written,
+        })
     }
 
     fn write(&mut self, line: &str) {
@@ -317,7 +338,11 @@ impl Sink {
         if std::fs::rename(&self.path, rotated(&self.path, 1)).is_err() {
             return;
         }
-        match OpenOptions::new().create(true).append(true).open(&self.path) {
+        match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             Ok(file) => {
                 self.file = file;
                 self.written = 0;
@@ -399,12 +424,42 @@ mod tests {
     #[test]
     fn fields_quote_only_what_needs_it() {
         assert_eq!(fields(&[("id", "sketch-12")]), "id=sketch-12");
-        assert_eq!(fields(&[("line", "23"), ("column", "9")]), "line=23 column=9");
+        assert_eq!(
+            fields(&[("line", "23"), ("column", "9")]),
+            "line=23 column=9"
+        );
         // 空白が入る値は囲む。読む側は key="..." を 1 つの値として取れる。
         assert_eq!(fields(&[("message", "a b")]), r#"message="a b""#);
-        assert_eq!(fields(&[("message", "say \"hi\"")]), r#"message="say \"hi\"""#);
-        assert_eq!(fields(&[("message", "1 行目\n2 行目")]), "message=\"1 行目\\n2 行目\"");
+        assert_eq!(
+            fields(&[("message", "say \"hi\"")]),
+            r#"message="say \"hi\"""#
+        );
+        assert_eq!(
+            fields(&[("message", "1 行目\n2 行目")]),
+            "message=\"1 行目\\n2 行目\""
+        );
         assert_eq!(fields(&[("message", "")]), r#"message="""#);
+    }
+
+    #[test]
+    fn only_the_harmless_wayland_menu_warning_is_ignored() {
+        let menu = Record::builder()
+            .target("sctk_adwaita::buttons")
+            .args(format_args!("Ignoring unknown button type: menu"))
+            .build();
+        assert!(is_known_platform_noise(&menu));
+
+        let other_button = Record::builder()
+            .target("sctk_adwaita::buttons")
+            .args(format_args!("Ignoring unknown button type: future-button"))
+            .build();
+        assert!(!is_known_platform_noise(&other_button));
+
+        let same_text_from_the_app = Record::builder()
+            .target("tsubugallery")
+            .args(format_args!("Ignoring unknown button type: menu"))
+            .build();
+        assert!(!is_known_platform_noise(&same_text_from_the_app));
     }
 
     #[test]
@@ -428,11 +483,16 @@ mod tests {
             ..record
         };
         assert!(
-            windows.line_text().contains("file=D:/data/sketches/sketch-12.pde"),
+            windows
+                .line_text()
+                .contains("file=D:/data/sketches/sketch-12.pde"),
             "{}",
             windows.line_text()
         );
-        assert!(line.contains(r#"message="rotate は引数 1 か 4 個で呼びます""#), "{line}");
+        assert!(
+            line.contains(r#"message="rotate は引数 1 か 4 個で呼びます""#),
+            "{line}"
+        );
     }
 
     #[test]
@@ -517,7 +577,10 @@ mod tests {
         assert!(path.exists(), "いまのログがある");
         assert!(rotated(&path, 1).exists(), "1 つ前のログがある");
         assert!(rotated(&path, KEEP).exists(), "{KEEP} 本目まで残る");
-        assert!(!rotated(&path, KEEP + 1).exists(), "それより古いものは捨てる");
+        assert!(
+            !rotated(&path, KEEP + 1).exists(),
+            "それより古いものは捨てる"
+        );
 
         // 送り出した直後のファイルは上限より小さい。
         let len = std::fs::metadata(&path).expect("読める").len();

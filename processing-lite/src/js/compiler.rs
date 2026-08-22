@@ -965,6 +965,15 @@ impl Compiler {
                 self.code.push(Op::CallNative(native, argc));
                 return Ok(());
             }
+            if let Some(native) = natives::resolve_by_name(name)
+                && natives::unsupported_overload(native, argc)
+            {
+                return Err(CompileError::new(
+                    line,
+                    column,
+                    format!("{name} の引数 {argc} 個の形式にはまだ対応していません"),
+                ));
+            }
             // 多すぎる引数は捨てる。JavaScript は余った引数を無視するので、
             // `noFill(H = W / 2)` のように、呼び出しを代入の置き場にした
             // つぶやき作品がある。評価だけはしないと代入が起きない。

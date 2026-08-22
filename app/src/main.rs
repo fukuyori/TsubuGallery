@@ -42,7 +42,7 @@ use editor_ui::EditorAction;
 use gallery_ui::{GalleryAction, GalleryOutput, GalleryUi};
 use gfx::Gfx;
 use settings_ui::{SettingsAction, SettingsUi};
-use thumbnail::ThumbnailLoader;
+use thumbnail::{Completed as ThumbnailCompleted, ThumbnailLoader};
 use tsubu_renderer::{Capturer, Color, SAMPLE_COUNT};
 use ui::{UiFrame, UiLayer};
 use viewer::Viewer;
@@ -51,8 +51,10 @@ use wgpu::CurrentSurfaceTexture;
 
 /// Gallery の地。egui のパネルが上に乗る。
 const GALLERY_BACKGROUND: Color = Color::rgba(0.07, 0.07, 0.08, 1.0);
-/// 1 フレームに GPU で作るサムネイルの上限。Gallery の応答性を優先する (§22)。
-const GPU_THUMBNAILS_PER_FRAME: usize = 1;
+/// UI の 1 フレームでサムネイル作品を進める最大フレーム数。
+const THUMBNAIL_STEPS_PER_FRAME: usize = 4;
+/// 軽い作品でも時間を使い切ったら次の UI フレームへ譲る。
+const THUMBNAIL_TIME_SLICE: Duration = Duration::from_millis(4);
 /// 1 フレームに投げるディスク読み込みの上限。
 const DISK_THUMBNAILS_PER_FRAME: usize = 4;
 
@@ -150,7 +152,11 @@ fn run(paths: DataPaths) {
             crate::viewer::Viewer::to_fit(settings.canvas_fit),
         ) {
             Ok(paths) => {
-                println!("{} 件のサムネイルを生成しました\n{}", paths.len(), paths.join("\n"))
+                println!(
+                    "{} 件のサムネイルを生成しました\n{}",
+                    paths.len(),
+                    paths.join("\n")
+                )
             }
             Err(e) => {
                 eprintln!("{e}");
@@ -252,10 +258,21 @@ struct ScreensaverReturn {
 
 /// これから作るサムネイル 1 件。
 struct ThumbnailJob {
-    index: usize,
+    id: String,
     frame: u64,
     /// ディスクに画像があっても作り直す (手動更新, §7.2)。
     force: bool,
+}
+
+/// 数回の UI フレームに分けて進めているサムネイル。
+struct ActiveThumbnailJob {
+    id: String,
+    width: u32,
+    height: u32,
+    target_frame: u64,
+    next_frame: u64,
+    force: bool,
+    sketch: Box<dyn tsubu_processing_lite::Sketch>,
 }
 
 struct App {
@@ -270,7 +287,7 @@ struct App {
     /// サムネイル生成専用の描画コンテキスト。表示中の絵とは混ぜない。
     thumb_graphics: tsubu_renderer::Graphics,
     textures: HashMap<String, egui::TextureHandle>,
-    loader: ThumbnailLoader,
+    loader: Option<ThumbnailLoader>,
 
     locales: Locales,
     paths: DataPaths,
@@ -298,6 +315,8 @@ struct App {
     scroll_to_selected: bool,
     /// 手動更新など、優先して処理するサムネイル。
     requested_thumbnail: Option<ThumbnailJob>,
+    /// いま少しずつ実行しているサムネイル。
+    active_thumbnail: Option<ActiveThumbnailJob>,
     /// 編集中の作品。
     editor: Option<Editor>,
     /// 削除の確認待ち。
@@ -376,8 +395,14 @@ impl App {
         log::info!("{} 件の作品を読み込みました", sketches.len());
 
         let tags = Self::sync_metadata(repository.as_mut(), &mut items, &sources);
-        let collections =
-            repository.as_ref().and_then(|r| r.collections().ok()).unwrap_or_default();
+        let collections = match repository.as_ref().map(Repository::collections) {
+            Some(Ok(collections)) => collections,
+            Some(Err(e)) => {
+                log::error!("コレクションを読めませんでした: {e}");
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
 
         let mut viewer = Viewer::new(sketches);
         viewer.apply_settings(&settings);
@@ -392,6 +417,13 @@ impl App {
         }
         let mut gallery = GalleryView::new(items);
         gallery.set_sort(settings.sort_order);
+        let loader = match ThumbnailLoader::new() {
+            Ok(loader) => Some(loader),
+            Err(e) => {
+                log::error!("{e}");
+                None
+            }
+        };
 
         Self {
             window: None,
@@ -402,7 +434,7 @@ impl App {
             sources,
             thumb_graphics,
             textures: HashMap::new(),
-            loader: ThumbnailLoader::new(),
+            loader,
             locales,
             paths,
             capturer: Capturer::new(),
@@ -417,6 +449,7 @@ impl App {
             cursor_inside: false,
             scroll_to_selected: false,
             requested_thumbnail: None,
+            active_thumbnail: None,
             editor: None,
             canvas_epoch: 0,
             pending_delete: None,
@@ -491,7 +524,9 @@ impl App {
 
     /// 作品をコレクションへ出し入れする。
     fn set_collection(&mut self, index: usize, name: &str, member: bool) {
-        let Some(id) = self.gallery.items().get(index).map(|i| i.id.clone()) else { return };
+        let Some(id) = self.gallery.items().get(index).map(|i| i.id.clone()) else {
+            return;
+        };
 
         if let Some(repo) = self.repository.as_mut() {
             let now = repository::now();
@@ -527,7 +562,14 @@ impl App {
     /// 一覧が空のまま戻せなくなる。
     fn refresh_collections(&mut self) {
         if let Some(repo) = self.repository.as_ref() {
-            self.collections = repo.collections().unwrap_or_default();
+            match repo.collections() {
+                Ok(collections) => self.collections = collections,
+                Err(e) => {
+                    // 一時的な読み取り失敗で、画面上の絞り込みまで勝手に外さない。
+                    log::error!("コレクションを読めませんでした: {e}");
+                    return;
+                }
+            }
         }
         let mut filter = self.gallery.filter().clone();
         if let Some(current) = &filter.collection
@@ -583,7 +625,10 @@ impl App {
             self.open_viewer(self.gallery.selected().unwrap_or(0));
         }
         self.slideshow = Some(Instant::now() + self.slideshow_interval());
-        log::debug!("スライドショーを始めました ({} 秒ごと)", self.settings.slideshow_interval);
+        log::debug!(
+            "スライドショーを始めました ({} 秒ごと)",
+            self.settings.slideshow_interval
+        );
     }
 
     /// スライドショーの時計を見て、頃合いなら次へ送る。
@@ -612,7 +657,9 @@ impl App {
         if self.slideshow.is_some() {
             return;
         }
-        let Some(idle) = self.settings.screensaver.idle() else { return };
+        let Some(idle) = self.settings.screensaver.idle() else {
+            return;
+        };
         // 編集中と設定中は入らない。手を止めて画面を読んでいるだけのことがある。
         if !matches!(self.screen, Screen::Gallery | Screen::Viewer) {
             return;
@@ -622,8 +669,10 @@ impl App {
         }
 
         log::info!("スクリーンセーバーを始めます");
-        self.screensaver =
-            Some(ScreensaverReturn { screen: self.screen, fullscreen: self.fullscreen });
+        self.screensaver = Some(ScreensaverReturn {
+            screen: self.screen,
+            fullscreen: self.fullscreen,
+        });
         if !self.fullscreen {
             self.toggle_fullscreen();
         }
@@ -639,7 +688,9 @@ impl App {
     /// 画面へは渡さない。解除の一打で作品が消えたりしては困る。
     fn note_input(&mut self) -> bool {
         self.last_input = Instant::now();
-        let Some(back) = self.screensaver.take() else { return false };
+        let Some(back) = self.screensaver.take() else {
+            return false;
+        };
 
         log::info!("スクリーンセーバーを抜けます");
         self.slideshow = None;
@@ -675,7 +726,10 @@ impl App {
         items: &mut [GalleryItem],
         sources: &[loader::Source],
     ) -> Vec<String> {
-        let Some(repo) = repository else { return Vec::new() };
+        let Some(repo) = repository else {
+            return Vec::new();
+        };
+        debug_assert_eq!(items.len(), sources.len(), "作品とソースは同じ並びで持つ");
         let now = repository::now();
 
         let known: HashMap<String, SketchMeta> = match repo.all() {
@@ -735,13 +789,23 @@ impl App {
             Err(e) => log::error!("メタデータを整理できませんでした: {e}"),
         }
 
-        repo.tags().unwrap_or_default()
+        match repo.tags() {
+            Ok(tags) => tags,
+            Err(e) => {
+                log::error!("タグを読めませんでした: {e}");
+                Vec::new()
+            }
+        }
     }
 
     /// DB へ 1 件書き戻す。画面側の状態が正。
     fn persist(&mut self, index: usize) {
-        let Some(repo) = self.repository.as_mut() else { return };
-        let Some(item) = self.gallery.items().get(index) else { return };
+        let Some(repo) = self.repository.as_mut() else {
+            return;
+        };
+        let Some(item) = self.gallery.items().get(index) else {
+            return;
+        };
         let now = repository::now();
 
         let mut meta = match repo.get(&item.id) {
@@ -776,7 +840,10 @@ impl App {
 
     fn refresh_tags(&mut self) {
         if let Some(repo) = self.repository.as_ref() {
-            self.tags = repo.tags().unwrap_or_default();
+            match repo.tags() {
+                Ok(tags) => self.tags = tags,
+                Err(e) => log::error!("タグを読めませんでした: {e}"),
+            }
         }
     }
 
@@ -811,8 +878,12 @@ impl App {
 
     /// 編集画面を開く。
     fn open_editor(&mut self, index: usize) {
-        let Some(source) = self.sources.get(index) else { return };
-        let Some(item) = self.gallery.items().get(index) else { return };
+        let Some(source) = self.sources.get(index) else {
+            return;
+        };
+        let Some(item) = self.gallery.items().get(index) else {
+            return;
+        };
         let tags = item.tags.iter().cloned().collect::<Vec<_>>().join(", ");
         self.editor = Some(Editor::edit(
             index,
@@ -828,8 +899,7 @@ impl App {
 
     /// 新規作成。名前だけ決めて、保存するまでファイルは作らない。
     fn new_sketch(&mut self) {
-        let name =
-            tsubu_core::library::unique_id(&self.paths.sketches(), editor::DEFAULT_NAME);
+        let name = tsubu_core::library::unique_id(&self.paths.sketches(), editor::DEFAULT_NAME);
         self.editor = Some(Editor::new_sketch(name));
         self.return_screen = Screen::Gallery;
         self.screen = Screen::Editor;
@@ -850,7 +920,9 @@ impl App {
     /// コンパイルに失敗してもファイルは書く。ユーザーの入力を失わせないため。
     /// 実行中のインスタンスは直前の正常なものを保ったままにする。
     fn save_editor(&mut self) {
-        let Some(mut ed) = self.editor.take() else { return };
+        let Some(mut ed) = self.editor.take() else {
+            return;
+        };
         let dir = self.paths.sketches();
         let name = ed.name.trim().to_string();
 
@@ -861,7 +933,10 @@ impl App {
         }
 
         // 名前が変わっていたら、他の作品と衝突しないか見る。
-        let previous_id = ed.index.and_then(|i| self.gallery.items().get(i)).map(|i| i.id.clone());
+        let previous_id = ed
+            .index
+            .and_then(|i| self.gallery.items().get(i))
+            .map(|i| i.id.clone());
         let renaming = previous_id.as_deref() != Some(name.as_str());
         if renaming && tsubu_core::library::exists(&dir, &name) {
             ed.io_error = Some(format!("{}: {name}", self.locales.t("editor.name_taken")));
@@ -875,7 +950,17 @@ impl App {
             return;
         }
         if renaming && let Some(old) = &previous_id {
-            let _ = tsubu_core::library::delete(&dir, old);
+            if let Err(e) = tsubu_core::library::delete(&dir, old) {
+                // 新しい名前だけを残して画面側まで改名すると、次回起動時に旧作と
+                // 新作が二重に見える。新しく書いたほうを戻し、編集画面に留める。
+                if let Err(rollback) = tsubu_core::library::delete(&dir, &name) {
+                    log::error!("{name} の改名ロールバックにも失敗しました: {rollback}");
+                }
+                log::error!("{old} を改名できませんでした: {e}");
+                ed.io_error = Some(e.to_string());
+                self.editor = Some(ed);
+                return;
+            }
             let _ = std::fs::remove_file(self.paths.thumbnail_for(old));
             self.textures.remove(old);
         }
@@ -897,7 +982,8 @@ impl App {
         };
 
         self.gallery.set_tags(index, ed.parsed_tags());
-        self.gallery.set_credit(index, ed.author.trim(), ed.link.trim());
+        self.gallery
+            .set_credit(index, ed.author.trim(), ed.link.trim());
         ed.mark_saved(index);
         self.gallery.select(index);
         self.invalidate_thumbnail(index, &name);
@@ -906,8 +992,12 @@ impl App {
         if renaming
             && let Some(old) = &previous_id
             && let Some(repo) = self.repository.as_mut()
-            && let Err(e) =
-                repo.rename(old, &name, &tsubu_core::library::title_from_id(&name), repository::now())
+            && let Err(e) = repo.rename(
+                old,
+                &name,
+                &tsubu_core::library::title_from_id(&name),
+                repository::now(),
+            )
         {
             log::error!("{old} の改名を記録できませんでした: {e}");
         }
@@ -936,13 +1026,18 @@ impl App {
                     thumbnail_frame: self.settings.capture_frame,
                 };
                 // 書き換えで Processing から p5.js へ変わることがある。
-                self.gallery.set_dialect(index, Some(compiled.dialect.label().to_string()));
-                self.viewer
-                    .replace(index, tsubu_processing_lite::LoadedSketch::new(info, compiled.sketch));
+                self.gallery
+                    .set_dialect(index, Some(compiled.dialect.label().to_string()));
+                self.viewer.replace(
+                    index,
+                    tsubu_processing_lite::LoadedSketch::new(info, compiled.sketch),
+                );
                 self.gallery.set_status(index, SketchStatus::Ready);
             }
             // 直前の正常なコードで動かし続ける (設計書 §15.1)。
-            Err(e) => self.gallery.set_status(index, SketchStatus::Error(e.to_string())),
+            Err(e) => self
+                .gallery
+                .set_status(index, SketchStatus::Error(e.to_string())),
         }
         self.gallery.rename(index, id, title);
     }
@@ -972,11 +1067,14 @@ impl App {
         // 「最近追加」で先頭に来るように、その場で作成日時を入れる。DB へ
         // 書くのは後だが、画面はいま並べ替える。同じ名前の行が残っていれば
         // その日時を引き継ぐ (消して作り直したとき)。
-        let created_at = self
-            .repository
-            .as_ref()
-            .and_then(|repo| repo.get(&id).ok().flatten())
-            .map_or_else(repository::now, |meta| meta.created_at);
+        let created_at = match self.repository.as_ref().map(|repo| repo.get(&id)) {
+            Some(Ok(Some(meta))) => meta.created_at,
+            Some(Ok(None)) | None => repository::now(),
+            Some(Err(e)) => {
+                log::error!("{id} の作成日時を読めませんでした: {e}");
+                repository::now()
+            }
+        };
         let mut item = GalleryItem::new(&id, &title, created_at);
         let sketch: Box<dyn tsubu_processing_lite::Sketch> = match compiled {
             Ok(compiled) => {
@@ -991,14 +1089,19 @@ impl App {
         };
 
         self.sources.insert(index, source);
-        self.viewer.insert(index, tsubu_processing_lite::LoadedSketch::new(info, sketch));
+        self.viewer.insert(
+            index,
+            tsubu_processing_lite::LoadedSketch::new(info, sketch),
+        );
         self.gallery.insert(index, item);
         index
     }
 
     /// 削除を実行する。確認済みの前提。
     fn delete_sketch(&mut self, index: usize) {
-        let Some(item) = self.gallery.items().get(index) else { return };
+        let Some(item) = self.gallery.items().get(index) else {
+            return;
+        };
         let id = item.id.clone();
 
         if let Err(e) = tsubu_core::library::delete(&self.paths.sketches(), &id) {
@@ -1031,7 +1134,8 @@ impl App {
     fn invalidate_thumbnail(&mut self, index: usize, id: &str) {
         let _ = std::fs::remove_file(self.paths.thumbnail_for(id));
         self.textures.remove(id);
-        self.gallery.set_thumbnail_state(index, ThumbnailState::Missing);
+        self.gallery
+            .set_thumbnail_state(index, ThumbnailState::Missing);
     }
 
     /// キー操作で全画面を切り替え、設定にも残す。
@@ -1054,14 +1158,22 @@ impl App {
     }
 
     fn cycle_language(&mut self) {
-        let tags: Vec<String> =
-            self.locales.available().iter().map(|t| t.tag().to_string()).collect();
+        let tags: Vec<String> = self
+            .locales
+            .available()
+            .iter()
+            .map(|t| t.tag().to_string())
+            .collect();
         if tags.is_empty() {
             return;
         }
         let current = self.locales.active_tag().to_string();
-        let next = tags.iter().position(|t| *t == current).map_or(0, |i| (i + 1) % tags.len());
-        self.locales.set_preference(LanguagePreference::Explicit(tags[next].clone()));
+        let next = tags
+            .iter()
+            .position(|t| *t == current)
+            .map_or(0, |i| (i + 1) % tags.len());
+        self.locales
+            .set_preference(LanguagePreference::Explicit(tags[next].clone()));
         log::info!("UI 言語を {} に切り替えました", self.locales.active_tag());
     }
 
@@ -1070,10 +1182,14 @@ impl App {
     /// 保存はしない。ファイルにも Viewer にも触れないので、打ち間違いのたびに
     /// 動いている作品が止まることはない。
     fn check_editor(&mut self) {
-        let Some(editor) = self.editor.as_mut() else { return };
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
         editor.note_source_changes();
 
-        let Some(source) = editor.source_to_check() else { return };
+        let Some(source) = editor.source_to_check() else {
+            return;
+        };
         let source = source.to_string();
         let compiled = tsubu_processing_lite::compile_sketch(&source, 0);
         let dialect = compiled.as_ref().ok().map(|c| c.dialect);
@@ -1082,7 +1198,14 @@ impl App {
 
     /// サムネイルを作り直す (設計書 §7.2)。
     fn request_thumbnail_refresh(&mut self, index: usize, frame: u64) {
-        self.requested_thumbnail = Some(ThumbnailJob { index, frame, force: true });
+        let Some(id) = self.gallery.items().get(index).map(|item| item.id.clone()) else {
+            return;
+        };
+        self.requested_thumbnail = Some(ThumbnailJob {
+            id,
+            frame,
+            force: true,
+        });
     }
 
     // ---- 入力 -----------------------------------------------------------
@@ -1232,9 +1355,19 @@ impl App {
     /// 1 フレームあたりの仕事量を絞ってあるので、作品数が増えても Gallery の
     /// 操作は止まらない (設計書 §22)。
     fn pump_thumbnails(&mut self) {
-        while let Some(result) = self.loader.poll() {
-            match result {
-                Ok(decoded) => {
+        loop {
+            let completed = match self.loader.as_ref().map(ThumbnailLoader::poll) {
+                Some(Ok(Some(completed))) => completed,
+                Some(Ok(None)) | None => break,
+                Some(Err(e)) => {
+                    log::error!("{e}");
+                    self.loader = None;
+                    self.gallery.reset_loading_thumbnails();
+                    break;
+                }
+            };
+            match completed {
+                ThumbnailCompleted::Loaded(decoded) => {
                     if let Some(index) = self.gallery.index_of(&decoded.id) {
                         self.upload_texture(
                             &decoded.id,
@@ -1242,27 +1375,57 @@ impl App {
                             decoded.height,
                             &decoded.rgba,
                         );
-                        self.gallery.set_thumbnail_state(index, ThumbnailState::Ready);
+                        self.gallery
+                            .set_thumbnail_state(index, ThumbnailState::Ready);
                     }
                 }
-                Err((id, message)) => {
+                ThumbnailCompleted::Saved { id, force } => {
+                    if let Some(index) = self.gallery.index_of(&id) {
+                        self.gallery
+                            .set_thumbnail_state(index, ThumbnailState::Ready);
+                        log::info!(
+                            "サムネイルを保存しました: {}",
+                            self.paths.thumbnail_for(&id).display()
+                        );
+                        if force && let Some(ui) = self.ui.as_mut() {
+                            ui.toast(self.locales.t("viewer.thumbnail_saved"));
+                        }
+                    }
+                }
+                ThumbnailCompleted::Failed {
+                    id,
+                    path,
+                    message,
+                    force,
+                } => {
                     tsubu_core::logging::sketch_failed(&tsubu_core::logging::SketchRecord {
                         id: &id,
                         phase: "thumbnail",
                         dialect: None,
                         line: None,
                         column: None,
-                        source: Some(&self.paths.thumbnail_for(&id)),
+                        source: Some(&path),
                         message: &message,
                     });
                     if let Some(index) = self.gallery.index_of(&id) {
-                        self.gallery.set_thumbnail_state(index, ThumbnailState::Failed(message));
+                        let toast =
+                            format!("{}: {message}", self.locales.t("viewer.thumbnail_error"));
+                        self.gallery
+                            .set_thumbnail_state(index, ThumbnailState::Failed(message));
+                        if force && let Some(ui) = self.ui.as_mut() {
+                            ui.toast(toast);
+                        }
                     }
                 }
             }
         }
 
-        let mut gpu_budget = GPU_THUMBNAILS_PER_FRAME;
+        // 目標フレームまで一度に回さず、少し進めたら通常の画面描画へ戻る。
+        if self.active_thumbnail.is_some() {
+            self.advance_thumbnail();
+            return;
+        }
+
         let mut disk_budget = DISK_THUMBNAILS_PER_FRAME;
 
         loop {
@@ -1271,70 +1434,80 @@ impl App {
                 None => match self.gallery.next_missing_thumbnail() {
                     Some(index) => {
                         let frame = self.viewer.thumbnail_frame_at(index).unwrap_or(60);
-                        ThumbnailJob { index, frame, force: false }
+                        let id = self.gallery.items()[index].id.clone();
+                        ThumbnailJob {
+                            id,
+                            frame,
+                            force: false,
+                        }
                     }
                     None => return,
                 },
             };
 
-            let Some(item) = self.gallery.items().get(job.index) else { return };
-            let id = item.id.clone();
-            let path = self.paths.thumbnail_for(&id);
+            let Some(index) = self.gallery.index_of(&job.id) else {
+                continue;
+            };
+            let path = self.paths.thumbnail_for(&job.id);
 
             if !job.force && path.exists() {
                 if disk_budget == 0 {
                     return;
                 }
                 disk_budget -= 1;
-                self.gallery.set_thumbnail_state(job.index, ThumbnailState::Loading);
-                self.loader.request(&id, &path);
-                continue;
+                let queued = self
+                    .loader
+                    .as_ref()
+                    .is_some_and(|loader| loader.request_load(&job.id, &path).is_ok());
+                if queued {
+                    self.gallery
+                        .set_thumbnail_state(index, ThumbnailState::Loading);
+                    continue;
+                }
+                // ワーカー無しでもアプリは動かし、キャッシュをGPUから作り直す。
+                if self.loader.take().is_some() {
+                    log::error!("サムネイル処理スレッドが停止しています");
+                    self.gallery.reset_loading_thumbnails();
+                }
             }
 
-            if gpu_budget == 0 {
-                // 予算切れ。次のフレームで拾い直せるよう未取得のままにしておく。
-                self.requested_thumbnail = Some(job);
-                return;
-            }
-            gpu_budget -= 1;
-            self.gallery.set_thumbnail_state(job.index, ThumbnailState::Loading);
-
-            let result = self.generate_thumbnail(job.index, job.frame, &id, &path);
-            let message = match result {
-                Ok(()) => {
-                    self.gallery.set_thumbnail_state(job.index, ThumbnailState::Ready);
-                    self.locales.t("viewer.thumbnail_saved").to_string()
+            self.gallery
+                .set_thumbnail_state(index, ThumbnailState::Loading);
+            match self.start_thumbnail(job) {
+                Ok(active) => {
+                    self.active_thumbnail = Some(active);
+                    self.advance_thumbnail();
                 }
-                Err(e) => {
-                    log::error!("サムネイル生成に失敗しました: {e}");
-                    let message = format!("{}: {e}", self.locales.t("viewer.thumbnail_error"));
-                    self.gallery.set_thumbnail_state(job.index, ThumbnailState::Failed(e));
-                    message
-                }
-            };
-            // 起動時の一括生成で通知が流れ続けないよう、手動更新のときだけ知らせる。
-            if job.force && let Some(ui) = self.ui.as_mut() {
-                ui.toast(message);
+                Err((id, force, error)) => self.finish_thumbnail(&id, force, Err(error)),
             }
+            return;
         }
     }
 
-    /// Viewer と同じ Renderer でオフスクリーン描画し、PNG 保存とテクスチャ登録まで行う。
-    fn generate_thumbnail(
+    /// 独立した作品を作り、`setup()` まで進めてサムネイル生成を開始する。
+    fn start_thumbnail(
         &mut self,
-        index: usize,
-        frame: u64,
-        id: &str,
-        path: &std::path::Path,
-    ) -> Result<(), String> {
+        job: ThumbnailJob,
+    ) -> Result<ActiveThumbnailJob, (String, bool, String)> {
+        let fail = |error: String| (job.id.clone(), job.force, error);
         let Some(gfx) = self.gfx.as_mut() else {
-            return Err("GPU がまだ初期化されていません".into());
+            return Err(fail("GPU がまだ初期化されていません".into()));
         };
         let (width, height) =
             thumbnail::size_for_width(gfx.size(), self.settings.image_quality.width());
 
-        let source = self.sources.get(index).ok_or_else(|| format!("作品 {index} がありません"))?;
-        let mut sketch = source.instantiate().map_err(|e| e.to_string())?.sketch;
+        let Some(index) = self.gallery.index_of(&job.id) else {
+            return Err(fail(format!("作品 {} がありません", job.id)));
+        };
+        let source = self
+            .sources
+            .get(index)
+            .cloned()
+            .ok_or_else(|| fail(format!("作品 {} のソースがありません", job.id)))?;
+        let mut sketch = source
+            .instantiate()
+            .map_err(|e| fail(e.to_string()))?
+            .sketch;
 
         // 表示中のインスタンスとは別に動かし、目標フレームまで進めてから撮る。
         // フレームをまたいで状態を持つ作品でも、実行結果と同じ絵になる。
@@ -1347,38 +1520,148 @@ impl App {
         sketch.setup(g);
         capturer.draw(&gfx.device, &gfx.queue, &mut gfx.batch, g, width, height);
 
-        for f in 1..=frame.max(1) {
-            g.begin_frame(width as f32, height as f32);
+        Ok(ActiveThumbnailJob {
+            id: job.id,
+            width,
+            height,
+            target_frame: job.frame.max(1),
+            next_frame: 1,
+            force: job.force,
+            sketch,
+        })
+    }
+
+    /// 実行中のサムネイルを少しだけ進め、完成したときだけ読み戻す。
+    fn advance_thumbnail(&mut self) {
+        let Some(mut job) = self.active_thumbnail.take() else {
+            return;
+        };
+        if self.gallery.index_of(&job.id).is_none() {
+            return;
+        }
+
+        let Some(gfx) = self.gfx.as_mut() else {
+            self.finish_thumbnail(&job.id, job.force, Err("GPU が利用できません".into()));
+            return;
+        };
+        let started = Instant::now();
+        let mut steps = 0;
+        while job.next_frame <= job.target_frame
+            && steps < THUMBNAIL_STEPS_PER_FRAME
+            && (steps == 0 || started.elapsed() < THUMBNAIL_TIME_SLICE)
+        {
+            let f = job.next_frame;
+            let g = &mut self.thumb_graphics;
+            g.begin_frame(job.width as f32, job.height as f32);
             g.frame_count = f;
             g.time = f as f32 / 60.0;
-            sketch.draw(g);
+            job.sketch.draw(g);
             // 1 枚ずつ GPU へ渡す。残像を使う作品は、目標フレームまで実際に
             // 積み上げないと本物と違う絵になる。
-            capturer.draw(&gfx.device, &gfx.queue, &mut gfx.batch, g, width, height);
+            self.capturer.draw(
+                &gfx.device,
+                &gfx.queue,
+                &mut gfx.batch,
+                g,
+                job.width,
+                job.height,
+            );
+            job.next_frame += 1;
+            steps += 1;
+            if job.sketch.error().is_some() || g.overflowed() {
+                break;
+            }
         }
-        if let Some(error) = sketch.error() {
-            return Err(error.to_string());
+        if let Some(error) = job.sketch.error() {
+            self.finish_thumbnail(&job.id, job.force, Err(error.to_string()));
+            return;
         }
         // 描き切れなかった絵は途中までしかない。撮っても本物と違う。
-        if g.overflowed() {
-            return Err(viewer::TOO_MUCH_GEOMETRY.to_string());
+        if self.thumb_graphics.overflowed() {
+            self.finish_thumbnail(
+                &job.id,
+                job.force,
+                Err(viewer::TOO_MUCH_GEOMETRY.to_string()),
+            );
+            return;
+        }
+        if job.next_frame <= job.target_frame {
+            self.active_thumbnail = Some(job);
+            return;
         }
 
-        let image =
-            capturer.read(&gfx.device, &gfx.queue, width, height).map_err(|e| e.to_string())?;
+        let result = self
+            .capturer
+            .read(&gfx.device, &gfx.queue, job.width, job.height)
+            .map_err(|e| e.to_string());
+        self.finish_thumbnail(&job.id, job.force, result);
+    }
 
-        thumbnail::save_png(&image, path)?;
-        self.upload_texture(id, image.width, image.height, &image.rgba);
-        log::info!("サムネイルを保存しました: {}", path.display());
-        Ok(())
+    fn finish_thumbnail(
+        &mut self,
+        id: &str,
+        force: bool,
+        result: Result<tsubu_renderer::CapturedImage, String>,
+    ) {
+        let Some(index) = self.gallery.index_of(id) else {
+            return;
+        };
+        match result {
+            Ok(image) => {
+                self.upload_texture(id, image.width, image.height, &image.rgba);
+                let path = self.paths.thumbnail_for(id);
+                if let Some(loader) = self.loader.as_ref() {
+                    match loader.request_save(id, &path, image, force) {
+                        Ok(()) => return,
+                        Err(e) => {
+                            log::error!("{e}");
+                            self.loader = None;
+                            self.gallery.reset_loading_thumbnails();
+                            self.gallery
+                                .set_thumbnail_state(index, ThumbnailState::Failed(e));
+                            return;
+                        }
+                    }
+                }
+
+                // スレッドを作れない環境だけの縮退経路。通常はワーカーで圧縮する。
+                match thumbnail::save_png(&image, &path) {
+                    Ok(()) => {
+                        self.gallery
+                            .set_thumbnail_state(index, ThumbnailState::Ready);
+                        log::info!("サムネイルを保存しました: {}", path.display());
+                        if force && let Some(ui) = self.ui.as_mut() {
+                            ui.toast(self.locales.t("viewer.thumbnail_saved"));
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("{id} のサムネイル保存に失敗しました: {e}");
+                        self.gallery
+                            .set_thumbnail_state(index, ThumbnailState::Failed(e));
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("{id} のサムネイル生成に失敗しました: {e}");
+                let message = format!("{}: {e}", self.locales.t("viewer.thumbnail_error"));
+                self.gallery
+                    .set_thumbnail_state(index, ThumbnailState::Failed(e));
+                if force && let Some(ui) = self.ui.as_mut() {
+                    ui.toast(message);
+                }
+            }
+        }
     }
 
     fn upload_texture(&mut self, id: &str, width: u32, height: u32, rgba: &[u8]) {
         let Some(ui) = self.ui.as_ref() else { return };
         let image =
             egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], rgba);
-        let handle =
-            ui.ctx().load_texture(format!("tsubu.thumb.{id}"), image, egui::TextureOptions::LINEAR);
+        let handle = ui.ctx().load_texture(
+            format!("tsubu.thumb.{id}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
         self.textures.insert(id.to_string(), handle);
     }
 
@@ -1395,9 +1678,13 @@ impl App {
             self.check_editor();
         }
 
-        let Some(window) = self.window.clone() else { return };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
         let background = self.background();
-        let (Some(gfx), Some(ui)) = (self.gfx.as_mut(), self.ui.as_mut()) else { return };
+        let (Some(gfx), Some(ui)) = (self.gfx.as_mut(), self.ui.as_mut()) else {
+            return;
+        };
         let (width, height) = gfx.size();
 
         // Gallery ではスケッチを回さない。地の色だけ塗って egui に任せる。
@@ -1427,11 +1714,15 @@ impl App {
             }
         };
         let vsync_wait = waiting.elapsed();
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = gfx
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tsubu.frame") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tsubu.frame"),
+            });
 
         // スケッチは画面ではなくキャンバスへ描く。`background()` を呼ばない
         // フレームは前の絵の上に重なり、残像がそのまま残る。
@@ -1441,7 +1732,8 @@ impl App {
                 gfx.canvas.reset();
                 self.canvas_epoch = self.viewer.epoch();
             }
-            self.viewer.set_mouse(self.mouse.0, self.mouse.1, self.mouse_pressed);
+            self.viewer
+                .set_mouse(self.mouse.0, self.mouse.1, self.mouse_pressed);
             let paused = self.viewer.is_paused();
             if let Some(graphics) = self.viewer.render_frame(width as f32, height as f32) {
                 // 一時停止中は積み増さない。同じ図形を毎フレーム重ねてしまい、
@@ -1480,7 +1772,9 @@ impl App {
                 .gallery
                 .items()
                 .get(self.viewer.current_index())
-                .map_or((String::new(), String::new()), |i| (i.author.clone(), i.link.clone()));
+                .map_or((String::new(), String::new()), |i| {
+                    (i.author.clone(), i.link.clone())
+                });
             let card_size = self.settings.card_size;
             let show_titles = self.settings.show_titles;
             let settings = &mut self.settings;
@@ -1556,7 +1850,10 @@ impl App {
         // 上下移動はここで得た列数を使う。返し忘れると 1 列扱いになり、
         // 上下が前後移動と同じ動きになってしまう。
         if gallery_output.columns > 0 && gallery_output.columns != self.gallery.columns() {
-            log::debug!("Gallery のグリッドが {} 列になりました", gallery_output.columns);
+            log::debug!(
+                "Gallery のグリッドが {} 列になりました",
+                gallery_output.columns
+            );
             self.gallery.set_columns(gallery_output.columns);
         }
 
@@ -1588,7 +1885,8 @@ impl App {
                 .forget_lifetime();
 
             if draw_sketch {
-                gfx.canvas.present(&gfx.device, &mut pass, gfx.format(), SAMPLE_COUNT);
+                gfx.canvas
+                    .present(&gfx.device, &mut pass, gfx.format(), SAMPLE_COUNT);
             }
             ui.render(&mut pass);
         }
@@ -1614,7 +1912,8 @@ impl App {
         self.apply_settings_actions(&settings_actions);
         self.sync_runtime_errors();
         self.settle_icon();
-        self.viewer.note_frame_work(frame_started.elapsed().saturating_sub(vsync_wait));
+        self.viewer
+            .note_frame_work(frame_started.elapsed().saturating_sub(vsync_wait));
     }
 
     /// 1 フレーム描き終えたところで、アイコンを貼り直す。
@@ -1631,7 +1930,9 @@ impl App {
             return;
         }
         self.icon_settled = true;
-        let Some(window) = self.window.as_ref() else { return };
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
         window.set_window_icon(window_icon());
         #[cfg(windows)]
         {
@@ -1659,7 +1960,12 @@ impl App {
 
     /// 選んだ作品のリンクを開く。無い作品では何もしない。
     fn open_selected_link(&mut self, index: usize) {
-        let link = self.gallery.items().get(index).map(|i| i.link.clone()).unwrap_or_default();
+        let link = self
+            .gallery
+            .items()
+            .get(index)
+            .map(|i| i.link.clone())
+            .unwrap_or_default();
         if link.trim().is_empty() {
             return;
         }
@@ -1691,7 +1997,10 @@ impl App {
                 EditorAction::Run => {
                     self.save_editor();
                     // コンパイルが通ったときだけ実行へ移る。
-                    let ok = self.editor.as_ref().is_some_and(|e| e.error.is_none() && e.io_error.is_none());
+                    let ok = self
+                        .editor
+                        .as_ref()
+                        .is_some_and(|e| e.error.is_none() && e.io_error.is_none());
                     if let Some(index) = self.editor.as_ref().and_then(|e| e.index)
                         && ok
                     {
@@ -1732,7 +2041,9 @@ impl App {
     /// 実行中に止まった作品を Gallery のエラー表示へ反映する (設計書 §6.1)。
     fn sync_runtime_errors(&mut self) {
         let index = self.viewer.current_index();
-        let Some(error) = self.viewer.current_error() else { return };
+        let Some(error) = self.viewer.current_error() else {
+            return;
+        };
         let error = error.to_string();
 
         let already_marked = self
@@ -1764,7 +2075,10 @@ impl App {
         for action in actions {
             // 確認中・割り当て中はカードへの操作を通さない。
             if self.pending_delete.is_some()
-                && !matches!(action, GalleryAction::ConfirmDelete | GalleryAction::CancelDelete)
+                && !matches!(
+                    action,
+                    GalleryAction::ConfirmDelete | GalleryAction::CancelDelete
+                )
             {
                 continue;
             }
@@ -1852,14 +2166,16 @@ impl ApplicationHandler for App {
         let mut ui = UiLayer::new(&window, &gfx.device, gfx.format(), SAMPLE_COUNT);
         if !ui.has_cjk_font {
             // 豆腐を出すより英語のほうが読める。
-            self.locales.set_preference(LanguagePreference::Explicit("en-US".into()));
+            self.locales
+                .set_preference(LanguagePreference::Explicit("en-US".into()));
         }
 
         // Viewer を一度も描かないうちに Gallery から作品を開くと、そこで隣の
         // 作品の `setup()` が走る。窓の大きさを先に教えておかないと、
         // `createCanvas(innerWidth, innerHeight)` が 1×1 を読んでしまう。
         let size = window.inner_size();
-        self.viewer.set_display_size(size.width as f32, size.height as f32);
+        self.viewer
+            .set_display_size(size.width as f32, size.height as f32);
 
         self.window = Some(window);
         self.gfx = Some(gfx);
@@ -1908,7 +2224,8 @@ impl ApplicationHandler for App {
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.resize(size.width, size.height);
                 }
-                self.viewer.set_display_size(size.width as f32, size.height as f32);
+                self.viewer
+                    .set_display_size(size.width as f32, size.height as f32);
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -1924,7 +2241,11 @@ impl ApplicationHandler for App {
             WindowEvent::CursorEntered { .. } => self.cursor_inside = true,
             WindowEvent::CursorLeft { .. } => self.cursor_inside = false,
 
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 self.mouse_pressed = state == ElementState::Pressed;
                 if let Some(ui) = self.ui.as_mut() {
                     ui.note_activity();
@@ -1997,10 +2318,15 @@ mod input_tests {
     /// ここを間違えると、席を立っていてもスクリーンセーバーが始まらなくなる。
     #[test]
     fn window_housekeeping_is_not_user_input() {
-        assert!(!is_user_input(&WindowEvent::Focused(true)), "フォーカスは操作ではない");
+        assert!(
+            !is_user_input(&WindowEvent::Focused(true)),
+            "フォーカスは操作ではない"
+        );
         assert!(!is_user_input(&WindowEvent::RedrawRequested));
         assert!(!is_user_input(&WindowEvent::CloseRequested));
-        assert!(!is_user_input(&WindowEvent::Moved(winit::dpi::PhysicalPosition::new(1, 2))));
+        assert!(!is_user_input(&WindowEvent::Moved(
+            winit::dpi::PhysicalPosition::new(1, 2)
+        )));
         assert!(!is_user_input(&WindowEvent::Occluded(true)));
     }
 
@@ -2012,10 +2338,22 @@ mod input_tests {
     /// いる最中にカーソルを見失う。
     #[test]
     fn the_cursor_only_disappears_over_our_own_window() {
-        assert!(should_hide_cursor(true, true, true), "全画面・窓の上・無操作なら消す");
-        assert!(!should_hide_cursor(true, false, true), "別のモニタへ出ていれば消さない");
-        assert!(!should_hide_cursor(false, true, true), "窓表示のときは消さない");
-        assert!(!should_hide_cursor(true, true, false), "触っている間は消さない");
+        assert!(
+            should_hide_cursor(true, true, true),
+            "全画面・窓の上・無操作なら消す"
+        );
+        assert!(
+            !should_hide_cursor(true, false, true),
+            "別のモニタへ出ていれば消さない"
+        );
+        assert!(
+            !should_hide_cursor(false, true, true),
+            "窓表示のときは消さない"
+        );
+        assert!(
+            !should_hide_cursor(true, true, false),
+            "触っている間は消さない"
+        );
     }
 
     /// カーソルはオーバーレイより遅れて消える。

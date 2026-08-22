@@ -1767,3 +1767,63 @@ fn a_name_seen_from_outside_stays_global() {
         120
     );
 }
+
+/// 3D の点と線は z を捨てず、深度つきの頂点を作る。
+#[test]
+fn points_and_lines_keep_their_z_coordinates() {
+    for src in [
+        "void setup(){size(400,400,P3D);}\n\
+         void draw(){strokeWeight(4);line(100,180,-40,300,220,80);point(200,200,60);}",
+        "function setup(){createCanvas(400,400,WEBGL)}\n\
+         function draw(){strokeWeight(4);line(-100,-20,-40,100,20,80);point(0,0,60)}",
+        "function setup(){createCanvas(400,400,WEBGL)}\n\
+         function draw(){noStroke();beginShape(TRIANGLES);\
+         vertex(-80,-60,-40);vertex(80,-60,20);vertex(0,80,90);endShape()}",
+    ] {
+        let mut sketch = VmSketch::compile(src, 1).expect("3D オーバーロードが通る");
+        let mut g = Graphics::new();
+        g.begin_frame(400.0, 400.0);
+        sketch.setup(&mut g);
+        g.begin_frame(400.0, 400.0);
+        sketch.draw(&mut g);
+        assert!(sketch.error().is_none(), "{:?} / {src}", sketch.error());
+        let vertices = &g.draw_list().vertices;
+        assert!(!vertices.is_empty(), "3D の点と線が描かれていません: {src}");
+        assert!(vertices.iter().any(|v| v.pos[2] != 0.0), "z が捨てられています: {src}");
+    }
+}
+
+#[test]
+fn three_dimensional_math_overloads_use_every_axis() {
+    for expr in ["mag(3,4,12)", "dist(0,0,0,3,4,12)", "randomGaussian(13,0)"] {
+        let (_, _, right, _) = bounds(&format!(
+            "draw=_=>{{createCanvas(400,400);noStroke();rect(0,0,{expr},1)}}"
+        ));
+        assert!((right - 13.0).abs() < 0.01, "{expr} = {right}");
+    }
+}
+
+#[test]
+fn meaningful_unsupported_overloads_are_not_silently_truncated() {
+    let error = match VmSketch::compile(
+        "draw=_=>{createCanvas(400,400,WEBGL);beginShape();vertex(1,2,3,4);endShape()}",
+        1,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("UV 付き vertex を別形式として通してはいけない"),
+    };
+    assert!(error.to_string().contains("まだ対応していません"), "{error}");
+
+    // 展開で個数が実行時まで分からない場合も、VM で同じ誤実行を止める。
+    let mut sketch = VmSketch::compile(
+        "draw=_=>{createCanvas(400,400,WEBGL);beginShape();vertex(...[1,2,3,4]);endShape()}",
+        1,
+    )
+    .expect("展開自体はコンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    sketch.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    sketch.draw(&mut g);
+    assert!(sketch.error().is_some_and(|e| e.contains("まだ対応していません")));
+}

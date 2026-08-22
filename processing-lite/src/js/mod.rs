@@ -294,4 +294,3 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
     }
 }
 
-
