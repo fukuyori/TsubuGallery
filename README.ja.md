@@ -1219,12 +1219,19 @@ explorer は窓が現れた直後に短い待ち時間つきで `WM_GETICON` を
 powershell -File scripts\build-installer.ps1
 ```
 
-release ビルド → (証明書を渡せば) 署名 → Inno Setup 6、の順に流して
+release ビルド → (指定時は) 署名 → Inno Setup 6、の順に流して
 `target\installer\` へ出す。版番号は `Cargo.toml` から読むので渡さなくてよい。
 
 ```powershell
-powershell -File scripts\build-installer.ps1 -CertPath cert.pfx -CertPassword $env:CERT_PASSWORD
+$env:CODESIGN_CERT = 'My Publisher Name'
+powershell -File scripts\build-installer.ps1 -Sign
 ```
+
+`-Sign` は実行ファイル、インストーラ、アンインストーラのすべてへ Authenticode
+署名を付ける。`CODESIGN_CERT` には `.pfx` / `.p12` のパス、SHA-1 拇印、または
+Windows 証明書ストア内のサブジェクト名を指定する。証明書ファイルにパスワードが
+ある場合は `CODESIGN_CERT_PASSWORD` へ入れる。タイムスタンプ局は既定で
+`http://timestamp.digicert.com`、変更する場合は `-TimestampUrl` を使う。
 
 配る中身は `tsubugallery.exe` 1 つだけ。翻訳も同梱作品も SQLite も exe へ
 取り込んであり、フォントは OS のものを借りるので添えるファイルは無い。唯一の

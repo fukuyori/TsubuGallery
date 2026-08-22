@@ -34,6 +34,12 @@ AppPublisherURL={#AppUrl}
 AppSupportURL={#AppUrl}/issues
 AppUpdatesURL={#AppUrl}/releases
 VersionInfoVersion={#AppVersion}
+#ifdef Sign
+; ISCC の /Stsubusign で渡された signtool コマンドを使う。setup に加え、
+; インストール時に展開される unins000.exe も同じ証明書で署名する。
+SignTool=tsubusign
+SignedUninstaller=yes
+#endif
 
 ; 既定は管理者不要のユーザー単位インストール。ウィザードで「すべての
 ; ユーザー」も選べる。ギャラリーアプリのために UAC を出す必要はない。

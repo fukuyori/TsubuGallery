@@ -349,6 +349,41 @@ fn a_tweet_sized_shader_paints_the_whole_frame() {
     assert!((100..=155).contains(&blue), "t が届いていません: {blue}");
 }
 
+/// naga は GLSL のブロック変数を WGSL の関数先頭へ持ち上げる。明示的な初期化を
+/// 補わないと、外側ループへ入り直したときに内側のループ変数が前回値を引き継ぐ。
+#[test]
+fn a_golfed_inner_loop_restarts_from_zero() {
+    let Some((device, queue)) = gpu() else {
+        eprintln!("GPU が無いので飛ばします");
+        return;
+    };
+    let mut batch = BatchRenderer::new(&device);
+    let mut capturer = Capturer::new();
+    let mut g = Graphics::new();
+
+    let wgsl = tsubu_renderer::shader::compile(
+        "for(int outer;outer++<2;)for(int inner;inner++<2;)o.r+=.1;",
+    )
+    .expect("通る");
+    capturer.begin();
+    g.begin_frame(W as f32, H as f32);
+    g.paint_with_shader(tsubu_renderer::ShaderPaint {
+        wgsl: wgsl.into(),
+        key: 61,
+        time: 0.0,
+        frame: 0.0,
+        mouse: [0.0, 0.0],
+    });
+    capturer.draw(&device, &queue, &mut batch, &g, W, H);
+    let image = capturer.read(&device, &queue, W, H).expect("読み戻せる");
+
+    let (red, _, _) = pixel(&image, W / 2, H / 2);
+    assert!(
+        (90..=115).contains(&red),
+        "内側ループが 2 回目にリセットされていません: {red}"
+    );
+}
+
 /// 同じキャンバスで GLSL と図形を行き来しても壊れない。
 ///
 /// Viewer は 1 つのキャンバスを全作品で使い回す。GLSL の作品から Processing の

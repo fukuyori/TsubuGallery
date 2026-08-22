@@ -1307,13 +1307,20 @@ scaling the 256px one up would look soft.
 powershell -File scripts\build-installer.ps1
 ```
 
-Release build → sign (if a certificate is passed) → Inno Setup 6, landing in
+Release build → sign (when requested) → Inno Setup 6, landing in
 `target\installer\`. The version is read from `Cargo.toml`, so it never has to be
 repeated.
 
 ```powershell
-powershell -File scripts\build-installer.ps1 -CertPath cert.pfx -CertPassword $env:CERT_PASSWORD
+$env:CODESIGN_CERT = 'My Publisher Name'
+powershell -File scripts\build-installer.ps1 -Sign
 ```
+
+`-Sign` applies Authenticode signatures to the application executable, setup
+executable, and uninstaller. `CODESIGN_CERT` accepts a `.pfx` / `.p12` path, a
+SHA-1 thumbprint, or a subject name in the Windows certificate store. Set
+`CODESIGN_CERT_PASSWORD` for a protected certificate file. The timestamp server
+defaults to `http://timestamp.digicert.com`; override it with `-TimestampUrl`.
 
 What ships is `tsubugallery.exe` and nothing else. Translations, the bundled
 sketches and SQLite are all compiled in, and fonts are borrowed from the OS. The

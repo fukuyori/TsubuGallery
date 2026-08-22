@@ -8,6 +8,21 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.4.1 — 2026-08-22
+
+### Added
+
+- `-Sign` for the Windows installer script. The certificate selected by
+  `CODESIGN_CERT` signs the application executable, setup, and uninstaller
+
+### Fixed
+
+- **Tweet-sized GLSL with nested uninitialized loop variables rendered incorrectly.**
+  naga lifts block variables to the start of the WGSL function, so an inner
+  `for(int i; ...)` kept its value when the outer loop repeated. TsubuGallery now
+  supplies the zero initializers that twigl-style golfed shaders rely on at each
+  loop entry
+
 ## 0.4.0 — 2026-08-19
 
 ### Added

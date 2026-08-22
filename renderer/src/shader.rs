@@ -249,7 +249,12 @@ fn wrap(source: &str) -> Wrapped {
     // 不透明で出す。つぶやき GLSL の `o.a` は色ではなく作業用の 4 本目で、
     // ループ回数を数えたり (`o.w++ < 9e2`) 明るさを溜めたりに使われる。
     // そのまま透明度として扱うと、絵が抜けたり真っ白になったりする。
-    let body = strip_hashtags(source);
+    // twigl の作品では `for(int i;i++<5;)` のように、ループ変数の 0 初期化を
+    // 省いて文字数を詰める書き方が広く使われる。twigl 上ではループへ入るたび
+    // 0 から始まるが、naga はブロック内の変数を WGSL の関数先頭へ持ち上げる。
+    // そのままだと外側ループの 2 周目以降で内側の i が前回の値を引き継ぐため、
+    // GLSL の段階で初期値を補って Store を正しい位置に残す。
+    let body = initialize_for_loop_variables(&strip_hashtags(source));
     let (prefix, suffix) = if declares_main(&body) {
         (
             PREAMBLE.to_string(),
@@ -276,6 +281,220 @@ fn wrap(source: &str) -> Wrapped {
     text.push_str(&suffix);
 
     Wrapped { text, lines_before, body: start..end }
+}
+
+/// `for(float i; ...)` を `for(float i = 0.0; ...)` にする。
+///
+/// GLSL の一般的な宣言すべてを読み直すのではなく、`for` の初期化節にある
+/// scalar 宣言だけを対象にする。既に初期値がある宣言や、配列・構造体のような
+/// 複雑な宣言は触らない。
+fn initialize_for_loop_variables(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut output = String::with_capacity(source.len());
+    let mut copied = 0;
+    let mut at = 0;
+
+    while at < bytes.len() {
+        if starts_line_comment(bytes, at) {
+            at = skip_line_comment(bytes, at + 2);
+            continue;
+        }
+        if starts_block_comment(bytes, at) {
+            at = skip_block_comment(bytes, at + 2);
+            continue;
+        }
+        if is_ident_start(bytes[at]) {
+            let end = skip_identifier(bytes, at + 1);
+            if &source[at..end] == "for"
+                && let Some(open) = next_code_byte(bytes, end).filter(|i| bytes[*i] == b'(')
+                && let Some(semi) = for_initializer_end(bytes, open + 1)
+                && let Some(rewritten) = initialize_scalar_declaration(&source[open + 1..semi])
+            {
+                output.push_str(&source[copied..open + 1]);
+                output.push_str(&rewritten);
+                copied = semi;
+                at = semi + 1;
+                continue;
+            }
+            at = end;
+            continue;
+        }
+        at += 1;
+    }
+
+    if copied == 0 {
+        return source.to_string();
+    }
+    output.push_str(&source[copied..]);
+    output
+}
+
+fn initialize_scalar_declaration(initializer: &str) -> Option<String> {
+    let bytes = initializer.as_bytes();
+    let mut at = next_code_byte(bytes, 0)?;
+
+    // 精度修飾子が付いた宣言も受ける。
+    loop {
+        if !is_ident_start(bytes[at]) {
+            return None;
+        }
+        let end = skip_identifier(bytes, at + 1);
+        if matches!(
+            &initializer[at..end],
+            "highp" | "mediump" | "lowp" | "precise"
+        ) {
+            at = next_code_byte(bytes, end)?;
+            continue;
+        }
+        break;
+    }
+
+    let type_end = skip_identifier(bytes, at + 1);
+    let zero = match &initializer[at..type_end] {
+        "float" | "double" => "0.0",
+        "int" => "0",
+        "uint" => "0u",
+        "bool" => "false",
+        _ => return None,
+    };
+
+    let ranges = top_level_declarators(bytes, type_end);
+    let mut rewritten = String::with_capacity(initializer.len() + ranges.len() * 6);
+    let mut copied = 0;
+    let mut changed = false;
+    for range in ranges {
+        let segment = &initializer[range.clone()];
+        let Some(name_end) = plain_declarator_name_end(segment) else {
+            continue;
+        };
+        let absolute_end = range.start + name_end;
+        rewritten.push_str(&initializer[copied..absolute_end]);
+        rewritten.push_str(" = ");
+        rewritten.push_str(zero);
+        copied = absolute_end;
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    rewritten.push_str(&initializer[copied..]);
+    Some(rewritten)
+}
+
+/// 型名の直後から、トップレベルのカンマで宣言子を分ける。
+fn top_level_declarators(bytes: &[u8], start: usize) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut segment = start;
+    let mut at = start;
+    let mut depth = 0u32;
+    while at < bytes.len() {
+        if starts_line_comment(bytes, at) {
+            at = skip_line_comment(bytes, at + 2);
+            continue;
+        }
+        if starts_block_comment(bytes, at) {
+            at = skip_block_comment(bytes, at + 2);
+            continue;
+        }
+        match bytes[at] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                ranges.push(segment..at);
+                segment = at + 1;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    ranges.push(segment..bytes.len());
+    ranges
+}
+
+/// 空白を除いて識別子 1 個だけの宣言なら、その識別子の終端を返す。
+fn plain_declarator_name_end(segment: &str) -> Option<usize> {
+    let bytes = segment.as_bytes();
+    let start = bytes.iter().position(|b| !b.is_ascii_whitespace())?;
+    if !is_ident_start(bytes[start]) {
+        return None;
+    }
+    let end = skip_identifier(bytes, start + 1);
+    if bytes[end..].iter().any(|b| !b.is_ascii_whitespace()) {
+        return None;
+    }
+    Some(end)
+}
+
+fn for_initializer_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut at = start;
+    let mut depth = 0u32;
+    while at < bytes.len() {
+        if starts_line_comment(bytes, at) {
+            at = skip_line_comment(bytes, at + 2);
+            continue;
+        }
+        if starts_block_comment(bytes, at) {
+            at = skip_block_comment(bytes, at + 2);
+            continue;
+        }
+        match bytes[at] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth > 0 => depth -= 1,
+            b';' if depth == 0 => return Some(at),
+            b')' if depth == 0 => return None,
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+fn next_code_byte(bytes: &[u8], mut at: usize) -> Option<usize> {
+    while at < bytes.len() {
+        if bytes[at].is_ascii_whitespace() {
+            at += 1;
+        } else if starts_line_comment(bytes, at) {
+            at = skip_line_comment(bytes, at + 2);
+        } else if starts_block_comment(bytes, at) {
+            at = skip_block_comment(bytes, at + 2);
+        } else {
+            return Some(at);
+        }
+    }
+    None
+}
+
+fn starts_line_comment(bytes: &[u8], at: usize) -> bool {
+    bytes.get(at..at + 2) == Some(b"//")
+}
+
+fn starts_block_comment(bytes: &[u8], at: usize) -> bool {
+    bytes.get(at..at + 2) == Some(b"/*")
+}
+
+fn skip_line_comment(bytes: &[u8], mut at: usize) -> usize {
+    while at < bytes.len() && bytes[at] != b'\n' {
+        at += 1;
+    }
+    at
+}
+
+fn skip_block_comment(bytes: &[u8], mut at: usize) -> usize {
+    while at + 1 < bytes.len() && &bytes[at..at + 2] != b"*/" {
+        at += 1;
+    }
+    (at + 2).min(bytes.len())
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn skip_identifier(bytes: &[u8], mut at: usize) -> usize {
+    while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+        at += 1;
+    }
+    at
 }
 
 /// 自分で `main()` を書いているか。
@@ -345,6 +564,27 @@ mod tests {
             "o = vec4(PI, TAU, 0, 1);",
         ] {
             assert!(compile(source).is_ok(), "{source} が通らない: {:?}", compile(source));
+        }
+    }
+
+    #[test]
+    fn uninitialized_for_variables_are_zeroed_at_each_loop_entry() {
+        let source = "for(float g,e,i,s;i++<9.;){for(int i;i++<5;)g+=1.;}";
+        let rewritten = initialize_for_loop_variables(source);
+        assert_eq!(
+            rewritten,
+            "for(float g = 0.0,e = 0.0,i = 0.0,s = 0.0;i++<9.;){for(int i = 0;i++<5;)g+=1.;}"
+        );
+    }
+
+    #[test]
+    fn initialized_and_expression_for_loops_are_left_alone() {
+        for source in [
+            "for(int i=0;i<3;i++)o.r+=1.;",
+            "for(i=0;i<3;i++)o.r+=1.;",
+            "// for(int i;i<3;i++)\no.r=1.;",
+        ] {
+            assert_eq!(initialize_for_loop_variables(source), source);
         }
     }
 
