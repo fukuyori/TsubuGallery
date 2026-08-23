@@ -800,8 +800,11 @@ the arc alone for `OPEN`, plus the chord for `CHORD`, plus both radii for `PIE`.
 `ellipseMode()` affects `ellipse()` (`circle()` is always centre-based, as in
 Processing).
 
-`noLoop()` stops `frameCount` from advancing, which keeps a sketch that draws
-once from random numbers from flickering as it is redrawn every frame.
+`noLoop()` stops `frameCount` and skips further VM execution, geometry
+generation, and GPU uploads. If the OS asks for a repaint, the retained canvas
+is presented again without rerunning the sketch. This keeps a sketch that draws
+once from random numbers stable while also avoiding redundant work. `loop()`
+resumes frame generation.
 
 `noise()` follows Processing's own implementation: a random table sampled with
 cosine interpolation, stacked over 4 octaves at 0.5 falloff (Processing's
@@ -1160,11 +1163,12 @@ tsubugallery --version    # version and where the log lives
 | OS | Status |
 |---|---|
 | macOS (arm64) | Verified on hardware |
-| Windows / Linux | `renderer` and `processing-lite` type-check. Not verified on hardware |
+| Linux | Build, full test suite, and GUI smoke test verified on hardware |
+| Windows | `renderer` and `processing-lite` type-check. Not verified on hardware |
 
-Cross-building for Windows and Linux needs that platform's C toolchain (SQLite is
-built from source). Running `cargo build --release` on the target OS is the
-reliable route.
+Cross-building for another OS needs that platform's C toolchain (SQLite is built
+from source). Running `cargo build --release` on the target OS is the reliable
+route.
 
 ## Layout
 

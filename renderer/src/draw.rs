@@ -469,7 +469,7 @@ pub enum ShapeKind {
 }
 
 /// 組み立て中の形。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Shape {
     kind: ShapeKind,
     points: Vec<[f32; 3]>,
@@ -761,6 +761,8 @@ pub struct Graphics {
     depth_write: bool,
     /// `beginShape()` から `endShape()` までのあいだの頂点。
     shape: Option<Shape>,
+    /// 直前の `endShape()` が使った領域。次の `beginShape()` へ貸し直す。
+    shape_spare: Shape,
     /// 字形のアトラス。使った字だけを溜める。
     pub font: crate::font::FontAtlas,
     text_size: f32,
@@ -828,6 +830,7 @@ impl Graphics {
             flavour: Flavour::default(),
             depth_write: false,
             shape: None,
+            shape_spare: Shape::default(),
             font: crate::font::FontAtlas::new(),
             text_size: 12.0,
             text_align: (TextAlign::Start, TextAlign::Baseline),
@@ -858,7 +861,7 @@ impl Graphics {
     pub fn begin_frame(&mut self, width: f32, height: f32) {
         // 作りかけの形はフレームをまたがせない。endShape() を書き忘れた作品が、
         // 次のフレームの頂点まで巻き込んで巨大な形になるのを防ぐ。
-        self.shape = None;
+        self.recycle_shape();
         self.list.reset();
         self.overflow = false;
         self.stack.clear();
@@ -898,7 +901,7 @@ impl Graphics {
         self.fill = self.fill.map(|_| Color::WHITE);
         self.stroke = self.stroke.map(|_| Color::BLACK);
         self.stroke_weight = 1.0;
-        self.shape = None;
+        self.recycle_shape();
         self.stack.clear();
         self.matrix = self.base;
         if let Some(space) = &mut self.space {
@@ -1036,7 +1039,7 @@ impl Graphics {
 
         // フレームの途中でしか意味を持たないものは持ち越さない。
         self.stack.clear();
-        self.shape = None;
+        self.recycle_shape();
         self.shadow_pass = None;
         self.depth_write = false;
         // キャンバスの指定から base と width/height を組み直す。
@@ -1989,7 +1992,16 @@ impl Graphics {
 
     /// `beginShape()`。以降の [`Graphics::vertex`] を貯め始める。
     pub fn begin_shape(&mut self, kind: ShapeKind) {
-        self.shape = Some(Shape { kind, points: Vec::new(), curves: Vec::new() });
+        // 前回の容量を借り直す。作品は draw() のたびに beginShape() するため、
+        // ここで Vec を作り直すと毎フレーム同じ大きさの確保を繰り返してしまう。
+        let mut shape = self
+            .shape
+            .take()
+            .unwrap_or_else(|| std::mem::take(&mut self.shape_spare));
+        shape.kind = kind;
+        shape.points.clear();
+        shape.curves.clear();
+        self.shape = Some(shape);
     }
 
     /// `vertex(x, y)`。`beginShape()` の外で呼ばれたら黙って捨てる。
@@ -2067,20 +2079,29 @@ impl Graphics {
 
     /// `endShape()`。貯めた頂点を実際に描く。`close` は `endShape(CLOSE)`。
     pub fn end_shape(&mut self, close: bool) {
-        let Some(shape) = self.shape.take() else { return };
+        let Some(mut shape) = self.shape.take() else { return };
 
         // curveVertex() で作った点は、ここで曲線へ均してから通常の頂点と繋ぐ。
-        let mut points = shape.points;
+        let mut points = std::mem::take(&mut shape.points);
         if shape.curves.len() >= 4 {
-            points.extend(catmull_rom(&shape.curves).into_iter().map(|p| [p[0], p[1], 0.0]));
+            for_each_catmull_rom(&shape.curves, |p| points.push([p[0], p[1], 0.0]));
         }
-        if points.is_empty() {
-            return;
+        if !points.is_empty() {
+            self.draw_shape(shape.kind, &points, close);
         }
 
-        match shape.kind {
+        // 次の beginShape() へ容量を返す。clear() は長さだけを 0 にするので、
+        // 大きなメッシュを毎フレーム描いても再確保されない。
+        points.clear();
+        shape.points = points;
+        shape.curves.clear();
+        self.shape_spare = shape;
+    }
+
+    fn draw_shape(&mut self, kind: ShapeKind, points: &[[f32; 3]], close: bool) {
+        match kind {
             ShapeKind::Points => {
-                for p in &points {
+                for p in points {
                     if self.space.is_some() || p[2] != 0.0 {
                         self.point_3d(p[0], p[1], p[2]);
                     } else {
@@ -2120,12 +2141,21 @@ impl Graphics {
             ShapeKind::QuadStrip => {
                 // 点は 2 個ずつが帯の断面。次の断面と合わせて 1 枚にする。
                 // 頂点の順が行き来するので、四角形として並べ替えてから渡す。
-                for pair in points.chunks_exact(2).collect::<Vec<_>>().windows(2) {
-                    let quad = [pair[0][0], pair[0][1], pair[1][1], pair[1][0]];
+                for i in (2..points.len()).step_by(2) {
+                    let quad = [points[i - 2], points[i - 1], points[i + 1], points[i]];
                     self.shape_polygon(&quad, true);
                 }
             }
-            ShapeKind::Polygon => self.shape_polygon(&points, close),
+            ShapeKind::Polygon => self.shape_polygon(points, close),
+        }
+    }
+
+    /// 完成しなかった形も容量だけは次へ回す。
+    fn recycle_shape(&mut self) {
+        if let Some(mut shape) = self.shape.take() {
+            shape.points.clear();
+            shape.curves.clear();
+            self.shape_spare = shape;
         }
     }
 
@@ -2138,6 +2168,18 @@ impl Graphics {
     }
 
     fn shape_polygon(&mut self, points: &[[f32; 3]], close: bool) {
+        // TRIANGLES / TRIANGLE_STRIP / TRIANGLE_FAN は多数の 3 点ポリゴンを
+        // 作る。一般の耳切り法へ渡すと面ごとに複数の Vec が生まれるため、
+        // 最頻経路はスタック上の 3 点だけで完結させる。
+        if close && let [a, b, c] = points {
+            self.shape_triangle(*a, *b, *c);
+            return;
+        }
+        if close && let [a, b, c, d] = points {
+            self.shape_quad([*a, *b, *c, *d]);
+            return;
+        }
+
         if self.space.is_none() && points.iter().all(|point| point[2] == 0.0) {
             let flat: Vec<[f32; 2]> = points.iter().map(|point| [point[0], point[1]]).collect();
             self.polygon(&flat, close);
@@ -2171,8 +2213,76 @@ impl Graphics {
         }
     }
 
+    /// `beginShape()` 由来の三角形を一時 Vec なしで描く。
+    fn shape_triangle(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3]) {
+        if self.space.is_none() && a[2] == 0.0 && b[2] == 0.0 && c[2] == 0.0 {
+            self.triangle(a[0], a[1], b[0], b[1], c[0], c[1]);
+            return;
+        }
+
+        self.ensure_3d();
+        if let Some(color) = self.fill {
+            let projected = [
+                self.pt3(a[0], a[1], a[2]),
+                self.pt3(b[0], b[1], b[2]),
+                self.pt3(c[0], c[1], c[2]),
+            ];
+            let was = std::mem::replace(&mut self.depth_write, true);
+            if let [Some(a), Some(b), Some(c)] = projected {
+                self.tri(a, b, c, color);
+            }
+            self.depth_write = was;
+        }
+
+        if self.stroke.is_some() && self.stroke_weight > 0.0 {
+            self.shape_line(a, b);
+            self.shape_line(b, c);
+            self.shape_line(c, a);
+        }
+    }
+
+    /// `beginShape()` 由来の四角形を固定長の作業領域だけで描く。
+    fn shape_quad(&mut self, points: [[f32; 3]; 4]) {
+        if self.space.is_none() && points.iter().all(|point| point[2] == 0.0) {
+            self.polygon_quad(points.map(|point| [point[0], point[1]]));
+            return;
+        }
+
+        self.ensure_3d();
+        if let Some(color) = self.fill {
+            let projected = points.map(|p| self.pt3(p[0], p[1], p[2]));
+            let flat = projected.map(|p| p.map_or([0.0, 0.0], |p| [p[0], p[1]]));
+            let was = std::mem::replace(&mut self.depth_write, true);
+            if let Some(triangles) = triangulate_quad(&flat) {
+                for [a, b, c] in triangles {
+                    if let (Some(a), Some(b), Some(c)) =
+                        (projected[a], projected[b], projected[c])
+                    {
+                        self.tri(a, b, c, color);
+                    }
+                }
+            }
+            self.depth_write = was;
+        }
+
+        if self.stroke.is_some() && self.stroke_weight > 0.0 {
+            for i in 0..4 {
+                self.shape_line(points[i], points[(i + 1) % 4]);
+            }
+        }
+    }
+
     /// 多角形を塗って縁取る。凹んでいてもよい。
     fn polygon(&mut self, points: &[[f32; 2]], close: bool) {
+        if close && let [a, b, c] = points {
+            self.triangle(a[0], a[1], b[0], b[1], c[0], c[1]);
+            return;
+        }
+        if close && let [a, b, c, d] = points {
+            self.polygon_quad([*a, *b, *c, *d]);
+            return;
+        }
+
         if let Some(c) = self.fill
             && points.len() >= 3
         {
@@ -2194,6 +2304,30 @@ impl Graphics {
             if close && points.len() >= 3 {
                 let (first, last) = (points[0], points[points.len() - 1]);
                 self.line(last[0], last[1], first[0], first[1]);
+            }
+        }
+    }
+
+    fn polygon_quad(&mut self, points: [[f32; 2]; 4]) {
+        if let Some(color) = self.fill
+            && let Some(triangles) = triangulate_quad(&points)
+        {
+            for [a, b, c] in triangles {
+                let a = self.pt(points[a][0], points[a][1]);
+                let b = self.pt(points[b][0], points[b][1]);
+                let c = self.pt(points[c][0], points[c][1]);
+                self.tri(a, b, c, color);
+            }
+        }
+
+        if self.stroke.is_some() && self.stroke_weight > 0.0 {
+            for i in 0..4 {
+                self.line(
+                    points[i][0],
+                    points[i][1],
+                    points[(i + 1) % 4][0],
+                    points[(i + 1) % 4][1],
+                );
             }
         }
     }
@@ -2585,18 +2719,24 @@ impl Default for Graphics {
 /// 最初と最後の点は向きを決めるためだけに使い、線には現れない。Processing の
 /// `curveVertex()` と同じ決まり。
 fn catmull_rom(control: &[[f32; 2]]) -> Vec<[f32; 2]> {
-    if control.len() < 4 {
-        return Vec::new();
-    }
     let mut out = Vec::new();
-    for w in control.windows(4) {
+    for_each_catmull_rom(control, |point| out.push(point));
+    out
+}
+
+/// Catmull-Rom の点を順に渡す。`endShape()` は自分の再利用バッファへ直接積む。
+fn for_each_catmull_rom(control: &[[f32; 2]], mut emit: impl FnMut([f32; 2])) {
+    if control.len() < 4 {
+        return;
+    }
+    for (span_index, w) in control.windows(4).enumerate() {
         let (p0, p1, p2, p3) = (w[0], w[1], w[2], w[3]);
         // 区間の長さから分割数を決める。短い区間に無駄な点を置かない。
         let span = (p2[0] - p1[0]).abs().max((p2[1] - p1[1]).abs());
         let segments = ((span * 0.35) as usize).clamp(6, 48);
         for i in 0..=segments {
             // 端で重複しないよう、2 本目以降は始点を飛ばす。
-            if i == 0 && !out.is_empty() {
+            if i == 0 && span_index > 0 {
                 continue;
             }
             let t = i as f32 / segments as f32;
@@ -2607,13 +2747,12 @@ fn catmull_rom(control: &[[f32; 2]]) -> Vec<[f32; 2]> {
                     + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
                     + (-a + 3.0 * b - 3.0 * c + d) * t3)
             };
-            out.push([
+            emit([
                 axis(p0[0], p1[0], p2[0], p3[0]),
                 axis(p0[1], p1[1], p2[1], p3[1]),
             ]);
         }
     }
-    out
 }
 
 /// 多角形を三角形へ分ける (耳切り法)。返すのは `points` の添字。
@@ -2674,6 +2813,37 @@ fn triangulate(points: &[[f32; 2]]) -> Vec<[usize; 3]> {
         out.push([remaining[0], remaining[1], remaining[2]]);
     }
     out
+}
+
+/// 四角形だけの耳切り法。一般版と同じ結果をヒープ確保なしで返す。
+fn triangulate_quad(points: &[[f32; 2]; 4]) -> Option<[[usize; 3]; 2]> {
+    let order = if signed_area(points) < 0.0 {
+        [3, 2, 1, 0]
+    } else {
+        [0, 1, 2, 3]
+    };
+
+    for i in 0..4 {
+        let (a, b, c, other) = (
+            order[(i + 3) % 4],
+            order[i],
+            order[(i + 1) % 4],
+            order[(i + 2) % 4],
+        );
+        if !is_convex(points[a], points[b], points[c])
+            || point_in_triangle(points[other], points[a], points[b], points[c])
+        {
+            continue;
+        }
+        let rest = match i {
+            0 => [order[1], order[2], order[3]],
+            1 => [order[0], order[2], order[3]],
+            2 => [order[0], order[1], order[3]],
+            _ => [order[0], order[1], order[2]],
+        };
+        return Some([[a, b, c], rest]);
+    }
+    None
 }
 
 fn signed_area(points: &[[f32; 2]]) -> f32 {
@@ -2741,6 +2911,22 @@ mod tests {
         let got = area_of(&arrow);
         assert!((got - expected).abs() < 0.01, "面積 {got} ≠ {expected}");
         assert_eq!(triangulate(&arrow).len(), 3);
+    }
+
+    #[test]
+    fn fixed_quads_match_the_general_ear_clipper() {
+        for mut points in [
+            [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+            [[0.0, 0.0], [10.0, 2.0], [4.0, 4.0], [10.0, 8.0]],
+        ] {
+            for _ in 0..2 {
+                assert_eq!(
+                    triangulate_quad(&points).map(|triangles| triangles.to_vec()),
+                    Some(triangulate(&points)),
+                );
+                points.reverse();
+            }
+        }
     }
 
     /// 星形。凹みが 5 つある。
@@ -2890,6 +3076,35 @@ mod tests {
         g.vertex(50.0, 50.0);
         g.end_shape(true);
         assert!(g.draw_list().indices.is_empty(), "前のフレームの頂点が残っています");
+    }
+
+    #[test]
+    fn shape_buffers_are_reused_after_end_and_an_abandoned_frame() {
+        let mut g = Graphics::new();
+        g.begin_frame(100.0, 100.0);
+        g.no_fill();
+        g.no_stroke();
+        g.begin_shape(ShapeKind::Polygon);
+        for i in 0..512 {
+            g.vertex(i as f32, 0.0);
+        }
+        for i in 0..3 {
+            g.curve_vertex(i as f32, 0.0);
+        }
+        let points = g.shape.as_ref().expect("作成中").points.as_ptr();
+        let curves = g.shape.as_ref().expect("作成中").curves.as_ptr();
+
+        g.end_shape(true);
+        g.begin_shape(ShapeKind::Lines);
+        let reused = g.shape.as_ref().expect("再利用中");
+        assert_eq!(reused.points.as_ptr(), points);
+        assert_eq!(reused.curves.as_ptr(), curves);
+
+        // endShape() を忘れても、次のフレームが容量を回収する。
+        g.vertex(1.0, 1.0);
+        g.begin_frame(100.0, 100.0);
+        g.begin_shape(ShapeKind::Points);
+        assert_eq!(g.shape.as_ref().expect("再利用中").points.as_ptr(), points);
     }
     use super::*;
 

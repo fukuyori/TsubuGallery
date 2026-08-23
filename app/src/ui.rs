@@ -19,6 +19,10 @@ pub const AUTO_HIDE: Duration = Duration::from_millis(2600);
 pub const CURSOR_HIDE: Duration = Duration::from_millis(3000);
 /// トーストの表示時間。
 const TOAST_DURATION: Duration = Duration::from_millis(2200);
+/// オーバーレイを消す直前のフェード時間。
+const OVERLAY_FADE: Duration = Duration::from_millis(600);
+/// フェード中だけ必要な再描画間隔。
+const ANIMATION_FRAME: Duration = Duration::from_millis(16);
 
 /// 1 フレーム分の GPU ハンドル。引数を束ねるためだけの入れ物。
 pub struct UiFrame<'a> {
@@ -41,6 +45,8 @@ pub struct UiLayer {
     /// このフレームでカーソルを消すか。呼び出し側が毎フレーム決める。
     cursor_hidden: bool,
     toast: Option<(String, Instant)>,
+    /// egui のウィジェット自身が要求した次の再描画。
+    egui_repaint: Option<Instant>,
     /// CJK フォントを用意できたか。できていなければ日本語 UI は使わない。
     pub has_cjk_font: bool,
 }
@@ -81,6 +87,7 @@ impl UiLayer {
             last_activity: Instant::now(),
             cursor_hidden: false,
             toast: None,
+            egui_repaint: None,
             has_cjk_font,
         }
     }
@@ -111,6 +118,29 @@ impl UiLayer {
     /// カーソルを消してよいだけの時間、操作が途切れているか。
     pub fn cursor_idle(&self) -> bool {
         self.last_activity.elapsed() >= CURSOR_HIDE
+    }
+
+    /// UI の見た目が次に時刻だけで変わる瞬間。
+    ///
+    /// 入力が無い画面を常時再描画せず、フェード・カーソル・トーストの期限に
+    /// だけイベントループを起こすために使う。
+    pub fn next_repaint_deadline(
+        &self,
+        now: Instant,
+        overlay: bool,
+        cursor: bool,
+    ) -> Option<Instant> {
+        let ours = next_ui_deadline(
+            self.last_activity,
+            self.toast.as_ref().map(|(_, at)| *at),
+            now,
+            overlay,
+            cursor,
+        );
+        match (ours, self.egui_repaint) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// このフレームでカーソルを消すか。[`Self::prepare`] の前に決める。
@@ -171,6 +201,15 @@ impl UiLayer {
             }
         });
 
+        // カーソル点滅、スクロールの慣性、ツールチップなど egui 内部の
+        // アニメーションも、常時 Poll をやめたあとに失われないよう引き継ぐ。
+        let repaint_delay = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
+        self.egui_repaint = (repaint_delay < Duration::MAX)
+            .then(|| Instant::now() + repaint_delay);
+
         self.state.handle_platform_output(window, output.platform_output);
         self.jobs = self.ctx.tessellate(output.shapes, output.pixels_per_point);
 
@@ -199,6 +238,41 @@ impl UiLayer {
     }
 }
 
+fn next_ui_deadline(
+    last_activity: Instant,
+    toast: Option<Instant>,
+    now: Instant,
+    overlay: bool,
+    cursor: bool,
+) -> Option<Instant> {
+    let mut deadline = None;
+    let mut include = |candidate: Instant| {
+        deadline = Some(deadline.map_or(candidate, |at: Instant| at.min(candidate)));
+    };
+    if overlay {
+        let hidden = last_activity + AUTO_HIDE;
+        let fade = hidden - OVERLAY_FADE;
+        if now < fade {
+            include(fade);
+        } else if now < hidden {
+            include((now + ANIMATION_FRAME).min(hidden));
+        }
+    }
+    if cursor {
+        let hidden = last_activity + CURSOR_HIDE;
+        if now < hidden {
+            include(hidden);
+        }
+    }
+    if let Some(shown) = toast {
+        let hidden = shown + TOAST_DURATION;
+        if now < hidden {
+            include(hidden);
+        }
+    }
+    deadline
+}
+
 /// 半透明の黒地に載せる小さなパネル。画面をまたいで見た目を揃える。
 pub fn panel(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
@@ -217,4 +291,50 @@ fn toast_area(ctx: &egui::Context, message: &str) {
                 ui.label(egui::RichText::new(message).size(13.0));
             });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_idle_ui_has_no_deadline() {
+        let now = Instant::now();
+        assert_eq!(next_ui_deadline(now, None, now, false, false), None);
+    }
+
+    #[test]
+    fn overlay_fade_and_cursor_hide_wake_at_their_boundaries() {
+        let activity = Instant::now();
+        let now = activity + Duration::from_millis(100);
+        assert_eq!(
+            next_ui_deadline(activity, None, now, true, true),
+            Some(activity + AUTO_HIDE - OVERLAY_FADE),
+        );
+
+        let fading = activity + AUTO_HIDE - Duration::from_millis(300);
+        assert_eq!(
+            next_ui_deadline(activity, None, fading, true, true),
+            Some(fading + ANIMATION_FRAME),
+        );
+    }
+
+    #[test]
+    fn a_toast_wakes_once_when_it_expires() {
+        let shown = Instant::now();
+        assert_eq!(
+            next_ui_deadline(shown, Some(shown), shown, false, false),
+            Some(shown + TOAST_DURATION),
+        );
+        assert_eq!(
+            next_ui_deadline(
+                shown,
+                Some(shown),
+                shown + TOAST_DURATION,
+                false,
+                false,
+            ),
+            None,
+        );
+    }
 }

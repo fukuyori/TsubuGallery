@@ -97,30 +97,50 @@ pub fn build(root: &mut egui::Ui, state: &mut GalleryUi<'_>) -> GalleryOutput {
     out
 }
 
-fn header(ui: &mut egui::Ui, state: &GalleryUi<'_>, actions: &mut Vec<GalleryAction>) {
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        // アプリ名はローカライズしない (設計書 §2)。
-        ui.label(egui::RichText::new("TsubuGallery").size(20.0).strong());
-        ui.add_space(12.0);
+fn header(
+    ui: &mut egui::Ui,
+    state: &GalleryUi<'_>,
+    actions: &mut Vec<GalleryAction>,
+) -> (egui::Rect, egui::Rect) {
+    // 左右を同じ horizontal UI に置くと、長い翻訳のショートカット群が
+    // 足りない幅を左へ広げ、アプリ名の上へ重なる。右側だけ残り幅へ制限し、
+    // 入らない説明は途中で切る。
+    egui::containers::Sides::new()
+        .height(24.0)
+        .spacing(12.0)
+        .shrink_right()
+        .truncate()
+        .show(
+            ui,
+            |ui| {
+                ui.add_space(8.0);
+                // アプリ名はローカライズしない (設計書 §2)。
+                ui.label(egui::RichText::new("TsubuGallery").size(20.0).strong());
+                ui.add_space(12.0);
 
-        let total = state.view.len();
-        let shown = state.view.visible_len();
-        let count = if shown == total { total.to_string() } else { format!("{shown} / {total}") };
-        ui.label(egui::RichText::new(count).size(13.0).color(Palette::of(ui).dim));
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(8.0);
-            if ui
-                .button(egui::RichText::new(state.locales.t("gallery.settings")).size(12.0))
-                .clicked()
-            {
-                actions.push(GalleryAction::OpenSettings);
-            }
-            ui.add_space(12.0);
-            hints(ui, state.locales);
-        });
-    });
+                let total = state.view.len();
+                let shown = state.view.visible_len();
+                let count = if shown == total {
+                    total.to_string()
+                } else {
+                    format!("{shown} / {total}")
+                };
+                ui.label(egui::RichText::new(count).size(13.0).color(Palette::of(ui).dim));
+                ui.min_rect()
+            },
+            |ui| {
+                ui.add_space(8.0);
+                if ui
+                    .button(egui::RichText::new(state.locales.t("gallery.settings")).size(12.0))
+                    .clicked()
+                {
+                    actions.push(GalleryAction::OpenSettings);
+                }
+                ui.add_space(12.0);
+                hints(ui, state.locales);
+                ui.min_rect()
+            },
+        )
 }
 
 fn hints(ui: &mut egui::Ui, locales: &Locales) {
@@ -139,6 +159,22 @@ fn hints(ui: &mut egui::Ui, locales: &Locales) {
         (locales.t("gallery.double_click"), locales.t("gallery.open")),
         ("↑↓←→", locales.t("gallery.navigate")),
     ] {
+        // 右から追加しているため、残り幅を超えるとタイトル側へはみ出す。
+        // 翻訳ごとの実際の文字幅で判断し、以降の低優先度ヒントを省く。
+        let label_width = ui
+            .painter()
+            .layout_no_wrap(label.to_owned(), egui::FontId::proportional(11.0), dim)
+            .size()
+            .x;
+        let key_width = ui
+            .painter()
+            .layout_no_wrap(k.to_owned(), egui::FontId::proportional(11.0), key)
+            .size()
+            .x;
+        let gaps = 16.0 + ui.spacing().item_spacing.x * 4.0;
+        if label_width + key_width + gaps > ui.available_width() {
+            break;
+        }
         ui.label(egui::RichText::new(label).size(11.0).color(dim));
         ui.add_space(4.0);
         ui.label(egui::RichText::new(k).size(11.0).strong().color(key));
@@ -895,6 +931,55 @@ mod tests {
         let (out, vertices) = run(&mut view(6), None);
         assert!(out.columns >= 4, "デスクトップ幅なら 4 列以上: {}", out.columns);
         assert!(vertices > 100, "描画された頂点が少なすぎます: {vertices}");
+    }
+
+    #[test]
+    fn header_hints_do_not_overlap_the_title() {
+        let ctx = egui::Context::default();
+        let mut locales = Locales::builtin();
+        locales.set_preference(tsubu_core::LanguagePreference::Explicit(
+            "ja-JP".to_string(),
+        ));
+        let textures = HashMap::new();
+        let tags = Vec::new();
+        let collections = Vec::new();
+        let mut view = view(12);
+        let state = GalleryUi {
+            view: &mut view,
+            textures: &textures,
+            locales: &locales,
+            tags: &tags,
+            collections: &collections,
+            assigning: None,
+            scroll_to_selected: false,
+            pending_delete: None,
+            view_mode: ViewMode::Grid,
+            card_size: CardSize::default(),
+            show_titles: true,
+        };
+
+        for width in [800.0, 1204.0] {
+            let mut sides = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 100.0),
+                    )),
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| {
+                    sides = header(ui, &state, &mut Vec::new());
+                });
+                output.textures_delta.clear();
+            }
+            assert!(
+                sides.0.max.x <= sides.1.min.x,
+                "幅 {width} でタイトル {:?} とヒント {:?} が重なっています",
+                sides.0,
+                sides.1,
+            );
+        }
     }
 
     /// クリックとダブルクリックを合成して 1 フレーム流す。

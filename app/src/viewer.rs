@@ -59,6 +59,8 @@ struct RuntimeSketch {
     leans_on_canvas: bool,
     overflowed: bool,
     clock: f32,
+    /// キャンバスが空になり、締め切りを待たず 1 枚作る必要がある。
+    needs_frame: bool,
 }
 
 impl RuntimeSketch {
@@ -70,6 +72,7 @@ impl RuntimeSketch {
             leans_on_canvas: false,
             overflowed: false,
             clock: 0.0,
+            needs_frame: true,
         }
     }
 }
@@ -281,12 +284,22 @@ impl Viewer {
                 self.sketches[self.current].state = None;
                 self.graphics.reset_state();
             }
+            if let Some(runtime) = self.sketches.get_mut(self.current) {
+                runtime.needs_frame = true;
+            }
             self.epoch += 1;
         }
     }
 
     pub fn is_paused(&self) -> bool {
         self.paused
+    }
+
+    /// 次に作品を進める時刻。止まっている作品なら待ち続けてよい。
+    pub fn next_frame_deadline(&self) -> Option<Instant> {
+        let runtime = self.sketches.get(self.current)?;
+        (!self.paused && !runtime.overflowed && self.graphics.is_looping())
+            .then_some(self.next_step)
     }
 
     /// 表示中の作品にとっての経過秒。GLSL の `t` に渡っている値。
@@ -359,6 +372,7 @@ impl Viewer {
         }
         if resized && self.leans_on_the_canvas(self.current) {
             self.sketches[self.current].sketch.restart();
+            self.sketches[self.current].needs_frame = true;
             self.graphics.reset_state();
         }
 
@@ -399,7 +413,13 @@ impl Viewer {
                 self.sketches[self.current].frame_count += 1;
             }
         }
-        if stopped {
+        let forced = self.sketches[self.current].needs_frame;
+        let should_step = !stopped && (forced || (!self.paused && looping && due));
+        if !should_step {
+            // 前フレームの図形をもう一度 Canvas へ渡すと、残像型の作品へ
+            // 同じ図形を重ねてしまう。確保済み容量は残してリストだけ空にし、
+            // VM・図形生成・GPU 転送をまとめて省く。
+            self.graphics.begin_frame(width, height);
             return Some(&self.graphics);
         }
 
@@ -408,6 +428,7 @@ impl Viewer {
         self.graphics.time = self.sketches[self.current].clock;
         let t0 = Instant::now();
         self.sketches[self.current].sketch.step(&mut self.graphics);
+        self.sketches[self.current].needs_frame = false;
         self.sketch_ms = smooth(self.sketch_ms, t0.elapsed().as_secs_f32() * 1000.0);
         if self.graphics.overflowed() {
             self.sketches[self.current].overflowed = true;
@@ -432,6 +453,7 @@ impl Viewer {
             runtime.clock = 0.0;
             runtime.state = None;
             runtime.leans_on_canvas = false;
+            runtime.needs_frame = true;
             // 動かし直せば、また最初のフレームから試させる。作品を直したあとの
             // 保存でここへ来るので、直っていれば動く。
             runtime.overflowed = false;
@@ -524,6 +546,7 @@ impl Viewer {
             self.sketches[index].state = None;
             self.graphics.reset_state();
         }
+        self.sketches[index].needs_frame = true;
         self.epoch += 1;
         self.last_switch_ms = t0.elapsed().as_secs_f32() * 1000.0;
         self.preload_neighbours();
@@ -593,6 +616,11 @@ mod tests {
         }
     }
 
+    /// 壁時計を待たず、テスト上の次フレームを期限到来にする。
+    fn make_due(v: &mut Viewer) {
+        v.next_step = Instant::now();
+    }
+
     /// 一時停止したら作品の時計も止まる。
     ///
     /// GLSL 作品の `t` はここから来る。壁時計のままだと、Space を押しても
@@ -604,14 +632,67 @@ mod tests {
         assert!(v.sketch_time() > 0.0, "動いていない");
 
         v.toggle_pause();
+        assert!(v.next_frame_deadline().is_none(), "停止中なのに再描画を予約しました");
         run(&mut v, 2);
         let stopped_at = v.sketch_time();
         run(&mut v, 8);
         assert_eq!(v.sketch_time(), stopped_at, "止めたのに進んでいる");
 
         v.toggle_pause();
+        assert!(v.next_frame_deadline().is_some(), "再開後の再描画が予約されません");
         run(&mut v, 8);
         assert!(v.sketch_time() > stopped_at, "再開しても止まったまま");
+    }
+
+    #[test]
+    fn frames_before_the_deadline_skip_vm_and_geometry() {
+        use std::time::Duration;
+        use tsubu_processing_lite::VmSketch;
+
+        let sketch = LoadedSketch::new(
+            SketchInfo { id: "paced".into(), title: "paced".into(), thumbnail_frame: 1 },
+            Box::new(
+                VmSketch::compile(
+                    "int x=0; void draw(){background(0);point(x++,10);}",
+                    1,
+                )
+                .expect("コンパイルできる"),
+            ),
+        );
+        let mut viewer = Viewer::new(vec![sketch]);
+
+        assert!(!viewer
+            .render_frame(100.0, 100.0)
+            .expect("初回は描く")
+            .draw_list()
+            .is_empty());
+        let frame = viewer.stats().frame_count;
+
+        viewer.next_step = Instant::now() + Duration::from_secs(60);
+        assert!(viewer
+            .render_frame(100.0, 100.0)
+            .expect("キャンバスは保持する")
+            .draw_list()
+            .is_empty());
+        assert_eq!(viewer.stats().frame_count, frame, "締め切り前に進みました");
+
+        make_due(&mut viewer);
+        assert!(!viewer
+            .render_frame(100.0, 100.0)
+            .expect("期限が来たら描く")
+            .draw_list()
+            .is_empty());
+        assert!(viewer.stats().frame_count > frame);
+
+        viewer.toggle_pause();
+        let paused_at = viewer.stats().frame_count;
+        make_due(&mut viewer);
+        assert!(viewer
+            .render_frame(100.0, 100.0)
+            .expect("一時停止中もキャンバスは保持する")
+            .draw_list()
+            .is_empty());
+        assert_eq!(viewer.stats().frame_count, paused_at, "一時停止中に進みました");
     }
 
     /// 動かし直したら時計も 0 から。
@@ -1035,6 +1116,7 @@ mod tests {
         );
 
         viewer.replace(1, sketch("edited-again"));
+        make_due(&mut viewer);
         assert_eq!(
             bounds(viewer.render_frame(200.0, 100.0).expect("描ける")),
             (50.0, 150.0),
@@ -1042,6 +1124,7 @@ mod tests {
         );
 
         viewer.remove(1);
+        make_due(&mut viewer);
         assert_eq!(
             bounds(viewer.render_frame(200.0, 100.0).expect("描ける")),
             (50.0, 150.0),
@@ -1123,6 +1206,7 @@ mod tests {
             .draw_list()
             .clear
             .is_some());
+        make_due(&mut viewer);
         assert!(viewer
             .render_frame(200.0, 100.0)
             .expect("描かれる")

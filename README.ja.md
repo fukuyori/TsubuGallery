@@ -752,8 +752,10 @@ Processing の規則を当てると、`stroke(500)` が `0x0001F4` — alpha が
 `rectMode()` は `rect()` と `square()` に、`ellipseMode()` は `ellipse()` に効く
 (`circle()` は Processing と同じく常に中心指定)。
 
-`noLoop()` を呼ぶと `frameCount` が進まなくなる。乱数で一度だけ絵を作る作品が、
-毎フレーム描き直されてちらつくのを防ぐ。
+`noLoop()` を呼ぶと `frameCount` が止まり、以後の VM 実行・図形生成・GPU 転送も
+省く。OS から再描画を求められた場合は、作品を再実行せず保持中のキャンバスを
+そのまま表示する。乱数で一度だけ絵を作る作品を安定させながら、不要な処理も
+避けられる。`loop()` を呼ぶとフレーム生成を再開する。
 
 `noise()` は Processing の実装そのものに合わせてある。乱数表を余弦で補間し、
 4 オクターブを 0.5 の減衰で重ねる (Processing の既定 `noiseDetail(4, 0.5)`)。
@@ -1082,11 +1084,11 @@ tsubugallery --version    # 版とログの置き場
 | OS | 状態 |
 |---|---|
 | macOS (arm64) | 実機で確認 |
-| Windows / Linux | `renderer` と `processing-lite` は型検査を通した。実機未確認 |
+| Linux | 実機でビルド、全テスト、GUI スモークテストを確認 |
+| Windows | `renderer` と `processing-lite` は型検査を通した。実機未確認 |
 
-Windows と Linux 向けのクロスビルドには、その OS の C ツールチェーンが要る
-(SQLite を同梱ビルドするため)。その OS 上で `cargo build --release` するのが
-確実。
+別の OS 向けにクロスビルドするには、その OS の C ツールチェーンが要る
+(SQLite を同梱ビルドするため)。対象 OS 上で `cargo build --release` するのが確実。
 
 ## 構成
 

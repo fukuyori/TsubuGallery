@@ -57,6 +57,10 @@ const THUMBNAIL_STEPS_PER_FRAME: usize = 4;
 const THUMBNAIL_TIME_SLICE: Duration = Duration::from_millis(4);
 /// 1 フレームに投げるディスク読み込みの上限。
 const DISK_THUMBNAILS_PER_FRAME: usize = 4;
+/// サムネイル作品を少しずつ進める間隔。UI の 60 Hz と揃える。
+const THUMBNAIL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// ディスクワーカーだけを待っている間の確認間隔。
+const THUMBNAIL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// 使い方。`--help` で出す。
 const USAGE: &str = "\
@@ -167,8 +171,9 @@ fn run(paths: DataPaths) {
     }
 
     let event_loop = EventLoop::new().expect("イベントループを作成できませんでした");
-    // アニメーションを回し続けるので、待機せず次のフレームへ進む。
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // 描画が必要になる時刻は App が WaitUntil で指定する。入力もタイマーも無い
+    // 画面では眠らせ、ギャラリーを開いているだけで CPU/GPU を回し続けない。
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = App::new(paths);
     if let Err(e) = event_loop.run_app(&mut app) {
@@ -335,6 +340,10 @@ struct App {
     settings: Settings,
     /// 設定画面を閉じたときに戻る画面。
     settings_return: Screen,
+    /// 時刻による次の再描画。`None` なら入力イベントまで待てる。
+    next_redraw: Option<Instant>,
+    /// winit へ RedrawRequested をすでに依頼している。
+    redraw_pending: bool,
 }
 
 impl App {
@@ -461,7 +470,60 @@ impl App {
             last_input: Instant::now(),
             screensaver: None,
             settings,
+            next_redraw: Some(Instant::now()),
+            redraw_pending: false,
         }
+    }
+
+    /// 入力が無くても次に画面を更新する必要がある時刻。
+    fn redraw_deadline(&self, now: Instant) -> Option<Instant> {
+        let mut deadline = None;
+        let mut include = |candidate: Option<Instant>| {
+            if let Some(candidate) = candidate {
+                deadline = Some(deadline.map_or(candidate, |at: Instant| at.min(candidate)));
+            }
+        };
+
+        if self.screen == Screen::Viewer {
+            include(self.viewer.next_frame_deadline());
+        }
+        include(self.ui.as_ref().and_then(|ui| {
+            ui.next_repaint_deadline(
+                now,
+                self.screen == Screen::Viewer,
+                self.fullscreen && self.cursor_inside,
+            )
+        }));
+        include(self.slideshow);
+
+        if self.screensaver.is_none()
+            && self.slideshow.is_none()
+            && matches!(self.screen, Screen::Gallery | Screen::Viewer)
+            && !self.viewer.is_empty()
+            && let Some(idle) = self.settings.screensaver.idle()
+        {
+            include(Some(self.last_input + idle));
+        }
+
+        if self.screen == Screen::Editor {
+            include(self.editor.as_ref().and_then(Editor::check_deadline));
+        }
+
+        let making_thumbnail = self.active_thumbnail.is_some()
+            || self.requested_thumbnail.is_some()
+            || self.gallery.next_missing_thumbnail().is_some();
+        if making_thumbnail {
+            include(Some(now + THUMBNAIL_FRAME_INTERVAL));
+        } else if self
+            .gallery
+            .items()
+            .iter()
+            .any(|item| matches!(item.thumbnail, ThumbnailState::Loading))
+        {
+            include(Some(now + THUMBNAIL_POLL_INTERVAL));
+        }
+
+        deadline
     }
 
     /// 設定を保存し、動いている各所へ反映する。
@@ -1736,10 +1798,12 @@ impl App {
                 .set_mouse(self.mouse.0, self.mouse.1, self.mouse_pressed);
             let paused = self.viewer.is_paused();
             if let Some(graphics) = self.viewer.render_frame(width as f32, height as f32) {
-                // 一時停止中は積み増さない。同じ図形を毎フレーム重ねてしまい、
-                // 止めたはずの絵が濃くなっていく。ただしキャンバスが空 (作品を
-                // 変えた直後やサイズ変更の直後) なら 1 枚は描く。
-                if !paused || !gfx.canvas.has_content() {
+                // 一時停止中と、目標 FPS の締め切り前は積み増さない。同じ図形を
+                // 再送すると残像型の作品が濃くなるうえ、GPU 転送も無駄になる。
+                // ただしキャンバスが空なら、地の色だけでも 1 枚は作る。
+                let list = graphics.draw_list();
+                let changed = list.clear.is_some() || !list.is_empty();
+                if (!paused && changed) || !gfx.canvas.has_content() {
                     gfx.canvas.render(
                         &gfx.device,
                         &gfx.queue,
@@ -1845,6 +1909,13 @@ impl App {
                     }
                 },
             );
+        }
+        // TextEdit がこのフレームで書き換えた内容を記録する。常時再描画していた
+        // ときは次のフレームが暗黙に拾っていたが、待機型ではここで期限を作る。
+        if self.screen == Screen::Editor
+            && let Some(editor) = self.editor.as_mut()
+        {
+            editor.note_source_changes();
         }
         self.scroll_to_selected = false;
         // 上下移動はここで得た列数を使う。返し忘れると 1 列扱いになり、
@@ -2191,9 +2262,15 @@ impl ApplicationHandler for App {
             }
             self.screen = Screen::Editor;
         }
+        self.next_redraw = Some(Instant::now());
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // 入力や OS からの変更は、次のタイマー期限を待たず画面へ反映する。
+        if !matches!(&event, WindowEvent::RedrawRequested) {
+            self.next_redraw = Some(Instant::now());
+        }
+
         // 操作の記録は egui へ渡す前に行う。文字入力は egui が食べてしまうので、
         // あとで見てもスクリーンセーバーには気付けない。
         let touched = match &event {
@@ -2264,15 +2341,32 @@ impl ApplicationHandler for App {
                 }
             }
 
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => {
+                self.redraw_pending = false;
+                self.redraw();
+                self.next_redraw = self.redraw_deadline(Instant::now());
+            }
 
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(window) = &self.window {
-            window.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.redraw_pending {
+            // 依頼済みの RedrawRequested 自体がイベントループを起こす。
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
+        let now = Instant::now();
+        match (self.window.as_ref(), self.next_redraw) {
+            (Some(window), Some(at)) if at <= now => {
+                window.request_redraw();
+                self.redraw_pending = true;
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            (_, Some(at)) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+            _ => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }

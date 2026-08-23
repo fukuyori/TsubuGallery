@@ -159,6 +159,13 @@ impl Editor {
         (changed_at.elapsed() >= CHECK_DELAY).then_some(self.source.as_str())
     }
 
+    /// 入力が止まったあと、次に構文チェックを試す時刻。
+    pub fn check_deadline(&self) -> Option<std::time::Instant> {
+        (!self.is_blank())
+            .then_some(self.changed_at?)
+            .map(|changed| changed + CHECK_DELAY)
+    }
+
     /// チェック結果を受け取る。
     ///
     /// エラーが出たときだけ方言を見る。通ったコードに口を出さない。
@@ -271,6 +278,7 @@ mod tests {
         e.note_source_changes();
         // 打った直後は待つ。毎文字が構文エラーになるので。
         assert!(e.source_to_check().is_none());
+        assert!(e.check_deadline().is_some(), "待機後の検査が予約されていない");
     }
 
     #[test]

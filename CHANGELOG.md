@@ -8,6 +8,21 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.5.1 — 2026-08-23
+
+### Fixed
+
+- Gallery shortcut hints no longer overlap the application title in narrow
+  windows
+
+### Changed
+
+- The event loop now sleeps until a sketch frame, input, or timer is due.
+  Paused and low-frame-rate sketches avoid redundant VM work, geometry
+  generation, GPU uploads, and idle UI redraws
+- Free-form triangles and quadrilaterals use allocation-free fixed-size paths,
+  while `beginShape()` reuses vertex and curve buffers between frames
+
 ## 0.5.0 — 2026-08-23
 
 ### Added
