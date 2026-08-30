@@ -17,11 +17,21 @@ pub enum SettingsAction {
     /// 変更された。保存して各所へ反映する。
     Changed,
     Close,
+    /// データ領域の置き場をフォルダ選択で変える。OS のダイアログは main 側で出す。
+    ChooseDataDir,
+    /// データ領域の置き場を既定へ戻す。
+    ResetDataDir,
 }
 
 pub struct SettingsUi<'a> {
     pub settings: &'a mut Settings,
     pub locales: &'a Locales,
+    /// いま使っているデータ領域。
+    pub data_dir: &'a std::path::Path,
+    /// 変更済みだがまだ効いていない置き場 (次回起動から)。
+    pub data_dir_pending: Option<&'a std::path::Path>,
+    /// 環境変数で差し替えられているので、ここでは変えられない。
+    pub data_dir_locked: bool,
 }
 
 /// 言語欄に出す「システムに合わせる」の選択肢。
@@ -184,6 +194,33 @@ pub fn build(root: &mut egui::Ui, state: &mut SettingsUi<'_>) -> Vec<SettingsAct
                 note(ui, &t("settings.execution_budget.note"));
             });
 
+            // データ領域の置き場。設定 DB の外 (config.json) に持つので、
+            // `before` との比較には乗せず、押された操作をそのまま返す。
+            group(ui, &t("settings.group.data"), |ui| {
+                row(ui, &t("settings.data_dir"), |ui| {
+                    ui.add_enabled_ui(!state.data_dir_locked, |ui| {
+                        if ui.button(t("settings.data_dir.change")).clicked() {
+                            actions.push(SettingsAction::ChooseDataDir);
+                        }
+                        if ui.button(t("settings.data_dir.reset")).clicked() {
+                            actions.push(SettingsAction::ResetDataDir);
+                        }
+                    });
+                });
+                note(ui, &state.data_dir.display().to_string());
+                if let Some(pending) = state.data_dir_pending {
+                    note(
+                        ui,
+                        &t("settings.data_dir.pending").replace("{path}", &pending.display().to_string()),
+                    );
+                }
+                if state.data_dir_locked {
+                    note(ui, &t("settings.data_dir.locked"));
+                } else {
+                    note(ui, &t("settings.data_dir.note"));
+                }
+            });
+
             ui.add_space(24.0);
 
             if *state.settings != before {
@@ -321,7 +358,16 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(input, |ui| {
-                actions = build(ui, &mut SettingsUi { settings, locales: &locales });
+                actions = build(
+                    ui,
+                    &mut SettingsUi {
+                        settings,
+                        locales: &locales,
+                        data_dir: std::path::Path::new("D:/data"),
+                        data_dir_pending: Some(std::path::Path::new("D:/next")),
+                        data_dir_locked: false,
+                    },
+                );
             });
             output.textures_delta.clear();
             vertices = ctx
@@ -405,6 +451,13 @@ mod tests {
             "settings.image_quality",
             "settings.execution_budget",
             "settings.execution_budget.note",
+            "settings.group.data",
+            "settings.data_dir",
+            "settings.data_dir.change",
+            "settings.data_dir.reset",
+            "settings.data_dir.note",
+            "settings.data_dir.pending",
+            "settings.data_dir.locked",
         ] {
             check(key.to_string());
         }

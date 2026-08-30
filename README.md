@@ -50,18 +50,23 @@ appear in the gallery. Drop more `.pde` files there to add your own.
 | `R` | Open a random sketch |
 | `N` | New sketch |
 | `E` | Edit the selected sketch |
-| `Delete` / `Backspace` | Delete (with confirmation) |
+| `Delete` / `Backspace` | Delete the selected sketch — or every marked one — after confirmation |
 | `S` / click the star | Favourite |
 | `T` | Regenerate the selected thumbnail |
 | `V` | Cycle the view mode (grid → large cards → list) |
 | `C` | Add or remove the sketch from collections |
 | `O` / click ↗ | Open the link in a browser |
 | `P` | Start / stop the slideshow |
+| `Ctrl`+click | Mark the sketch (multi-select); `Shift`+click marks a range, `Ctrl`+`A` marks everything shown |
+| `X` | Export the marked sketches (or the selected one) to a JSON file |
+| `I` | Import sketches from an exported JSON file |
+| `Ctrl`+`C` | Copy the marked sketches (or the selected one) to the clipboard as export JSON |
+| `Ctrl`+`V` | Paste: sketches from copied JSON, or a new sketch whose source is the clipboard text |
 | Search box | Substring match on title and id |
 | `F` / `F11` | Fullscreen |
 | `L` | Switch the UI language |
 | `,` / **Settings** button | Settings |
-| `Esc` | Quit |
+| `Esc` | Clear marks, leave fullscreen, then quit |
 
 **Viewer** (design §8.1)
 
@@ -268,11 +273,55 @@ rendering smoke test in CI.
 cargo run --release -- --capture-all ./out
 ```
 
+### Export and import (design §27)
+
+Mark sketches with `Ctrl`+click, `Shift`+click (a range) or `Ctrl`+`A`
+(everything shown by the current filter); the header counts them. `X` then
+writes the marked sketches — or just the selected one
+when nothing is marked — to a single `*.tsubu.json` chosen in the OS save
+dialog. Each entry carries the id, title, author, link, tags, favourite flag
+and the source. Thumbnails are not included; they are regenerated on import.
+
+`I` opens an exported file and lists its sketches with name,
+author and tags. Tick the ones to bring in and press **Import** (or `Enter`).
+A sketch whose id is already taken is added under a new name (`spiral-2`) and
+never overwrites what is there; the list says so next to the id. Imported
+sketches are compiled, saved to `<data>/sketches/`, and get their metadata and
+a fresh thumbnail.
+
+```json
+{ "app": "TsubuGallery", "format": 1, "exported_at": 1788048000,
+  "sketches": [ { "id": "spiral", "title": "Spiral", "author": "", "link": "",
+                  "tags": ["abstract"], "favorite": false, "source": "…" } ] }
+```
+
+### Copy, paste and bulk delete
+
+`Ctrl`+`C` puts the marked sketches (or the selected one) on the clipboard in
+the same JSON as an export, so a sketch can be duplicated with `Ctrl`+`V`, or
+carried to another data directory or machine through any text channel.
+`Ctrl`+`V` with anything else on the clipboard — a tweet's code, say — makes a
+new sketch named `pasted`, `pasted-2`, … from that text. Pasted sketches take
+new names when theirs are taken, like an import.
+
+`Delete` with marks set asks once ("N sketches") and then removes them all,
+files, thumbnails and metadata alike.
+
+### Storage location
+
+The data directory (sketches, thumbnails, `library.sqlite3`, logs) can be moved
+from **Settings → Data → Storage location**, which opens the OS folder picker.
+The choice is written to `config.json` in the *default* data directory — it has
+to live somewhere that does not move — and takes effect on the next launch.
+Existing files are not moved; copy them by hand if you want them in the new
+place. **Use default** removes the override. `TSUBU_DATA_DIR` still wins over
+the setting, and the settings screen says so when it is set.
+
 ### Environment variables
 
 | Variable | Effect |
 |---|---|
-| `TSUBU_DATA_DIR` | Use a different data directory |
+| `TSUBU_DATA_DIR` | Use a different data directory (overrides the setting) |
 | `TSUBU_START_SCREEN` | Override the start screen: `gallery` / `viewer` / `editor` / `settings`. Without it, the setting is used |
 | `RUST_LOG` | How much to log. `warn` by default (see "Logs") |
 
@@ -284,6 +333,9 @@ cargo run --release -- --capture-all ./out
   instance.lock      running marker (see "Single instance" below)
   cache/             bytecode cache (unused; see "Deferred optimisation")
   logs/tsubu.log     run log (see "Logs")
+
+<default data>/
+  config.json        where the data directory is (only when changed in Settings)
 ```
 
 ### Logs
@@ -388,6 +440,7 @@ Changes take effect immediately and are written to the `setting` table in
 | Viewer | Open fullscreen / **canvas fit** / frame rate / playback speed / next-sketch order / preload neighbours / slideshow interval / screensaver |
 | Thumbnail | Capture frame / image quality |
 | Runtime | Per-frame instruction limit |
+| Data | Storage location (see "Storage location"; kept in `config.json`, not the DB) |
 
 **Canvas fit** decides what happens when a sketch declares a canvas whose shape
 does not match the window. つぶやき sketches are usually square, so a wide
@@ -584,12 +637,15 @@ a supposedly frozen picture keep darkening.
 Drop in a `.pde` and it runs. **Processing (Java Mode)**, **p5.js** and
 **つぶやきGLSL** are all accepted, and which one it is gets detected
 automatically — you never have to say (design §23.2, swappable frontends).
+FragCoord.xyz's **GOLF** shorthand rides on the GLSL road: it is expanded to
+つぶやきGLSL first ([GOLF](#golf-fragcoordxyz)).
 
 ```text
 Processing Lite ─┐
                  ├─ AST → bytecode → VM ─┐
 p5.js subset ────┘                        ├─ renderer
 つぶやきGLSL     ── naga → WGSL → wgpu ───┘
+GOLF ── expand ──┘
 ```
 
 Everything below bytecode is shared; only the VM's value type was widened to
@@ -1109,6 +1165,14 @@ FragCoord / ShaderToy-style `void mainImage(out vec4, in vec2)` is accepted as
 well. For that entry point, `iResolution` (`vec3`) maps to `r`, and `iTime`
 (`float`) maps to `t`.
 
+FragCoord.xyz's plain `void main()` shaders work too. There, `u_resolution`
+(`vec3`), `u_time`, `u_mouse` (`vec4`, pixels), `u_frame` (`int`) and the output
+`fragColor` are supplied without declaring them; if any of those words appears
+in a source without `mainImage`, they are mapped onto `r` `t` `m` `f` `o`, and a
+redundant `uniform vec2 u_resolution;` written by the author is blanked (the
+line stays, so error lines do not move). Multi-line `#define … \`, function-like
+macros and `#if AA > 1` all go through naga's preprocessor.
+
 ### Differences from twigl
 
 | | Why |
@@ -1122,6 +1186,63 @@ well. For that entry point, `iResolution` (`vec3`) maps to `r`, and `iTime`
 `gl_FragCoord`'s vertical direction and its `z` follow the OpenGL convention.
 wgpu puts the origin at the top left and uses 0..1 for `z` directly; without
 matching, the image comes out upside down and sketches using `FC.z` change.
+
+### GOLF (FragCoord.xyz)
+
+[FragCoord.xyz](https://fragcoord.xyz/docs#golf) has an optional shorthand
+called **GOLF** for squeezing a fragment shader into a post, and shaders written
+in it (XorDev's, for one) drop in as they are. The first line of such a post is
+usually a title; a line of bare words that starts with neither a type nor a
+keyword is skipped.
+
+```text
+Fever
+f z,d
+@(70)
+{
+f3 p = z * nor(2*C.rgb - R.xyy)
+p.xy *= mat2(cos(z*.5+f4(,33,11,)))
+p.z-=T;
+d=2; @(5) d+=d,
+p += sin(p.yzx*d+z) / d
+z += min(abs(cos(p.y)),d=len(1/tan(p.xz)))/4;
+O += f4(1.1+sin(p),)/d
+}
+O = tanh(O / 2e2)
+```
+
+GOLF is expanded to つぶやきGLSL by text substitution, line for line, and then
+takes the same road as any other shader. Error lines therefore still point at
+the source you pasted.
+
+```text
+GOLF → expand → つぶやきGLSL → naga → WGSL → wgpu
+```
+
+| GOLF | Becomes |
+|---|---|
+| `f` `f2` `f3` `f4` / `i2`… / `u2`… / `b2`… / `m2`… / `s2` | `float` `vec2` `vec3` `vec4` / `ivec` / `uvec` / `bvec` / `mat` / `sampler2D` |
+| `@(N)` `@(i, N)` `@(i, from, N)` | `for (int _fc = 0; _fc < N; _fc++)` — nested loops get `_fc1`, `_fc2`… |
+| `nor` `len` `crs` `clm` `sms` `stp` `flr` `frc` `sgn` `sqt` `isq` `rfl` `rfr` `dst` `fwd` `asn` `acs` `atn` `at2` `ex2` `lg2` `cel` `rnd` `rad` `deg` `ddx` `ddy` `det` `trp` `inv` `mcm` (and the old two-letter `sn` `cs` `ab` …) | the full GLSL names |
+| `R` `T` `F` `C` `O` `M` | `vec3(r, 1)` `t` `f` `FC` `o` `vec4(m * r, 0, 0)` |
+| `f4(,33,11,)` | empty arguments become `0.0` |
+| a line without `;` | gets one, unless it ends in `,` `{` `}` or is an `if` / `for` header |
+| `a ** b` / `~x` | `pow(a, b)` / `(1.0 - (x))` |
+| `#D` `#I` `#E` `#L` `#U` | `#define` `#ifdef` `#endif` `#else` `#undef` |
+| `sq x = x * x` | `float sq(float x) { return x * x; }` |
+| `f3 p = 0` | `vec3 p = vec3(0)` |
+| a local named `r` `t` `m` `o` `FC` | renamed to `_r` `_t`…, so it does not shadow the twigl uniform that `R` `T` `M` `O` `C` become |
+
+A word like `f3`, `@(` or a `f name =` declaration, together with `O` being
+written and `R` or `C` read, is what marks a source as GOLF. It is checked before
+the GLSL test, since GOLF may use `mat2` and friends too.
+
+What is not there: the generic `fX` functions, `%` on floats, and everything
+FragCoord feeds from textures or extra passes — `P1`–`P4`, `B`, `A`, `K`, `W`,
+as well as `D` (frame delta), `Y` (date), `S` (scroll), `G` (drag), `N` and
+the camera uniforms. Those are expanded to their FragCoord names (`u_pass1`,
+`u_time_delta`…) and naga reports them as unknown. `R` is `vec3` and `M` is in
+pixels, as on FragCoord; the click state in `M.zw` is always 0.
 
 ### Safety
 
@@ -1177,7 +1298,7 @@ A cargo workspace matching the module boundaries in design §31.
 ```text
 core/              library / repository / locale / paths … shared layer, independent of UI and runtime
 renderer/          draw / batch / texture / capture / canvas / font … Processing API → triangles → wgpu
-                   shader … つぶやきGLSL → naga → WGSL
+                   shader … つぶやきGLSL → naga → WGSL / golf … GOLF → つぶやきGLSL
 processing-lite/   lexer → parser → ast → compiler ─┐
                    js/{lexer,parser,ast,compiler} ──┴→ bytecode → vm
                    glsl_sketch … GLSL sketches / front … picks the dialect
@@ -1253,7 +1374,9 @@ it.
   destination back cannot be built. They are drawn as `BLEND`
 - Other p5 APIs: images and offscreen drawing (`image` / `loadImage` /
   `createGraphics`), `strokeCap` / `strokeJoin`, `frameRate()`
-- Import / export, GIF and video export (design §27)
+- GOLF: generic `fX` functions, `%` on floats, textures and multi-pass
+  uniforms (`P1`–`P4`, `B`, `A`, `K`, `W`)
+- GIF and video export (design §27)
 - Registering as an OS screensaver (macOS `.saver` / Windows `.scr`)
 - Android / iOS (Phases 10 and 11)
 

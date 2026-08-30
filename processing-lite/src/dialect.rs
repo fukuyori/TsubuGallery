@@ -18,6 +18,8 @@ pub enum Dialect {
     Processing,
     /// つぶやき GLSL。フラグメントシェーダー 1 本。
     Glsl,
+    /// FragCoord.xyz の GOLF。つぶやき GLSL をさらに詰めた記法。
+    Golf,
 }
 
 impl Dialect {
@@ -27,6 +29,7 @@ impl Dialect {
             Dialect::P5 => "p5.js",
             Dialect::Processing => "Processing",
             Dialect::Glsl => "GLSL",
+            Dialect::Golf => "GOLF",
         }
     }
 
@@ -36,6 +39,7 @@ impl Dialect {
             Dialect::P5 => "dialect.p5",
             Dialect::Processing => "dialect.processing",
             Dialect::Glsl => "dialect.glsl",
+            Dialect::Golf => "dialect.golf",
         }
     }
 }
@@ -77,6 +81,80 @@ pub fn looks_like_glsl(source: &str) -> bool {
         .iter()
         .filter(|s| !matches!(s.class, TokenClass::Plain | TokenClass::Comment))
         .any(|s| GLSL_ONLY.contains(&&source[s.start..s.end]))
+}
+
+/// FragCoord.xyz の GOLF として読むべきコードか。
+///
+/// GOLF は GLSL の型名を `f3` のように縮め、`@(N)` でループを書く。判定は
+/// FragCoord 自身の検出に合わせた:
+///
+/// - `@(` の後に数字が来る
+/// - `#D` で始まる行がある
+/// - `f name =` / `f name,` / `f name;` という float 宣言がある
+/// - `uniform f2` のような短い型の uniform 宣言がある
+/// - 短い型名 (`f2` `i3` `m2` …) があり、`O` へ代入し、`R` か `C` を読む
+///
+/// GLSL より先に呼ぶ。GOLF は `mat2` のような GLSL の語も混ぜて書けるので、
+/// [`looks_like_glsl`] にも引っかかる。
+pub fn looks_like_golf(source: &str) -> bool {
+    let spans = tokens(source);
+    let code: Vec<&str> = spans
+        .iter()
+        .filter(|s| !matches!(s.class, TokenClass::Plain | TokenClass::Comment))
+        .map(|s| &source[s.start..s.end])
+        .collect();
+
+    let mut short_type = false;
+    let mut writes_output = false;
+    let mut reads_uniform = false;
+    for (i, &text) in code.iter().enumerate() {
+        let next = code.get(i + 1).copied();
+        let after = code.get(i + 2).copied();
+        if text == "@"
+            && next == Some("(")
+            && after.is_some_and(|a| a.starts_with(|c: char| c.is_ascii_digit()))
+        {
+            return true;
+        }
+        // `#D` は字句分割で `#` `D` に割れることも、行ごと 1 語になることもある。
+        if (text == "#" && next == Some("D"))
+            || (text.starts_with("#D") && !text[2..].starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+        {
+            return true;
+        }
+        if text == "f"
+            && next.is_some_and(is_plain_identifier)
+            && matches!(after, Some("=" | "," | ";") | None)
+        {
+            return true;
+        }
+        if text == "uniform" && next.is_some_and(is_golf_type) {
+            return true;
+        }
+        if is_golf_type(text) {
+            short_type = true;
+        }
+        if text == "O" && matches!(next, Some("=" | "+=" | "-=" | "*=" | "/=")) {
+            writes_output = true;
+        }
+        if text == "R" || text == "C" {
+            reads_uniform = true;
+        }
+    }
+    short_type && writes_output && reads_uniform
+}
+
+fn is_golf_type(word: &str) -> bool {
+    matches!(
+        word,
+        "f2" | "f3" | "f4" | "i2" | "i3" | "i4" | "u2" | "u3" | "u4" | "m2" | "m3" | "m4" | "s2"
+    )
+}
+
+fn is_plain_identifier(word: &str) -> bool {
+    let mut chars = word.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// p5.js で、まだ持っていない API。
@@ -167,6 +245,9 @@ const UNSUPPORTED_JAVA_KEYWORDS: &[&str] = &["static", "import", "char"];
 pub fn diagnose(source: &str) -> Diagnosis {
     // GLSL は Processing でも p5.js でもない。未対応の構文を挙げても
     // 「Processing にこの書き方は無い」ばかりになるので、方言だけ返す。
+    if looks_like_golf(source) {
+        return Diagnosis { dialect: Dialect::Golf, findings: Vec::new() };
+    }
     if looks_like_glsl(source) {
         return Diagnosis { dialect: Dialect::Glsl, findings: Vec::new() };
     }
@@ -522,6 +603,37 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
         }
     }
 
+    /// FragCoord.xyz の GOLF。GLSL の語も混ざるので、GLSL より先に見分ける。
+    #[test]
+    fn a_golf_shader_is_recognised_before_glsl() {
+        for source in [
+            // XorDev 氏の "Fever" (2026-08)。題名の行から始まる。
+            "Fever\nf z,d\n@(70)\n{\nf3 p = z * nor(2*C.rgb - R.xyy)\np.xy *= mat2(cos(z*.5+f4(,33,11,)))\nO += f4(1.1+sin(p),)/d\n}\nO = tanh(O / 2e2)",
+            "f2 uv = C.xy / R.xy\nO = f4(uv, 0, 1)",
+            "#D Z 9\nO = f4(1)",
+            "f a = 1.\nO = vec4(a)",
+            "@(9) O += 1.",
+        ] {
+            assert!(looks_like_golf(source), "GOLF と見ていない: {source}");
+            assert_eq!(diagnose(source).dialect, Dialect::Golf);
+        }
+    }
+
+    /// つぶやき GLSL と Processing / p5.js を GOLF と取り違えない。
+    #[test]
+    fn glsl_processing_and_p5_are_not_mistaken_for_golf() {
+        for source in [
+            P5_SAMPLE,
+            "float e, i;\nfor (; i++< 1e2;) {\n  vec3 p = vec3(FC.xy / r, 1);\n  o += length(p);\n}",
+            "o += vec4(snoise3D(vec3(FC.xy, t)));",
+            "float x = 1;\nvoid draw() { circle(x, 0, 1); }",
+            include_str!("../sketches/spiral.pde"),
+            include_str!("../sketches/noise-field.pde"),
+        ] {
+            assert!(!looks_like_golf(source), "GOLF と間違えている: {source}");
+        }
+    }
+
     /// Processing と p5.js を GLSL と取り違えない。
     ///
     /// `float` や `void` は両方にある語なので手がかりにしていない。
@@ -553,6 +665,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
         for source in ["", "$", "⇒", "/* 閉じない", "日本語だけ"] {
             let _ = diagnose(source);
             let _ = looks_like_glsl(source);
+            let _ = looks_like_golf(source);
         }
     }
 

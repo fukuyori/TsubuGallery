@@ -15,17 +15,29 @@ pub struct DataPaths {
 }
 
 impl DataPaths {
-    /// OS 標準のデータディレクトリ配下に `TsubuGallery/` を確保する。
+    /// データ領域を決める。
     ///
-    /// `TSUBU_DATA_DIR` が設定されていればそちらを優先する。
+    /// 優先順は `TSUBU_DATA_DIR` → [`crate::config::Config`] の `data_dir` →
+    /// OS 標準のデータディレクトリ配下の `TsubuGallery/`。
     pub fn resolve() -> Self {
         if let Some(custom) = std::env::var_os(DATA_DIR_ENV) {
             return Self { root: PathBuf::from(custom) };
         }
-        let root = dirs::data_dir()
+        let default = Self::default_root();
+        let config = crate::config::Config::load(&default);
+        Self { root: config.data_dir.unwrap_or(default) }
+    }
+
+    /// 何も指定しないときの場所。`config.json` もここに置く。
+    pub fn default_root() -> PathBuf {
+        dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("TsubuGallery");
-        Self { root }
+            .join("TsubuGallery")
+    }
+
+    /// 環境変数で差し替えられているか。そのときは設定画面で変えても効かない。
+    pub fn overridden_by_env() -> bool {
+        std::env::var_os(DATA_DIR_ENV).is_some()
     }
 
     pub fn with_root(root: impl Into<PathBuf>) -> Self {

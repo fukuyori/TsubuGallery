@@ -9,6 +9,7 @@ pub mod canvas;
 pub mod capture;
 pub mod draw;
 pub mod font;
+pub mod golf;
 pub mod mat4;
 pub mod shader;
 pub mod texture;

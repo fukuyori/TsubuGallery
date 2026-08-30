@@ -156,6 +156,23 @@ const MAIN_IMAGE_COMPAT: &str = r#"#define iResolution vec3(r, 1.0)
 #define iTime t
 "#;
 
+/// FragCoord.xyz の `void main()` 形式が前提にする名前。
+///
+/// FragCoord は `u_resolution` `u_time` `u_mouse` `u_frame` と出力の
+/// `fragColor` を宣言なしで供給する。作品はそのまま使うので、それらの語が
+/// 本文にあるときだけ twigl の値へ写す。対応は GOLF ([`crate::golf`]) と同じ。
+/// `mainImage` 入口の作品は引数名に `fragColor` を使うのが普通なので、
+/// そちらには付けない。
+const FRAGCOORD_COMPAT: &str = r#"#define u_resolution vec3(r, 1.0)
+#define u_time t
+#define u_mouse vec4(m * r, 0.0, 0.0)
+#define u_frame int(f)
+#define fragColor o
+"#;
+
+/// [`FRAGCOORD_COMPAT`] が写す名前。
+const FRAGCOORD_NAMES: &[&str] = &["u_resolution", "u_time", "u_mouse", "u_frame", "fragColor"];
+
 /// naga 30 は標準 GLSL の `mat2(vec4)` を構文解析できるが、1 本の vec4 を
 /// matrix の component として残すため検証で落ちる。単一引数コンストラクタを
 /// このオーバーロードへ通し、値を一度だけ評価して 2 本の列へ分ける。
@@ -278,11 +295,17 @@ fn wrap(source: &str) -> Wrapped {
     // GLSL の段階で初期値を補って Store を正しい位置に残す。
     let body =
         normalize_single_argument_mat2(&initialize_for_loop_variables(&strip_hashtags(source)));
-    let main = find_void_function(&body, "main");
     let main_image = find_void_function(&body, "mainImage");
+    // FragCoord.xyz の作品。供給される名前を写し、作者が重ねて書いた
+    // `uniform vec2 u_resolution;` のような宣言は落とす (マクロ展開で壊れる)。
+    // 落とすと位置が動くので、`main` の範囲はその後で取る。
+    let fragcoord = main_image.is_none() && uses_any_word(&body, FRAGCOORD_NAMES);
+    let body = if fragcoord { blank_uniform_declarations(&body, FRAGCOORD_NAMES) } else { body };
+    let fragcoord_compat = if fragcoord { FRAGCOORD_COMPAT } else { "" };
+    let main = find_void_function(&body, "main");
     let (prefix, suffix) = if main.is_some() {
         (
-            format!("{PREAMBLE}{SINGLE_ARGUMENT_MAT2_COMPAT}"),
+            format!("{PREAMBLE}{SINGLE_ARGUMENT_MAT2_COMPAT}{fragcoord_compat}"),
             "\nvoid main() { o = vec4(0.0); tsubu_user_main(); tsubu_color = vec4(o.rgb, 1.0); }\n"
                 .to_string(),
         )
@@ -294,7 +317,9 @@ fn wrap(source: &str) -> Wrapped {
         )
     } else {
         (
-            format!("{PREAMBLE}{SINGLE_ARGUMENT_MAT2_COMPAT}void main() {{\no = vec4(0.0);\n"),
+            format!(
+                "{PREAMBLE}{SINGLE_ARGUMENT_MAT2_COMPAT}{fragcoord_compat}void main() {{\no = vec4(0.0);\n"
+            ),
             "\ntsubu_color = vec4(o.rgb, 1.0);\n}\n".to_string(),
         )
     };
@@ -685,6 +710,44 @@ fn strip_hashtags(source: &str) -> String {
     kept.join("\n")
 }
 
+/// `names` のどれかが識別子として本文に出てくるか。コメントは飛ばす。
+fn uses_any_word(source: &str, names: &[&str]) -> bool {
+    let bytes = source.as_bytes();
+    let mut at = 0;
+    while let Some(next) = next_code_byte(bytes, at) {
+        if is_ident_start(bytes[next]) {
+            let end = skip_identifier(bytes, next);
+            if names.contains(&&source[next..end]) {
+                return true;
+            }
+            at = end;
+        } else {
+            at = next + 1;
+        }
+    }
+    false
+}
+
+/// `uniform <type> <name>;` のうち `names` に載っている名前の行を空にする。
+///
+/// FragCoord では宣言しなくても供給される名前を、作者が説明のつもりで書き
+/// 添えることがある。行を消すとエラー位置がずれるので、中身だけ落とす。
+fn blank_uniform_declarations(source: &str, names: &[&str]) -> String {
+    let kept: Vec<&str> = source
+        .lines()
+        .map(|line| {
+            let Some(rest) = line.trim_start().strip_prefix("uniform") else { return line };
+            if !rest.starts_with(char::is_whitespace) {
+                return line;
+            }
+            let words: Vec<&str> = rest.split([';', '/']).next().unwrap_or("").split_whitespace().collect();
+            let declares_known = words.len() == 2 && names.contains(&words[1]);
+            if declares_known { "" } else { line }
+        })
+        .collect();
+    kept.join("\n")
+}
+
 /// バイト位置を 1 始まりの行・列にする。列は文字数で数える。
 fn line_and_column(text: &str, at: usize) -> (u32, u32) {
     let head = &text[..at.min(text.len())];
@@ -722,6 +785,49 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 "#;
         let wgsl = compile(source).expect("mainImage と互換 uniform が通る");
         assert!(wgsl.contains("@fragment"), "{wgsl}");
+    }
+
+    /// FragCoord.xyz の `void main()` 形式。供給される名前を宣言なしで使う。
+    #[test]
+    fn a_fragcoord_main_uses_its_own_uniform_names() {
+        let source = r#"uniform vec2 u_resolution; //Pass resolution in pixels
+#define AA 2
+vec4 render(in vec2 fragCoord) {
+    vec4 fragColor = vec4(0);
+    vec2 uv = (fragCoord * 2.0 - u_resolution.xy) / min(u_resolution.x, u_resolution.y);
+    fragColor.rg = uv * sin(u_time) + u_mouse.xy / u_resolution.xy + float(u_frame);
+    return fragColor;
+}
+void main() {
+    #if AA > 1
+    fragColor = render(gl_FragCoord.xy);
+    #else
+    fragColor = vec4(1);
+    #endif
+}
+"#;
+        let wgsl = compile(source).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(wgsl.contains("@fragment"), "{wgsl}");
+    }
+
+    #[test]
+    fn a_redundant_uniform_declaration_keeps_the_line_numbers() {
+        let blanked = blank_uniform_declarations(
+            "uniform  vec2  u_resolution;\nuniform float u_time; // t\nuniform vec2 mine;\no = vec4(1);",
+            FRAGCOORD_NAMES,
+        );
+        assert_eq!(blanked, "\n\nuniform vec2 mine;\no = vec4(1);");
+
+        let error = compile("uniform float u_time;\no = vec4(u_time, nosuch);").expect_err("通らない");
+        assert_eq!(error.line, 2);
+    }
+
+    #[test]
+    fn main_image_keeps_fragcolor_as_its_parameter_name() {
+        let source = "void mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = vec4(fragCoord / iResolution.xy, 0, 1); }";
+        let wrapped = wrap(source);
+        assert!(!wrapped.text.contains("#define fragColor"), "{}", wrapped.text);
+        assert!(compile(source).is_ok());
     }
 
     #[test]

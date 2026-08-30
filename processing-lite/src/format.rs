@@ -372,9 +372,10 @@ pub fn compress(source: &str) -> String {
     let mut previous = String::new();
     let mut pending_newline = false;
     let mut group_depth = 0i32;
-    // 改行を文の区切りとして残すか。`;` を省ける p5.js だけの都合で、GLSL は
-    // 必ず `;` で終わるので全部詰めてよい。
-    let keeps_newlines = !crate::dialect::looks_like_glsl(source);
+    // 改行を文の区切りとして残すか。`;` を省ける p5.js と GOLF の都合で、GLSL
+    // は必ず `;` で終わるので全部詰めてよい。
+    let keeps_newlines =
+        crate::dialect::looks_like_golf(source) || !crate::dialect::looks_like_glsl(source);
 
     for piece in Pieces::new(source).iter() {
         // プリプロセッサ行は詰められない。前後の改行ごと残す。

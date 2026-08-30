@@ -100,7 +100,9 @@ impl Sketch for VmSketch {
         g.set_flavour(match self.dialect {
             Dialect::P5 => tsubu_renderer::Flavour::P5,
             // GLSL は VM を通らないので、ここへは来ない。
-            Dialect::Processing | Dialect::Glsl => tsubu_renderer::Flavour::Processing,
+            Dialect::Processing | Dialect::Glsl | Dialect::Golf => {
+                tsubu_renderer::Flavour::Processing
+            }
         });
         let result = self.vm.init_globals(&self.program, g, self.budget);
         if let Err(trap) = result {

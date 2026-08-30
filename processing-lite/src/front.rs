@@ -5,7 +5,8 @@
 //! ここで見分けて、それぞれのフロントエンドへ送る。
 //!
 //! ```text
-//! source ─┬─ GLSL      → GlslSketch (naga → WGSL → GPU)
+//! source ─┬─ GOLF      → GlslSketch (GOLF → GLSL → naga → WGSL → GPU)
+//!         ├─ GLSL      → GlslSketch (naga → WGSL → GPU)
 //!         └─ それ以外   → VmSketch   (parser → bytecode → VM)
 //! ```
 
@@ -28,6 +29,11 @@ pub struct Compiled {
 /// `seed` は `random()` の再現性のために作品ごとへ固定した値。GLSL には
 /// 乱数が無いので効かない。
 pub fn compile(source: &str, seed: u64) -> Result<Compiled, CompileError> {
+    // GOLF は GLSL の語も含むので、GLSL より先に見る。
+    if dialect::looks_like_golf(source) {
+        let sketch = GlslSketch::compile_golf(source)?;
+        return Ok(Compiled { sketch: Box::new(sketch), dialect: Dialect::Golf, instructions: 0 });
+    }
     if dialect::looks_like_glsl(source) {
         let sketch = GlslSketch::compile(source)?;
         return Ok(Compiled { sketch: Box::new(sketch), dialect: Dialect::Glsl, instructions: 0 });
@@ -61,6 +67,13 @@ mod tests {
         let compiled = compile("o = vec4(FC.xy / r, 0, 1);", 0).expect("通る");
         assert_eq!(compiled.dialect, Dialect::Glsl);
         assert_eq!(compiled.instructions, 0, "GLSL に命令数は無い");
+    }
+
+    #[test]
+    fn a_golf_shader_goes_to_the_gpu_too() {
+        let compiled = compile("f2 uv = C.xy / R.xy\nO = f4(uv, 0, 1)", 0).expect("通る");
+        assert_eq!(compiled.dialect, Dialect::Golf);
+        assert_eq!(compiled.instructions, 0);
     }
 
     /// GLSL は Processing のパーサへ回さない。

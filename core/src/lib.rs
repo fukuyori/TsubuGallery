@@ -4,6 +4,8 @@
 //! (設計書 §13)。保存場所の解決、UI の多言語化、作品ファイルの読み書き、
 //! メタデータの永続化 (SQLite) を持つ。
 
+pub mod config;
+pub mod exchange;
 pub mod library;
 pub mod locale;
 pub mod lock;

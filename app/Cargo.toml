@@ -23,6 +23,9 @@ egui-winit.workspace = true
 pollster.workspace = true
 image.workspace = true
 log.workspace = true
+rfd.workspace = true
+serde_json.workspace = true
+arboard.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

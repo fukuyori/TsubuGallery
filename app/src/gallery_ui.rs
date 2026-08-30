@@ -31,6 +31,41 @@ pub enum GalleryAction {
     DeleteCollection(String),
     /// コレクションの割り当て画面を閉じる。
     CloseCollections,
+    /// 複数選択の印を付け外しする (Ctrl+クリック)。
+    ToggleMark(usize),
+    /// カーソルからここまでに印を付ける (Shift+クリック)。
+    MarkRange(usize),
+    /// 読み込み画面で 1 件のチェックを反転する。
+    ImportToggle(usize),
+    /// 読み込み画面で全件のチェックを揃える。
+    ImportSetAll(bool),
+    ImportConfirm,
+    ImportCancel,
+}
+
+/// 読み込み画面に出す、エクスポートファイルの中身。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportPreview {
+    pub file_name: String,
+    pub entries: Vec<ImportEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportEntry {
+    pub id: String,
+    pub title: String,
+    pub author: String,
+    /// カンマ区切りにしたタグ。
+    pub tags: String,
+    /// 同じ id の作品が既にある。読み込むと別名になる。
+    pub exists: bool,
+    pub checked: bool,
+}
+
+impl ImportPreview {
+    pub fn checked_count(&self) -> usize {
+        self.entries.iter().filter(|e| e.checked).count()
+    }
 }
 
 /// 1 フレーム描いた結果。
@@ -61,6 +96,8 @@ pub struct GalleryUi<'a> {
     pub card_size: CardSize,
     /// カードに作品名を出すか。
     pub show_titles: bool,
+    /// 読み込み画面を開いているなら、その中身。
+    pub import: Option<&'a ImportPreview>,
 }
 
 const TITLE_ROW_HEIGHT: f32 = 34.0;
@@ -92,9 +129,42 @@ pub fn build(root: &mut egui::Ui, state: &mut GalleryUi<'_>) -> GalleryOutput {
         delete_confirm(root.ctx(), &title, state.locales, &mut out.actions);
     } else if let Some(index) = state.assigning {
         collection_dialog(root.ctx(), state, index, &mut out.actions);
+    } else if let Some(preview) = state.import {
+        import_dialog(root.ctx(), preview, state.locales, &mut out.actions);
     }
 
     out
+}
+
+/// クリックを、修飾キーに応じて選択・印・範囲指定のどれかにする。
+fn click_action(ui: &egui::Ui, index: usize) -> GalleryAction {
+    let modifiers = ui.input(|i| i.modifiers);
+    if modifiers.shift {
+        GalleryAction::MarkRange(index)
+    } else if modifiers.command {
+        GalleryAction::ToggleMark(index)
+    } else {
+        GalleryAction::Select(index)
+    }
+}
+
+/// 印の付いた作品に、左上のチェックと色付きの枠を描く。
+fn draw_mark(painter: &egui::Painter, rect: egui::Rect, rounding: f32, palette: &Palette) {
+    painter.rect_stroke(
+        rect,
+        rounding,
+        egui::Stroke::new(3.0, palette.ok),
+        egui::StrokeKind::Inside,
+    );
+    let badge = egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 8.0), egui::vec2(22.0, 22.0));
+    painter.rect_filled(badge, 6.0, palette.ok);
+    painter.text(
+        badge.center(),
+        egui::Align2::CENTER_CENTER,
+        "✓",
+        egui::FontId::proportional(15.0),
+        egui::Color32::WHITE,
+    );
 }
 
 fn header(
@@ -126,6 +196,18 @@ fn header(
                     format!("{shown} / {total}")
                 };
                 ui.label(egui::RichText::new(count).size(13.0).color(Palette::of(ui).dim));
+                // 複数選択中はその数も出す。何を書き出すかが見えるように。
+                let marked = state.view.marked_len();
+                if marked > 0 {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(
+                            state.locales.t("gallery.marked").replace("{n}", &marked.to_string()),
+                        )
+                        .size(13.0)
+                        .color(Palette::of(ui).ok),
+                    );
+                }
                 ui.min_rect()
             },
             |ui| {
@@ -143,6 +225,108 @@ fn header(
         )
 }
 
+/// 読み込み画面。ファイルの中身を並べ、取り込むものを選ばせる。
+fn import_dialog(
+    ctx: &egui::Context,
+    preview: &ImportPreview,
+    locales: &Locales,
+    actions: &mut Vec<GalleryAction>,
+) {
+    egui::Area::new("tsubu.gallery.import.shade".into())
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(0.0, 0.0))
+        .show(ctx, |ui| {
+            let screen = ctx.viewport_rect();
+            ui.allocate_response(screen.size(), egui::Sense::click());
+            ui.painter().rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+        });
+
+    egui::Area::new("tsubu.gallery.import".into())
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(20.0).show(ui, |ui| {
+                let palette = Palette::of(ui);
+                ui.set_min_width(560.0);
+                ui.set_max_width((ctx.viewport_rect().width() - 80.0).max(320.0));
+                ui.label(egui::RichText::new(locales.t("gallery.import.title")).size(15.0).strong());
+                ui.label(egui::RichText::new(&preview.file_name).size(12.0).color(palette.dim));
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button(locales.t("gallery.import.all")).clicked() {
+                        actions.push(GalleryAction::ImportSetAll(true));
+                    }
+                    if ui.button(locales.t("gallery.import.none")).clicked() {
+                        actions.push(GalleryAction::ImportSetAll(false));
+                    }
+                    let count = locales
+                        .t("gallery.import.count")
+                        .replace("{n}", &preview.checked_count().to_string())
+                        .replace("{total}", &preview.entries.len().to_string());
+                    ui.label(egui::RichText::new(count).size(12.0).color(palette.dim));
+                });
+                ui.add_space(6.0);
+
+                let max_height = (ctx.viewport_rect().height() - 260.0).max(120.0);
+                egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
+                    egui::Grid::new("tsubu.gallery.import.rows")
+                        .num_columns(4)
+                        .spacing([14.0, 6.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label("");
+                            ui.label(egui::RichText::new(locales.t("gallery.import.name")).strong());
+                            ui.label(egui::RichText::new(locales.t("gallery.import.author")).strong());
+                            ui.label(egui::RichText::new(locales.t("gallery.import.tags")).strong());
+                            ui.end_row();
+
+                            for (i, entry) in preview.entries.iter().enumerate() {
+                                let mut checked = entry.checked;
+                                if ui.checkbox(&mut checked, "").changed() {
+                                    actions.push(GalleryAction::ImportToggle(i));
+                                }
+                                ui.vertical(|ui| {
+                                    ui.label(&entry.title);
+                                    let mut note = entry.id.clone();
+                                    if entry.exists {
+                                        note.push_str("  ·  ");
+                                        note.push_str(locales.t("gallery.import.exists"));
+                                    }
+                                    ui.label(egui::RichText::new(note).size(11.0).color(palette.dim));
+                                });
+                                ui.label(&entry.author);
+                                ui.label(&entry.tags);
+                                ui.end_row();
+                            }
+                        });
+                });
+
+                if preview.entries.is_empty() {
+                    ui.label(
+                        egui::RichText::new(locales.t("gallery.import.empty"))
+                            .size(12.0)
+                            .color(palette.dim),
+                    );
+                }
+
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let confirm = egui::Button::new(
+                        egui::RichText::new(locales.t("gallery.import.confirm")).color(egui::Color32::WHITE),
+                    )
+                    .fill(palette.accent);
+                    if ui.add_enabled(preview.checked_count() > 0, confirm).clicked() {
+                        actions.push(GalleryAction::ImportConfirm);
+                    }
+                    if ui.button(locales.t("common.cancel")).clicked() {
+                        actions.push(GalleryAction::ImportCancel);
+                    }
+                });
+            });
+        });
+}
+
 fn hints(ui: &mut egui::Ui, locales: &Locales) {
     let palette = Palette::of(ui);
     let (dim, key) = (palette.dim, palette.strong);
@@ -151,6 +335,8 @@ fn hints(ui: &mut egui::Ui, locales: &Locales) {
         ("Del", locales.t("gallery.delete")),
         ("E", locales.t("gallery.edit")),
         ("N", locales.t("gallery.new")),
+        ("X", locales.t("gallery.export")),
+        ("I", locales.t("gallery.import")),
         ("O", locales.t("gallery.open_link")),
         ("C", locales.t("gallery.collection")),
         ("P", locales.t("gallery.slideshow")),
@@ -323,7 +509,7 @@ fn cards(
                 // 選ぶのは意図した操作にする。マウスを通り過ぎただけで
                 // 選択が動くと、編集や削除の対象が定まらない。
                 if response.clicked() {
-                    actions.push(GalleryAction::Select(index));
+                    actions.push(click_action(ui, index));
                 }
                 if response.double_clicked() {
                     actions.push(GalleryAction::Open(index));
@@ -371,7 +557,7 @@ fn list(
             ui.scroll_to_rect(rect, None);
         }
         if response.clicked() {
-            actions.push(GalleryAction::Select(index));
+            actions.push(click_action(ui, index));
         }
         if response.double_clicked() {
             actions.push(GalleryAction::Open(index));
@@ -485,6 +671,9 @@ fn draw_list_row(
             egui::StrokeKind::Inside,
         );
     }
+    if state.view.is_marked(index) {
+        draw_mark(ui.painter(), rect, 8.0, &palette);
+    }
 
     star
 }
@@ -581,6 +770,9 @@ fn draw_card(
             egui::Stroke::new(2.0, palette.accent),
             egui::StrokeKind::Inside,
         );
+    }
+    if state.view.is_marked(index) {
+        draw_mark(ui.painter(), rect, 10.0, &palette);
     }
 
     star
@@ -902,6 +1094,7 @@ mod tests {
                         view_mode,
                         card_size: CardSize::default(),
                         show_titles: true,
+                        import: None,
                     },
                 );
             });
@@ -956,6 +1149,7 @@ mod tests {
             view_mode: ViewMode::Grid,
             card_size: CardSize::default(),
             show_titles: true,
+            import: None,
         };
 
         for width in [800.0, 1204.0] {
@@ -1031,6 +1225,7 @@ mod tests {
                         view_mode: ViewMode::default(),
                         card_size: CardSize::default(),
                         show_titles: true,
+                        import: None,
                     },
                 );
                 if frame == 1 {
@@ -1085,6 +1280,88 @@ mod tests {
         v.set_filter(Filter { favorites_only: true, ..Default::default() });
         let (_, vertices) = run(&mut v, None);
         assert!(vertices > 0, "「該当なし」の表示が出る");
+    }
+
+    /// 読み込み画面は、中身の一覧と取り込みボタンまで描ける。
+    #[test]
+    fn the_import_dialog_draws_its_entries() {
+        let ctx = egui::Context::default();
+        let locales = Locales::builtin();
+        let textures = HashMap::new();
+        let mut v = view(2);
+        let preview = ImportPreview {
+            file_name: "tsubugallery-2026-08-30.tsubu.json".into(),
+            entries: vec![
+                ImportEntry {
+                    id: "spiral".into(),
+                    title: "Spiral".into(),
+                    author: "someone".into(),
+                    tags: "abstract, loop".into(),
+                    exists: true,
+                    checked: true,
+                },
+                ImportEntry {
+                    id: "new-one".into(),
+                    title: "New One".into(),
+                    author: String::new(),
+                    tags: String::new(),
+                    exists: false,
+                    checked: false,
+                },
+            ],
+        };
+        let mut vertices = 0;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1100.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                build(
+                    ui,
+                    &mut GalleryUi {
+                        view: &mut v,
+                        textures: &textures,
+                        locales: &locales,
+                        tags: &[],
+                        collections: &[],
+                        assigning: None,
+                        scroll_to_selected: false,
+                        pending_delete: None,
+                        view_mode: ViewMode::Grid,
+                        card_size: CardSize::default(),
+                        show_titles: true,
+                        import: Some(&preview),
+                    },
+                );
+            });
+            output.textures_delta.clear();
+            vertices = ctx
+                .tessellate(output.shapes, 1.0)
+                .iter()
+                .map(|p| match &p.primitive {
+                    egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
+                    _ => 0,
+                })
+                .sum();
+        }
+        let (_, without) = run(&mut view(2), None);
+        assert!(vertices > without, "読み込み画面の分だけ描くものが増える");
+        assert_eq!(preview.checked_count(), 1);
+    }
+
+    /// 印の付いた作品は枠とチェックを足して描く。
+    #[test]
+    fn marked_cards_draw_more() {
+        let mut plain = view(3);
+        let (_, without) = run(&mut plain, None);
+        let mut marked = view(3);
+        marked.toggle_mark(1);
+        let (_, with) = run(&mut marked, None);
+        assert!(with > without, "{with} <= {without}");
     }
 
     #[test]

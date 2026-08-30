@@ -3,6 +3,8 @@
 //! egui 側はこの構造体を読んで描くだけなので、Gallery のふるまい (選択の動き、
 //! 絞り込み、サムネイル取得の順番) を UI なしでテストできる。
 
+use std::collections::BTreeSet;
+
 use crate::model::{Filter, GalleryItem, SortOrder, ThumbnailState};
 
 /// キーボードによる選択移動。
@@ -25,6 +27,11 @@ pub struct GalleryView {
     cursor: usize,
     /// 直近のレイアウトで使われた列数。上下移動の幅になる。
     columns: usize,
+    /// 複数選択の印 (Export の対象)。id で持つので、差し込みや削除でずれない。
+    ///
+    /// カーソル (`cursor`) とは別。カーソルは常に 1 つで、開く・編集する・
+    /// 削除する対象。印は何個でも付き、まとめて扱う操作の対象になる。
+    marked: BTreeSet<String>,
 
     filter: Filter,
     sort: SortOrder,
@@ -37,6 +44,7 @@ impl GalleryView {
             visible: Vec::new(),
             cursor: 0,
             columns: 1,
+            marked: BTreeSet::new(),
             filter: Filter::default(),
             sort: SortOrder::default(),
         };
@@ -106,6 +114,67 @@ impl GalleryView {
 
     pub fn index_of(&self, id: &str) -> Option<usize> {
         self.items.iter().position(|i| i.id == id)
+    }
+
+    // ---- 複数選択 ---------------------------------------------------------
+
+    pub fn is_marked(&self, index: usize) -> bool {
+        self.items.get(index).is_some_and(|i| self.marked.contains(&i.id))
+    }
+
+    pub fn marked_len(&self) -> usize {
+        self.marked.len()
+    }
+
+    /// 印の付いた作品の位置。表示順ではなく `items` の順。
+    pub fn marked(&self) -> Vec<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| self.marked.contains(&i.id))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// 印を付け外しする。カーソルもそこへ動かす。
+    pub fn toggle_mark(&mut self, index: usize) {
+        let Some(item) = self.items.get(index) else { return };
+        if !self.marked.remove(&item.id) {
+            self.marked.insert(item.id.clone());
+        }
+        self.select(index);
+    }
+
+    /// カーソルから `index` までの、表示順で連続する範囲に印を付ける。
+    ///
+    /// Shift+クリックの動き。カーソルは動かさない。
+    pub fn mark_range(&mut self, index: usize) {
+        let Some(to) = self.visible.iter().position(|&i| i == index) else { return };
+        let from = self.cursor.min(self.visible.len().saturating_sub(1));
+        let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
+        for &i in &self.visible[lo..=hi] {
+            self.marked.insert(self.items[i].id.clone());
+        }
+    }
+
+    /// 表示中の全作品に印を付ける。絞り込みで隠れているものは含めない。
+    pub fn mark_all_visible(&mut self) {
+        for &i in &self.visible {
+            self.marked.insert(self.items[i].id.clone());
+        }
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marked.clear();
+    }
+
+    /// 印が付いていればそれら、無ければカーソルの作品。まとめて扱う操作の対象。
+    pub fn marked_or_selected(&self) -> Vec<usize> {
+        if self.marked.is_empty() {
+            self.selected().into_iter().collect()
+        } else {
+            self.marked()
+        }
     }
 
     pub fn filter(&self) -> &Filter {
@@ -272,7 +341,8 @@ impl GalleryView {
         }
         let selected = self.selected();
         let cursor = self.cursor;
-        self.items.remove(index);
+        let removed = self.items.remove(index);
+        self.marked.remove(&removed.id);
         self.refresh();
 
         match selected {
@@ -292,6 +362,9 @@ impl GalleryView {
     /// 名前を変える。
     pub fn rename(&mut self, index: usize, id: String, title: String) {
         if let Some(item) = self.items.get_mut(index) {
+            if self.marked.remove(&item.id) {
+                self.marked.insert(id.clone());
+            }
             item.id = id;
             item.title = title;
         }
@@ -526,6 +599,51 @@ mod tests {
         assert_eq!(v.items()[0].id, "renamed");
         assert_eq!(v.items()[0].title, "Renamed");
         assert_eq!(v.index_of("renamed"), Some(0));
+    }
+
+    #[test]
+    fn marks_follow_the_sketch_through_inserts_removes_and_renames() {
+        let mut v = view(5, 5);
+        v.toggle_mark(1);
+        v.toggle_mark(3);
+        assert_eq!(v.marked(), vec![1, 3]);
+        assert_eq!(v.selected_index(), 3, "印を付けた作品へカーソルも動く");
+
+        v.insert(0, GalleryItem::new("aaa", "Aaa", 0));
+        assert_eq!(v.marked(), vec![2, 4], "手前へ差し込まれてもずれない");
+        v.remove(2);
+        assert_eq!(v.marked(), vec![3], "消した作品の印は落ちる");
+        v.rename(3, "renamed".into(), "Renamed".into());
+        assert!(v.is_marked(3), "改名しても印は残る");
+
+        v.toggle_mark(3);
+        assert_eq!(v.marked_len(), 0);
+    }
+
+    #[test]
+    fn a_range_mark_runs_from_the_cursor_in_display_order() {
+        let mut v = view(6, 3);
+        v.select(1);
+        v.mark_range(4);
+        assert_eq!(v.marked(), vec![1, 2, 3, 4]);
+        assert_eq!(v.selected_index(), 1, "範囲指定ではカーソルは動かない");
+
+        v.clear_marks();
+        v.select(4);
+        v.mark_range(2);
+        assert_eq!(v.marked(), vec![2, 3, 4], "逆向きでもよい");
+    }
+
+    #[test]
+    fn mark_all_respects_the_filter_and_the_fallback_is_the_cursor() {
+        let mut v = view(4, 2);
+        assert_eq!(v.marked_or_selected(), vec![0], "印が無ければカーソルの作品");
+
+        v.set_filter(Filter { text: "1".into(), ..Filter::default() });
+        v.mark_all_visible();
+        assert_eq!(v.marked(), vec![1], "隠れている作品には付かない");
+        v.set_filter(Filter::default());
+        assert_eq!(v.marked_or_selected(), vec![1]);
     }
 
     #[test]

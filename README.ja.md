@@ -48,18 +48,23 @@ cargo run --release
 | `R` | ランダムな作品を開く |
 | `N` | 新規作成 |
 | `E` | 選択中の作品を編集 |
-| `Delete` / `Backspace` | 削除 (確認あり) |
+| `Delete` / `Backspace` | 選択中の作品 (印があればそれら全部) を確認のうえ削除 |
 | `S` / ★クリック | お気に入り |
 | `T` | 選択中のサムネイルを作り直す |
 | `V` | 表示方式を切り替え (グリッド → 大型カード → リスト) |
 | `C` | 選択中の作品をコレクションへ出し入れ |
 | `O` / ↗クリック | リンクをブラウザで開く |
 | `P` | スライドショーの開始 / 停止 |
+| `Ctrl`+クリック | 印を付ける (複数選択)。`Shift`+クリックで範囲、`Ctrl`+`A` で表示中の全部 |
+| `X` | 印を付けた作品 (無ければ選択中の作品) を JSON へ書き出す |
+| `I` | エクスポートした JSON から作品を取り込む |
+| `Ctrl`+`C` | 印を付けた作品 (無ければ選択中の作品) をエクスポートと同じ JSON でクリップボードへ |
+| `Ctrl`+`V` | ペースト: コピーした JSON なら作品を追加、ただの文字列ならそれをソースにした新しい作品 |
 | 検索欄 | タイトル・id の部分一致 |
 | `F` / `F11` | 全画面 |
 | `L` | UI 言語を切り替え |
 | `,` / `Settings` ボタン | 設定 |
-| `Esc` | 終了 |
+| `Esc` | 印を解く → 全画面を抜ける → 終了 |
 
 **Viewer** (設計書 §8.1)
 
@@ -252,11 +257,50 @@ Windows では `cmd /C start` を使わない。URL の `&` を cmd が自分で
 cargo run --release -- --capture-all ./out
 ```
 
+### エクスポートとインポート (設計書 §27)
+
+`Ctrl`+クリック、`Shift`+クリック (範囲)、`Ctrl`+`A` (絞り込みで表示中の全部)
+で作品に印を付ける。見出しに件数が出る。`X` で、印を付けた作品 (何も無ければ選択中の作品) を OS の保存ダイアログで選んだ
+`*.tsubu.json` 1 つに書き出す。中身は作品ごとに id・名前・作者・リンク・タグ・
+お気に入り・ソース。サムネイルは入れない (取り込んだ側で作り直す)。
+
+`I` でエクスポートファイルを開くと、入っている作品が名前・
+作者・タグつきで並ぶ。取り込むものにチェックを付けて **取り込む** (か `Enter`)。
+同じ id の作品が既にあるものは `spiral-2` のように別名で追加し、既存には触らない
+(一覧の id の横にそう書く)。取り込んだ作品はコンパイルして `<data>/sketches/` へ
+保存し、メタデータを付けてサムネイルを作る。
+
+```json
+{ "app": "TsubuGallery", "format": 1, "exported_at": 1788048000,
+  "sketches": [ { "id": "spiral", "title": "Spiral", "author": "", "link": "",
+                  "tags": ["abstract"], "favorite": false, "source": "…" } ] }
+```
+
+### コピー・ペーストとまとめて削除
+
+`Ctrl`+`C` で、印を付けた作品 (無ければ選択中の作品) をエクスポートと同じ JSON で
+クリップボードへ写す。`Ctrl`+`V` で複製できるし、テキストが通る経路なら何でも
+使って別のデータ領域や別のマシンへ持っていける。クリップボードがそれ以外
+(たとえば X の投稿のコード) なら、`Ctrl`+`V` はその文字列をソースにした新しい作品
+`pasted`, `pasted-2`, … を作る。名前が重なればインポートと同じく別名になる。
+
+印がある状態で `Delete` を押すと「N 件の作品」と一度だけ確認し、ファイル・
+サムネイル・メタデータごと全部消す。
+
+### 保存場所
+
+データ領域 (作品・サムネイル・`library.sqlite3`・ログ) の置き場は
+**設定 → データ → 保存場所** から変えられる。OS のフォルダ選択が開く。選んだ
+場所は *既定の* データ領域にある `config.json` に書かれ (動かない場所に置く
+必要があるため)、次回起動から効く。今あるファイルは移動しないので、持って
+いきたければ手でコピーする。**既定に戻す** で指定を消す。`TSUBU_DATA_DIR` が
+あればそちらが優先で、設定画面にもその旨が出る。
+
 ### 環境変数
 
 | 変数 | 効果 |
 |---|---|
-| `TSUBU_DATA_DIR` | データ領域の差し替え |
+| `TSUBU_DATA_DIR` | データ領域の差し替え (設定より優先) |
 | `TSUBU_START_SCREEN` | 起動画面を上書き: `gallery` / `viewer` / `editor` / `settings`。指定が無ければ設定に従う |
 | `RUST_LOG` | ログの詳しさ。既定は `warn` (下記「ログ」) |
 
@@ -268,6 +312,9 @@ cargo run --release -- --capture-all ./out
   instance.lock      起動中の印 (下記「多重起動の防止」)
   cache/             Bytecode キャッシュ (未使用。下記「保留した最適化」を参照)
   logs/tsubu.log     実行ログ (下記「ログ」)
+
+<既定のデータ領域>/
+  config.json        データ領域の置き場 (設定で変えたときだけ)
 ```
 
 ### ログ
@@ -368,6 +415,7 @@ GPU については、wgpu が Vulkan / DX12 / OpenGL の 3 つを候補にす�
 | ビューア | 全画面で開く / **画面への収め方** / フレームレート / 再生速度 / 次の作品の選び方 / 隣の作品を先に読む / スライドショーの間隔 / スクリーンセーバー |
 | サムネイル | 撮るフレーム / 画質 |
 | 実行 | 1 フレームの上限 |
+| データ | 保存場所 (上記「保存場所」。DB ではなく `config.json` に持つ) |
 
 **画面への収め方**は、作品が宣言したキャンバスと窓の形が違うときにどうするかを
 決める。つぶやき系はたいてい正方形なので、横長の窓では左右に余白の帯が出る。
@@ -546,13 +594,15 @@ void draw() {
 
 `.pde` を置けば動く。**Processing (Java Mode)**・**p5.js**・**つぶやきGLSL** の
 どれでも受ける。どれで書かれているかは自動で判定するので、書き分けの指定は
-要らない (設計書 §23.2 の Frontend 交換)。
+要らない (設計書 §23.2 の Frontend 交換)。FragCoord.xyz の短縮記法 **GOLF** は
+GLSL の道に乗る。先に つぶやきGLSL へ展開する ([GOLF](#golf-fragcoordxyz))。
 
 ```text
 Processing Lite ─┐
                  ├─ AST → Bytecode → VM ─┐
 p5.js subset ────┘                        ├─ Renderer
 つぶやきGLSL ─── naga → WGSL → wgpu ──────┘
+GOLF ─── 展開 ──┘
 ```
 
 Bytecode から下は共通で、VM の値だけ配列・オブジェクト・関数まで広げてある。
@@ -1032,6 +1082,13 @@ FragCoord / ShaderToy 形式の `void mainImage(out vec4, in vec2)` も使える
 入口を使う作品では、`iResolution` (`vec3`) を `r`、`iTime` (`float`) を `t` と
 同じ値で用意する。
 
+FragCoord.xyz の素の `void main()` 形式も動く。そこでは `u_resolution` (`vec3`)、
+`u_time`、`u_mouse` (`vec4`、px 単位)、`u_frame` (`int`)、出力の `fragColor` が
+宣言なしで供給される。`mainImage` の無いソースにこれらの語があれば `r` `t` `m`
+`f` `o` へ写し、作者が重ねて書いた `uniform vec2 u_resolution;` は空行にする
+(行は残すのでエラー行はずれない)。複数行の `#define … \`、関数形式マクロ、
+`#if AA > 1` は naga のプリプロセッサがそのまま通す。
+
 ### twigl との違い
 
 | | 理由 |
@@ -1045,6 +1102,60 @@ FragCoord / ShaderToy 形式の `void mainImage(out vec4, in vec2)` も使える
 `gl_FragCoord` の上下と `z` は OpenGL の規約に合わせてある。wgpu は左上原点で
 `z` も 0..1 をそのまま使うため、揃えないと絵が上下逆になったり `FC.z` を使う
 作品が変わったりする。
+
+### GOLF (FragCoord.xyz)
+
+[FragCoord.xyz](https://fragcoord.xyz/docs#golf) には、フラグメントシェーダーを
+投稿に収まる文字数へ詰めるための **GOLF** という記法がある。これで書かれた作品
+(XorDev 氏のものなど) もそのまま置ける。投稿の 1 行目はたいてい題名なので、
+型名でも予約語でもない語だけの行は読み飛ばす。
+
+```text
+Fever
+f z,d
+@(70)
+{
+f3 p = z * nor(2*C.rgb - R.xyy)
+p.xy *= mat2(cos(z*.5+f4(,33,11,)))
+p.z-=T;
+d=2; @(5) d+=d,
+p += sin(p.yzx*d+z) / d
+z += min(abs(cos(p.y)),d=len(1/tan(p.xz)))/4;
+O += f4(1.1+sin(p),)/d
+}
+O = tanh(O / 2e2)
+```
+
+GOLF は文字列の置き換えで、行を保ったまま つぶやきGLSL へ展開してから、
+ほかのシェーダーと同じ道を通す。エラーの行は貼ったソースの行を指す。
+
+```text
+GOLF → 展開 → つぶやきGLSL → naga → WGSL → wgpu
+```
+
+| GOLF | 展開後 |
+|---|---|
+| `f` `f2` `f3` `f4` / `i2`… / `u2`… / `b2`… / `m2`… / `s2` | `float` `vec2` `vec3` `vec4` / `ivec` / `uvec` / `bvec` / `mat` / `sampler2D` |
+| `@(N)` `@(i, N)` `@(i, from, N)` | `for (int _fc = 0; _fc < N; _fc++)`。入れ子は `_fc1` `_fc2`… |
+| `nor` `len` `crs` `clm` `sms` `stp` `flr` `frc` `sgn` `sqt` `isq` `rfl` `rfr` `dst` `fwd` `asn` `acs` `atn` `at2` `ex2` `lg2` `cel` `rnd` `rad` `deg` `ddx` `ddy` `det` `trp` `inv` `mcm` (古い 2 文字の `sn` `cs` `ab` … も) | GLSL の正式な関数名 |
+| `R` `T` `F` `C` `O` `M` | `vec3(r, 1)` `t` `f` `FC` `o` `vec4(m * r, 0, 0)` |
+| `f4(,33,11,)` | 空の引数は `0.0` |
+| `;` の無い行 | 補う。行末が `,` `{` `}` の行と `if` / `for` の頭は除く |
+| `a ** b` / `~x` | `pow(a, b)` / `(1.0 - (x))` |
+| `#D` `#I` `#E` `#L` `#U` | `#define` `#ifdef` `#endif` `#else` `#undef` |
+| `sq x = x * x` | `float sq(float x) { return x * x; }` |
+| `f3 p = 0` | `vec3 p = vec3(0)` |
+| `r` `t` `m` `o` `FC` という名前のローカル | `_r` `_t` … に退避。`R` `T` `M` `O` `C` の写し先である twigl の uniform を隠さないように |
+
+`f3` のような短い型名や `@(`、`f name =` の宣言があり、`O` へ書いて `R` か `C`
+を読んでいれば GOLF と見る。GOLF は `mat2` のような GLSL の語も混ぜて書けるので、
+GLSL の判定より先に調べる。
+
+無いもの: 総称関数の `fX`、float 同士の `%`、テクスチャや多段パスから読む
+`P1`〜`P4` `B` `A` `K` `W`、それに `D` (フレーム間隔) `Y` (日付) `S` (スクロール)
+`G` (ドラッグ) `N` とカメラ系。これらは FragCoord の名前 (`u_pass1`
+`u_time_delta` …) へ展開され、naga が「無い」と言う。`R` は `vec3`、`M` は px
+単位で FragCoord に合わせてあり、`M.zw` のクリックは常に 0。
 
 ### 安全性
 
@@ -1097,7 +1208,7 @@ tsubugallery --version    # 版とログの置き場
 ```text
 core/              library / repository / locale / paths … UI とランタイムから独立した共通層
 renderer/          draw / batch / texture / capture … Processing API → 三角形 → wgpu
-                   shader … つぶやきGLSL → naga → WGSL
+                   shader … つぶやきGLSL → naga → WGSL / golf … GOLF → つぶやきGLSL
 processing-lite/   lexer → parser → ast → compiler ─┐
                    js/{lexer,parser,ast,compiler} ──┴→ bytecode → vm
                    glsl_sketch … GLSL 作品 / front … 方言を見分けて振り分ける
@@ -1169,7 +1280,9 @@ MSAA は 4x。Viewer もサムネイルも同じ `BatchRenderer` を通る。
   指定しても `BLEND` として描く
 - 未実装のその他の p5 API: 画像・オフスクリーン描画 (`image` / `loadImage` /
   `createGraphics`)、`strokeCap` / `strokeJoin`、`frameRate()`
-- Import / Export、GIF・動画の書き出し (設計書 §27)
+- GOLF の総称関数 `fX`、float 同士の `%`、テクスチャと多段パスの uniform
+  (`P1`〜`P4` `B` `A` `K` `W`)
+- GIF・動画の書き出し (設計書 §27)
 - OS のスクリーンセーバーとしての登録 (macOS `.saver` / Windows `.scr`)
 - Android / iOS (Phase 10, 11)
 

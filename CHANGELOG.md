@@ -8,6 +8,36 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.6.0 — 2026-08-30
+
+### Added
+
+- FragCoord.xyz's **GOLF** shorthand (`f3`, `@(N)`, `nor`, `R` `T` `C` `O`,
+  empty constructor arguments, optional semicolons, `**`, `~`, `#D`…) is
+  detected and expanded to つぶやきGLSL before compilation, so XorDev-style
+  posts drop in as they are. A leading title line is skipped
+- FragCoord.xyz `void main()` shaders: `u_resolution`, `u_time`, `u_mouse`,
+  `u_frame` and `fragColor` are supplied as on FragCoord, and a redundant
+  `uniform … u_resolution;` declaration is ignored
+- Multi-select in the gallery (`Ctrl`+click, `Shift`+click, `Ctrl`+`A`)
+  and **Export** (`X`) of the marked sketches to a single `*.tsubu.json` with
+  source, title, author, link, tags and favourite
+- **Import** (`I`): open an exported file, see its sketches with name, author
+  and tags, tick the ones to bring in. Name clashes are added under a new name
+- **Storage location** in Settings → Data: move the data directory via the OS
+  folder picker; recorded in `config.json` and used from the next launch
+- `Ctrl`+`C` / `Ctrl`+`V` in the gallery: copy the marked sketches as export
+  JSON and paste them back (duplicates get new names); pasting plain text makes
+  a new sketch from it
+- `Delete` with marks set removes all marked sketches after one confirmation
+- New dependencies `rfd` (OS file and folder dialogs) and `arboard` (clipboard)
+
+### Fixed
+
+- "System" language now follows the Windows user display language
+  (`GetUserDefaultLocaleName`). It only read `LANG`-style environment
+  variables, which Windows does not set, so it always fell back to English
+
 ## 0.5.1 — 2026-08-23
 
 ### Fixed

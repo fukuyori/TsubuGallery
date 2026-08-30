@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use tsubu_renderer::{Graphics, ShaderPaint, shader};
+use tsubu_renderer::{Graphics, ShaderPaint, golf, shader};
 
 use crate::dialect::Dialect;
 use crate::lexer::CompileError;
@@ -20,6 +20,8 @@ pub struct GlslSketch {
     wgsl: Arc<str>,
     /// パイプラインを引くための鍵。WGSL から作るので同じ作品なら同じ値。
     key: u64,
+    /// どの記法で書かれていたか。GLSL か GOLF。
+    dialect: Dialect,
 }
 
 impl GlslSketch {
@@ -31,7 +33,18 @@ impl GlslSketch {
         let wgsl = shader::compile(source)
             .map_err(|e| CompileError::new(e.line, e.column, e.message))?;
         let key = fingerprint(&wgsl);
-        Ok(Self { wgsl: wgsl.into(), key })
+        Ok(Self { wgsl: wgsl.into(), key, dialect: Dialect::Glsl })
+    }
+
+    /// FragCoord.xyz の GOLF を、つぶやき GLSL へ展開してからコンパイルする。
+    ///
+    /// 展開は行数を保つので、エラーの行はそのまま元のソースを指す。
+    /// トップレベルに関数定義があるときだけ、関数を前へ出すぶんずれる。
+    pub fn compile_golf(source: &str) -> Result<Self, CompileError> {
+        let glsl = golf::to_glsl(source);
+        let mut sketch = Self::compile(&glsl)?;
+        sketch.dialect = Dialect::Golf;
+        Ok(sketch)
     }
 
     /// 翻訳結果の WGSL。中身を見たいときのために出しておく。
@@ -58,7 +71,7 @@ impl Sketch for GlslSketch {
     }
 
     fn dialect(&self) -> Option<Dialect> {
-        Some(Dialect::Glsl)
+        Some(self.dialect)
     }
 }
 
@@ -82,6 +95,21 @@ mod tests {
             .expect("通る");
         assert!(sketch.wgsl().contains("@fragment"));
         assert_eq!(sketch.dialect(), Some(Dialect::Glsl));
+    }
+
+    #[test]
+    fn a_golf_shader_compiles_and_says_so() {
+        let sketch = GlslSketch::compile_golf("f2 uv = C.xy / R.xy\nO = f4(uv, sin(T), 1.)")
+            .expect("通る");
+        assert!(sketch.wgsl().contains("@fragment"));
+        assert_eq!(sketch.dialect(), Some(Dialect::Golf));
+    }
+
+    #[test]
+    fn a_broken_golf_shader_points_at_its_own_line() {
+        let error =
+            GlslSketch::compile_golf("f a = 1.\nO = f4(nosuch)").err().expect("通らない");
+        assert_eq!(error.line, 2);
     }
 
     #[test]

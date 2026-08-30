@@ -26,6 +26,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tsubu_core::config::Config;
+use tsubu_core::exchange::{self, ExportFile, ExportedSketch};
 use tsubu_core::repository::{self, CompileStatus, Repository, SketchMeta};
 use tsubu_core::settings::{Choice, PlaybackSpeed, Settings, StartScreen, ViewMode};
 use tsubu_core::{DataPaths, InstanceLock, LanguagePreference, Locales, LockError};
@@ -39,7 +41,7 @@ use winit::window::{Fullscreen, Icon, Window, WindowId};
 
 use editor::Editor;
 use editor_ui::EditorAction;
-use gallery_ui::{GalleryAction, GalleryOutput, GalleryUi};
+use gallery_ui::{GalleryAction, GalleryOutput, GalleryUi, ImportEntry, ImportPreview};
 use gfx::Gfx;
 use settings_ui::{SettingsAction, SettingsUi};
 use thumbnail::{Completed as ThumbnailCompleted, ThumbnailLoader};
@@ -79,9 +81,11 @@ TsubuGallery — 短い Processing / p5.js / GLSL 作品のギャラリー
   動かない作品は `ERROR sketch` の行に、ファイルと行・列まで入ります。
 
 環境変数
-  TSUBU_DATA_DIR       データ領域の場所
+  TSUBU_DATA_DIR       データ領域の場所 (設定画面の「保存場所」より優先)
   TSUBU_START_SCREEN   起動画面を上書き: gallery / viewer / editor / settings
   RUST_LOG             ログの詳しさ (既定 warn。info / debug で増やす)
+
+データ領域の場所は設定画面で変えられ、既定のデータ領域の config.json に残ります。
 ";
 
 fn main() {
@@ -324,10 +328,10 @@ struct App {
     active_thumbnail: Option<ActiveThumbnailJob>,
     /// 編集中の作品。
     editor: Option<Editor>,
-    /// 削除の確認待ち。
     /// 最後にキャンバスを消したときの Viewer の世代。
     canvas_epoch: u64,
-    pending_delete: Option<usize>,
+    /// 削除の確認待ち。複数選択からなら 2 件以上入る。
+    pending_delete: Option<Vec<usize>>,
     /// 編集を閉じたときに戻る画面。
     return_screen: Screen,
     /// スライドショー中なら、次に送る時刻 (設計書 §27)。
@@ -344,6 +348,18 @@ struct App {
     next_redraw: Option<Instant>,
     /// winit へ RedrawRequested をすでに依頼している。
     redraw_pending: bool,
+    /// いま押されている修飾キー。Ctrl+A のような組み合わせに使う。
+    modifiers: winit::keyboard::ModifiersState,
+    /// 読み込み画面を開いているなら、その中身 (設計書 §27 の Import)。
+    import: Option<PendingImport>,
+    /// データ領域の外にある設定 (置き場)。変更は次回起動から効く。
+    config: Config,
+}
+
+/// 読み込み画面の状態。画面に出す要約と、取り込むときに要る本体を対で持つ。
+struct PendingImport {
+    preview: ImportPreview,
+    sketches: Vec<ExportedSketch>,
 }
 
 impl App {
@@ -472,6 +488,9 @@ impl App {
             settings,
             next_redraw: Some(Instant::now()),
             redraw_pending: false,
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            import: None,
+            config: Config::load(&DataPaths::default_root()),
         }
     }
 
@@ -1159,6 +1178,94 @@ impl App {
         index
     }
 
+    /// 確認に答えたので、待っていた削除を実行する。
+    ///
+    /// 後ろから消す。前から消すと、残りの添字がずれる。
+    fn confirm_delete(&mut self) {
+        let Some(mut indices) = self.pending_delete.take() else { return };
+        indices.sort_unstable();
+        indices.dedup();
+        let count = indices.len();
+        for index in indices.into_iter().rev() {
+            self.delete_sketch(index);
+        }
+        if count > 1 {
+            let message = self.locales.t("gallery.deleted_many").replace("{n}", &count.to_string());
+            if let Some(ui) = self.ui.as_mut() {
+                ui.toast(message);
+            }
+        }
+    }
+
+    // ---- コピーとペースト -------------------------------------------------
+
+    /// 印の付いた作品 (無ければカーソルの作品) を、エクスポートと同じ JSON で
+    /// クリップボードへ写す。
+    fn copy_marked(&mut self) {
+        let indices = self.gallery.marked_or_selected();
+        let sketches = self.exported(&indices);
+        if sketches.is_empty() {
+            return;
+        }
+        let count = sketches.len();
+        let file = ExportFile::new(repository::now(), sketches);
+        let message = match serde_json::to_string_pretty(&file)
+            .map_err(|e| e.to_string())
+            .and_then(|text| {
+                arboard::Clipboard::new()
+                    .and_then(|mut c| c.set_text(text))
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(()) => self.locales.t("gallery.copied").replace("{n}", &count.to_string()),
+            Err(e) => {
+                log::error!("クリップボードへ写せませんでした: {e}");
+                format!("{}: {e}", self.locales.t("gallery.copy_failed"))
+            }
+        };
+        if let Some(ui) = self.ui.as_mut() {
+            ui.toast(message);
+        }
+    }
+
+    /// クリップボードから作品を作る。
+    ///
+    /// 中身がこのアプリの JSON なら、その作品を (同名は別名で) まとめて足す。
+    /// ただの文字列なら、それをソースにした新しい作品 1 つにする。X の投稿を
+    /// そのまま貼れるように。
+    fn paste(&mut self) {
+        let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            Ok(text) => text,
+            Err(e) => {
+                log::warn!("クリップボードを読めませんでした: {e}");
+                return;
+            }
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+
+        let sketches = match serde_json::from_str::<ExportFile>(&text) {
+            Ok(file) if file.app == "TsubuGallery" => file.sketches,
+            _ => {
+                let id = tsubu_core::library::unique_id(&self.paths.sketches(), "pasted");
+                vec![ExportedSketch {
+                    title: tsubu_core::library::title_from_id(&id),
+                    id,
+                    author: String::new(),
+                    link: String::new(),
+                    tags: Default::default(),
+                    favorite: false,
+                    source: text,
+                }]
+            }
+        };
+        let added = self.add_sketches(sketches);
+        let message = self.locales.t("gallery.pasted").replace("{n}", &added.to_string());
+        if let Some(ui) = self.ui.as_mut() {
+            ui.toast(message);
+        }
+    }
+
     /// 削除を実行する。確認済みの前提。
     fn delete_sketch(&mut self, index: usize) {
         let Some(item) = self.gallery.items().get(index) else {
@@ -1290,14 +1397,40 @@ impl App {
         // 確認中は、答えるまで他の操作を受けない。
         if self.pending_delete.is_some() {
             match key {
-                KeyCode::Enter | KeyCode::NumpadEnter => {
-                    if let Some(index) = self.pending_delete.take() {
-                        self.delete_sketch(index);
-                    }
-                }
+                KeyCode::Enter | KeyCode::NumpadEnter => self.confirm_delete(),
                 KeyCode::Escape => self.pending_delete = None,
                 _ => {}
             }
+            return;
+        }
+
+        // Ctrl+C / Ctrl+V: 作品のコピーとペースト。
+        if self.modifiers.control_key() {
+            match key {
+                KeyCode::KeyC => {
+                    self.copy_marked();
+                    return;
+                }
+                KeyCode::KeyV => {
+                    self.paste();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // 読み込み画面も同じ。Enter で取り込み、Esc でやめる。
+        if self.import.is_some() {
+            match key {
+                KeyCode::Enter | KeyCode::NumpadEnter => self.finish_import(),
+                KeyCode::Escape => self.import = None,
+                _ => {}
+            }
+            return;
+        }
+
+        // Ctrl+A: 表示中の全作品に印を付ける。
+        if key == KeyCode::KeyA && self.modifiers.control_key() {
+            self.gallery.mark_all_visible();
             return;
         }
 
@@ -1335,7 +1468,8 @@ impl App {
             KeyCode::KeyE => self.open_editor(selected),
             KeyCode::Delete | KeyCode::Backspace => {
                 if !self.gallery.is_empty() {
-                    self.pending_delete = Some(selected);
+                    // 印があればそれら全部、無ければカーソルの作品。
+                    self.pending_delete = Some(self.gallery.marked_or_selected());
                 }
             }
             KeyCode::KeyT => {
@@ -1354,9 +1488,14 @@ impl App {
                 }
             }
             KeyCode::KeyO => self.open_selected_link(selected),
+            KeyCode::KeyX => self.export_marked(),
+            KeyCode::KeyI => self.begin_import(),
             KeyCode::Escape => {
                 if self.assigning.take().is_some() {
                     // まず割り当て画面を閉じる。
+                } else if self.gallery.marked_len() > 0 {
+                    // 次に複数選択を解く。終了はそのあと。
+                    self.gallery.clear_marks();
                 } else if self.fullscreen {
                     self.toggle_fullscreen();
                 } else {
@@ -1824,10 +1963,16 @@ impl App {
         {
             let screen = self.screen;
             // 可変借用の前に、必要な文字列は取り出しておく。
-            let pending_delete = self
-                .pending_delete
-                .and_then(|i| self.gallery.items().get(i))
-                .map(|i| i.title.clone());
+            // 1 件なら作品名、複数なら件数を確認画面に出す。
+            let pending_delete = self.pending_delete.as_ref().map(|indices| match indices.as_slice() {
+                [index] => self
+                    .gallery
+                    .items()
+                    .get(*index)
+                    .map(|i| i.title.clone())
+                    .unwrap_or_default(),
+                many => self.locales.t("gallery.delete_many").replace("{n}", &many.len().to_string()),
+            });
             let collections = &self.collections;
             let assigning = self.assigning;
             let view_mode = self.settings.view_mode;
@@ -1841,6 +1986,11 @@ impl App {
                 });
             let card_size = self.settings.card_size;
             let show_titles = self.settings.show_titles;
+            let import = self.import.as_ref().map(|p| &p.preview);
+            let data_dir = self.paths.root();
+            let data_dir_pending =
+                self.config.data_dir.as_deref().filter(|dir| *dir != self.paths.root());
+            let data_dir_locked = DataPaths::overridden_by_env();
             let settings = &mut self.settings;
             let gallery = &mut self.gallery;
             let textures = &self.textures;
@@ -1894,13 +2044,22 @@ impl App {
                                 view_mode,
                                 card_size,
                                 show_titles,
+                                import,
                             },
                         );
                     }
                     Screen::Viewer => viewer_ui::build(ui, &overlay, locales),
                     Screen::Settings => {
-                        settings_actions =
-                            settings_ui::build(ui, &mut SettingsUi { settings, locales });
+                        settings_actions = settings_ui::build(
+                            ui,
+                            &mut SettingsUi {
+                                settings,
+                                locales,
+                                data_dir,
+                                data_dir_pending,
+                                data_dir_locked,
+                            },
+                        );
                     }
                     Screen::Editor => {
                         if let Some(editor) = editor.as_deref_mut() {
@@ -2017,8 +2176,216 @@ impl App {
             match action {
                 SettingsAction::Changed => self.apply_settings(),
                 SettingsAction::Close => self.close_settings(),
+                SettingsAction::ChooseDataDir => {
+                    let picked = rfd::FileDialog::new()
+                        .set_title(self.locales.t("settings.data_dir"))
+                        .set_directory(self.paths.root())
+                        .pick_folder();
+                    if let Some(dir) = picked {
+                        self.set_data_dir(Some(dir));
+                    }
+                }
+                SettingsAction::ResetDataDir => self.set_data_dir(None),
             }
         }
+    }
+
+    /// データ領域の置き場を config.json に書く。効くのは次回起動から。
+    ///
+    /// 既存の作品やサムネイルは動かさない。今のプロセスが握っているロックや
+    /// DB をそのままに、別の場所へ書き始めるほうが危ない。
+    fn set_data_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        let default_root = DataPaths::default_root();
+        // 既定の場所を選んだなら「指定なし」と同じ。
+        let dir = dir.filter(|d| *d != default_root);
+        self.config.data_dir = dir;
+        match self.config.save(&default_root) {
+            Ok(()) => {
+                let shown = self.config.data_dir.as_deref().unwrap_or(&default_root).display();
+                log::info!("データ領域の置き場を {shown} にしました (次回起動から)");
+                let message = self.locales.t("settings.data_dir.saved").to_string();
+                if let Some(ui) = self.ui.as_mut() {
+                    ui.toast(message);
+                }
+            }
+            Err(e) => {
+                log::error!("config.json を書けませんでした: {e}");
+                if let Some(ui) = self.ui.as_mut() {
+                    ui.toast(e.to_string());
+                }
+            }
+        }
+    }
+
+    // ---- Export / Import (設計書 §27) ---------------------------------------
+
+    /// 印の付いた作品 (無ければカーソルの作品) を 1 つの JSON へ書き出す。
+    fn export_marked(&mut self) {
+        let indices = self.gallery.marked_or_selected();
+        let sketches = self.exported(&indices);
+        if sketches.is_empty() {
+            return;
+        }
+        let now = repository::now();
+
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(self.locales.t("gallery.export"))
+            .set_file_name(exchange::default_file_name(now))
+            .add_filter("TsubuGallery", &["json"])
+            .save_file()
+        else {
+            return;
+        };
+
+        let count = sketches.len();
+        let message = match ExportFile::new(now, sketches).write(&path) {
+            Ok(()) => {
+                log::info!("{count} 件を {} へ書き出しました", path.display());
+                self.locales.t("gallery.exported").replace("{n}", &count.to_string())
+            }
+            Err(e) => {
+                log::error!("{} へ書き出せませんでした: {e}", path.display());
+                format!("{}: {e}", self.locales.t("gallery.export_failed"))
+            }
+        };
+        if let Some(ui) = self.ui.as_mut() {
+            ui.toast(message);
+        }
+    }
+
+    /// エクスポートファイルを選ばせ、中身を読み込み画面に出す。
+    fn begin_import(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(self.locales.t("gallery.import"))
+            .add_filter("TsubuGallery", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        let file = match ExportFile::read(&path) {
+            Ok(file) => file,
+            Err(e) => {
+                log::error!("{} を読めませんでした: {e}", path.display());
+                let message = format!("{}: {e}", self.locales.t("gallery.import_failed"));
+                if let Some(ui) = self.ui.as_mut() {
+                    ui.toast(message);
+                }
+                return;
+            }
+        };
+
+        let dir = self.paths.sketches();
+        let entries = file
+            .sketches
+            .iter()
+            .map(|s| ImportEntry {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                author: s.author.clone(),
+                tags: s.tags.iter().cloned().collect::<Vec<_>>().join(", "),
+                exists: tsubu_core::library::exists(&dir, &s.id),
+                checked: true,
+            })
+            .collect();
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        self.import = Some(PendingImport {
+            preview: ImportPreview { file_name, entries },
+            sketches: file.sketches,
+        });
+    }
+
+    /// 読み込み画面でチェックされた作品を取り込む。
+    ///
+    /// 同じ id が既にあれば `sketch-2` のように別名にし、既存には触らない。
+    fn finish_import(&mut self) {
+        let Some(pending) = self.import.take() else { return };
+        let chosen: Vec<ExportedSketch> = pending
+            .preview
+            .entries
+            .iter()
+            .zip(pending.sketches)
+            .filter(|(entry, _)| entry.checked)
+            .map(|(_, sketch)| sketch)
+            .collect();
+        let imported = self.add_sketches(chosen);
+        let message = self.locales.t("gallery.imported").replace("{n}", &imported.to_string());
+        if let Some(ui) = self.ui.as_mut() {
+            ui.toast(message);
+        }
+    }
+
+    /// 印の付いた作品を、書き出しの形にまとめる。
+    fn exported(&self, indices: &[usize]) -> Vec<ExportedSketch> {
+        indices
+            .iter()
+            .filter_map(|&index| {
+                let item = self.gallery.items().get(index)?;
+                let source = self.sources.get(index)?;
+                Some(ExportedSketch {
+                    id: item.id.clone(),
+                    title: item.title.clone(),
+                    author: item.author.clone(),
+                    link: item.link.clone(),
+                    tags: item.tags.clone(),
+                    favorite: item.favorite,
+                    source: source.text.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// 作品をまとめて足す。Import とペーストの共通部分。足せた数を返す。
+    ///
+    /// 同じ id が既にあれば `sketch-2` のように別名にし、既存には触らない。
+    /// 最後に足した作品を選ぶ。
+    fn add_sketches(&mut self, sketches: Vec<ExportedSketch>) -> usize {
+        let dir = self.paths.sketches();
+        let mut added = 0;
+        let mut last = None;
+
+        for sketch in sketches {
+            // 壊れた id (パス区切りなど) は、安全な名前に落としてから空きを探す。
+            let base = if tsubu_core::library::is_valid_id(&sketch.id) {
+                sketch.id.clone()
+            } else {
+                "sketch".to_string()
+            };
+            let id = tsubu_core::library::unique_id(&dir, &base);
+            if let Err(e) = tsubu_core::library::save(&dir, &id, &sketch.source) {
+                log::error!("{id} を書けませんでした: {e}");
+                if let Some(ui) = self.ui.as_mut() {
+                    ui.toast(e.to_string());
+                }
+                continue;
+            }
+
+            let source = loader::Source::from_id_and_text(&id, sketch.source);
+            let compiled = source.instantiate();
+            let index = self.insert_sketch(id.clone(), source, compiled);
+            self.gallery.set_tags(index, sketch.tags);
+            self.gallery.set_credit(index, sketch.author.trim(), sketch.link.trim());
+            if let Some(item) = self.gallery.items_mut_at(index) {
+                item.favorite = sketch.favorite;
+            }
+            self.invalidate_thumbnail(index, &id);
+            self.persist(index);
+            log::info!("{id} を取り込みました");
+            added += 1;
+            last = Some(id);
+        }
+
+        if let Some(id) = last
+            && let Some(index) = self.gallery.index_of(&id)
+        {
+            self.gallery.clear_marks();
+            self.gallery.select(index);
+            self.scroll_to_selected = true;
+        }
+        added
     }
 
     /// 画面の地の色。配色設定に合わせる。
@@ -2163,18 +2530,47 @@ impl App {
             {
                 continue;
             }
+            if self.import.is_some()
+                && !matches!(
+                    action,
+                    GalleryAction::ImportToggle(_)
+                        | GalleryAction::ImportSetAll(_)
+                        | GalleryAction::ImportConfirm
+                        | GalleryAction::ImportCancel
+                )
+            {
+                continue;
+            }
             match action.clone() {
                 GalleryAction::Open(index) => self.open_viewer(index),
-                GalleryAction::Select(index) => self.gallery.select(index),
+                GalleryAction::Select(index) => {
+                    // 修飾キー無しのクリックは、それまでの複数選択を解く。
+                    self.gallery.clear_marks();
+                    self.gallery.select(index);
+                }
+                GalleryAction::ToggleMark(index) => self.gallery.toggle_mark(index),
+                GalleryAction::MarkRange(index) => self.gallery.mark_range(index),
+                GalleryAction::ImportToggle(i) => {
+                    if let Some(entry) =
+                        self.import.as_mut().and_then(|p| p.preview.entries.get_mut(i))
+                    {
+                        entry.checked = !entry.checked;
+                    }
+                }
+                GalleryAction::ImportSetAll(checked) => {
+                    if let Some(pending) = self.import.as_mut() {
+                        for entry in &mut pending.preview.entries {
+                            entry.checked = checked;
+                        }
+                    }
+                }
+                GalleryAction::ImportConfirm => self.finish_import(),
+                GalleryAction::ImportCancel => self.import = None,
                 GalleryAction::ToggleFavorite(index) => {
                     self.gallery.toggle_favorite(index);
                     self.persist(index);
                 }
-                GalleryAction::ConfirmDelete => {
-                    if let Some(index) = self.pending_delete.take() {
-                        self.delete_sketch(index);
-                    }
-                }
+                GalleryAction::ConfirmDelete => self.confirm_delete(),
                 GalleryAction::CancelDelete => self.pending_delete = None,
                 GalleryAction::OpenSettings => self.open_settings(),
                 GalleryAction::OpenLink(index) => {
@@ -2317,6 +2713,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorEntered { .. } => self.cursor_inside = true,
             WindowEvent::CursorLeft { .. } => self.cursor_inside = false,
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
 
             WindowEvent::MouseInput {
                 state,

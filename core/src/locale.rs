@@ -185,9 +185,14 @@ fn normalize_tag(raw: &str) -> String {
 
 /// OS の言語設定を推定する。
 ///
-/// 環境変数だけを見る。Windows では `LANG` が無いことがあり、そのときは英語に
-/// なる。設定画面から選び直せるので、それで足りるとみている。
+/// Windows ではユーザーの表示言語 (`GetUserDefaultLocaleName`、`ja-JP` のような
+/// BCP 47) を引く。`LANG` などの環境変数は Windows には普通無いので、それだけを
+/// 見ると常に英語になってしまう。ほかの OS と、Windows で取れなかったときは
+/// 環境変数を見る。
 pub fn detect_system_language() -> String {
+    if let Some(tag) = windows_user_language() {
+        return tag;
+    }
     for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
         if let Ok(v) = std::env::var(key)
             && !v.is_empty()
@@ -200,9 +205,40 @@ pub fn detect_system_language() -> String {
     FALLBACK_LANGUAGE.to_string()
 }
 
+/// Windows のユーザー表示言語。取れなければ `None`。
+#[cfg(windows)]
+fn windows_user_language() -> Option<String> {
+    use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
+
+    // LOCALE_NAME_MAX_LENGTH (85)。ロケール名はこれより長くならない。
+    let mut buffer = [0u16; 85];
+    // SAFETY: バッファは 85 要素あり、長さもそのまま渡す。
+    // 戻り値は終端の NUL を含む文字数で、失敗なら 0。
+    let written = unsafe { GetUserDefaultLocaleName(buffer.as_mut_ptr(), buffer.len() as i32) };
+    if written <= 1 {
+        return None;
+    }
+    let tag = String::from_utf16_lossy(&buffer[..written as usize - 1]);
+    (!tag.is_empty()).then_some(tag)
+}
+
+#[cfg(not(windows))]
+fn windows_user_language() -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows ではユーザーの表示言語が BCP 47 の形で取れる。
+    #[cfg(windows)]
+    #[test]
+    fn windows_reports_the_user_language() {
+        let tag = windows_user_language().expect("表示言語が取れる");
+        assert!(tag.contains('-'), "BCP 47 の形ではない: {tag}");
+        assert_eq!(detect_system_language(), tag, "環境変数より表示言語が先");
+    }
 
     #[test]
     fn builtin_languages_load() {
