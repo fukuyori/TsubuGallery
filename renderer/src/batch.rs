@@ -5,6 +5,7 @@
 //! オフスクリーンのサムネイル生成で同じインスタンスを共有する。
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use wgpu::util::DeviceExt as _;
 
@@ -280,6 +281,12 @@ impl BatchRenderer {
     /// 合成方法が変わるところでパイプラインを差し替える。ふつうの作品は
     /// 区間が 1 つなので、実質 1 ドローコールのまま。
     pub fn render(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.render_range(pass, 0..u32::MAX);
+    }
+
+    /// 指定した添字区間だけを描く。キャンバスフィルタの前後を別パスにするために
+    /// 使い、合成方法のバッチ境界とは独立に区切れる。
+    pub fn render_range(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
         let Some(pending) = self.pending.as_ref() else { return };
         if pending.batches.is_empty() {
             return;
@@ -291,13 +298,18 @@ impl BatchRenderer {
 
         let mut current: Option<(BlendMode, bool)> = None;
         for batch in &pending.batches {
+            let start = batch.start.max(range.start);
+            let end = batch.end.min(range.end);
+            if start >= end {
+                continue;
+            }
             if current != Some((batch.blend, batch.depth)) {
                 let key = (pending.format, pending.samples, batch.blend, batch.depth);
                 let Some(pipeline) = self.pipelines.get(&key) else { continue };
                 pass.set_pipeline(pipeline);
                 current = Some((batch.blend, batch.depth));
             }
-            pass.draw_indexed(batch.start..batch.end, 0, 0..1);
+            pass.draw_indexed(start..end, 0, 0..1);
         }
     }
 

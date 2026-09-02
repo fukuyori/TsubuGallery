@@ -2855,7 +2855,7 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 
 [[package]]
 name = "tsubu-app"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arboard",
  "egui",
@@ -2878,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "tsubu-core"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "dirs",
  "env_logger",
@@ -2892,21 +2892,21 @@ dependencies = [
 
 [[package]]
 name = "tsubu-gallery"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "tsubu-core",
 ]
 
 [[package]]
 name = "tsubu-processing-lite"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "tsubu-renderer",
 ]
 
 [[package]]
 name = "tsubu-renderer"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytemuck",
  "log",

@@ -95,6 +95,32 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
     }
 
     #[test]
+    fn negative_array_keys_are_properties_without_changing_length() {
+        assert_eq!(eval("(a=[],a[-9]=7,a[-9]+a.length)"), 7.0);
+        // 疎な二次元配列で、外側のキーが負でも内側へ続けて書ける。
+        assert_eq!(
+            eval("(a=[],a[-9]=[],a[-9][12]=34,a[-9][12])"),
+            34.0
+        );
+    }
+
+    #[test]
+    fn blur_filter_is_recorded_at_its_call_position() {
+        let g = run(
+            "draw=_=>{createCanvas(100,100);background(0);circle(20,20,10);filter(BLUR);circle(80,80,10)}",
+            1,
+        );
+        assert_eq!(g.draw_list().filters.len(), 1);
+        let filter = g.draw_list().filters[0];
+        assert!(filter.at > 0, "最初の円より前に記録されています");
+        assert!(
+            filter.at < g.draw_list().indices.len() as u32,
+            "2 個目の円までぼけます"
+        );
+        assert_eq!(filter.radius, 1.0);
+    }
+
+    #[test]
     fn objects_carry_named_fields() {
         assert_eq!(eval("({x:1,y:2}).y"), 2.0);
         assert_eq!(eval("(p={x:1},p.x+=5,p.x)"), 6.0);

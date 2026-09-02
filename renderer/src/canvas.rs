@@ -10,6 +10,9 @@
 //! 図形を描く。
 
 use std::collections::HashMap;
+use std::ops::Range;
+
+use wgpu::util::DeviceExt;
 
 use crate::batch::{BatchRenderer, DEPTH_FORMAT, SAMPLE_COUNT, depth_state};
 use crate::draw::{Color, Graphics, ShaderPaint};
@@ -39,6 +42,50 @@ fn vs(@builtin(vertex_index) i: u32) -> Out {
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
     return textureSample(src, samp, in.uv);
+}
+"#;
+
+/// `filter(BLUR)` 用の小さなガウシアンブラー。呼び出し位置までのキャンバスを
+/// 3x3 でぼかし、その後の図形は別パスで鮮明なまま重ねる。
+const BLUR_SHADER: &str = r#"
+struct Out {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+struct Params {
+    texel: vec2<f32>,
+    radius: f32,
+    _pad: f32,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> Out {
+    let x = f32((i << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(i & 2u) * 2.0 - 1.0;
+    var out: Out;
+    out.pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>(x * 0.5 + 0.5, 0.5 - y * 0.5);
+    return out;
+}
+
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@fragment
+fn fs(in: Out) -> @location(0) vec4<f32> {
+    let d = params.texel * params.radius;
+    var color = textureSample(src, samp, in.uv) * 4.0;
+    color += textureSample(src, samp, in.uv + vec2<f32>( d.x, 0.0)) * 2.0;
+    color += textureSample(src, samp, in.uv + vec2<f32>(-d.x, 0.0)) * 2.0;
+    color += textureSample(src, samp, in.uv + vec2<f32>(0.0,  d.y)) * 2.0;
+    color += textureSample(src, samp, in.uv + vec2<f32>(0.0, -d.y)) * 2.0;
+    color += textureSample(src, samp, in.uv + vec2<f32>( d.x,  d.y));
+    color += textureSample(src, samp, in.uv + vec2<f32>(-d.x,  d.y));
+    color += textureSample(src, samp, in.uv + vec2<f32>( d.x, -d.y));
+    color += textureSample(src, samp, in.uv + vec2<f32>(-d.x, -d.y));
+    return color / 16.0;
 }
 "#;
 
@@ -162,6 +209,160 @@ impl Blit {
         bind: &wgpu::BindGroup,
     ) {
         let pipeline = self.pipeline(device, format, samples, depth);
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+/// 1 枚のキャンバステクスチャを別の面へぼかして写すパイプライン。
+struct Blur {
+    shader: wgpu::ShaderModule,
+    layout: wgpu::BindGroupLayout,
+    pipeline_layout: wgpu::PipelineLayout,
+    sampler: wgpu::Sampler,
+    pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+}
+
+impl Blur {
+    fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tsubu.blur.shader"),
+            source: wgpu::ShaderSource::Wgsl(BLUR_SHADER.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tsubu.blur.layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tsubu.blur.pipeline_layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tsubu.blur.sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            shader,
+            layout,
+            pipeline_layout,
+            sampler,
+            pipelines: HashMap::new(),
+        }
+    }
+
+    fn bind(
+        &self,
+        device: &wgpu::Device,
+        view: &wgpu::TextureView,
+        size: (u32, u32),
+        radius: f32,
+    ) -> wgpu::BindGroup {
+        let params = [
+            1.0 / size.0.max(1) as f32,
+            1.0 / size.1.max(1) as f32,
+            radius,
+            0.0,
+        ];
+        // 同じフレームに半径の違う filter() が複数あっても、各パスが自分の値を
+        // 保つようバインドグループごとに小さなバッファを持たせる。
+        let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tsubu.blur.uniforms"),
+            contents: bytemuck::cast_slice(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tsubu.blur.bind"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniforms.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    fn pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> &wgpu::RenderPipeline {
+        self.pipelines.entry(format).or_insert_with(|| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("tsubu.blur.pipeline"),
+                layout: Some(&self.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &self.shader,
+                    entry_point: Some("vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &self.shader,
+                    entry_point: Some("fs"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        })
+    }
+
+    fn draw(
+        &mut self,
+        device: &wgpu::Device,
+        pass: &mut wgpu::RenderPass<'_>,
+        format: wgpu::TextureFormat,
+        bind: &wgpu::BindGroup,
+    ) {
+        let pipeline = self.pipeline(device, format);
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.draw(0..3, 0..1);
@@ -314,6 +515,7 @@ pub struct Canvas {
     format: wgpu::TextureFormat,
     msaa: MsaaTarget,
     blit: Blit,
+    blur: Blur,
     /// つぶやき GLSL 用。使う作品を開くまで作らない。
     shader: Option<ShaderStage>,
     faces: Vec<Face>,
@@ -332,6 +534,7 @@ impl Canvas {
             format,
             msaa: MsaaTarget::new(SAMPLE_COUNT),
             blit: Blit::new(device),
+            blur: Blur::new(device),
             shader: None,
             faces: Vec::new(),
             depth: None,
@@ -399,6 +602,14 @@ impl Canvas {
                 self.format,
                 SAMPLE_COUNT,
             );
+        }
+
+        // filter() は呼び出した位置までの画面へ作用する。通常の 1 パスでは
+        // 前後関係を保てないので、フィルタがあるフレームだけ区切って描く。
+        if list.shader.is_none() && !list.filters.is_empty() {
+            self.render_filtered(device, batch, encoder, list, clear, width, height);
+            self.painted = true;
+            return;
         }
 
         let back = 1 - self.front;
@@ -471,6 +682,167 @@ impl Canvas {
 
         self.front = back;
         self.painted = true;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_filtered(
+        &mut self,
+        device: &wgpu::Device,
+        batch: &BatchRenderer,
+        encoder: &mut wgpu::CommandEncoder,
+        list: &crate::draw::DrawList,
+        clear: Option<Color>,
+        width: u32,
+        height: u32,
+    ) {
+        let total = list.indices.len() as u32;
+        let first_at = list.filters[0].at.min(total);
+
+        // 最初の区間は通常フレームと同じく、前フレームまたは clear 色の上へ描く。
+        self.render_layer(
+            device,
+            batch,
+            encoder,
+            0..first_at,
+            clear,
+            clear.is_none() && self.painted,
+            width,
+            height,
+        );
+        self.apply_blur(device, encoder, list.filters[0].radius, width, height);
+
+        let mut cursor = first_at;
+        for filter in list.filters.iter().skip(1) {
+            let at = filter.at.min(total).max(cursor);
+            if cursor < at {
+                self.render_layer(
+                    device,
+                    batch,
+                    encoder,
+                    cursor..at,
+                    None,
+                    true,
+                    width,
+                    height,
+                );
+            }
+            self.apply_blur(device, encoder, filter.radius, width, height);
+            cursor = at;
+        }
+
+        // 最後の filter() より後の図形はぼかさず上へ重ねる。
+        if cursor < total {
+            self.render_layer(
+                device,
+                batch,
+                encoder,
+                cursor..total,
+                None,
+                true,
+                width,
+                height,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_layer(
+        &mut self,
+        device: &wgpu::Device,
+        batch: &BatchRenderer,
+        encoder: &mut wgpu::CommandEncoder,
+        range: Range<u32>,
+        clear: Option<Color>,
+        preserve: bool,
+        width: u32,
+        height: u32,
+    ) {
+        let back = 1 - self.front;
+        let msaa_view = self.msaa.view(device, width, height, self.format).clone();
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("tsubu.canvas.filtered_layer"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &msaa_view,
+                    depth_slice: None,
+                    resolve_target: Some(&self.faces[back].view),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(match clear {
+                            Some(c) => wgpu::Color {
+                                r: c.r as f64,
+                                g: c.g as f64,
+                                b: c.b as f64,
+                                a: c.a as f64,
+                            },
+                            None => wgpu::Color::TRANSPARENT,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: self.depth.as_ref().map(|view| {
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if preserve {
+                self.blit.draw(
+                    device,
+                    &mut pass,
+                    self.format,
+                    SAMPLE_COUNT,
+                    true,
+                    &self.faces[self.front].bind,
+                );
+            }
+            batch.render_range(&mut pass, range);
+        }
+        self.front = back;
+    }
+
+    fn apply_blur(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        radius: f32,
+        width: u32,
+        height: u32,
+    ) {
+        let back = 1 - self.front;
+        let bind = self.blur.bind(
+            device,
+            &self.faces[self.front].view,
+            (width, height),
+            radius,
+        );
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("tsubu.canvas.blur"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.faces[back].view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.blur.draw(device, &mut pass, self.format, &bind);
+        }
+        self.front = back;
     }
 
     /// 蓄積した絵を、開いているパスへ貼る。

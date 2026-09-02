@@ -938,7 +938,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | 制御 | `if` / `else` / `for` / `while` / `switch` (`case` / `default`、`break` が無ければ次へ落ちる) / `return` / `break` / `continue` / `for...of` |
 | リテラル | 10 進、16 進 (`0xFF6B35`)、指数 |
 | その他 | セミコロン省略 (ASI)、数値の真偽値化 (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` (`WEBGL` も) `colorMode(HSB)`、3 引数 `noise`、`drawingContext` の影、`windowWidth` / `innerWidth` などの画面いっぱいの大きさ、`fill('cyan')` の CSS の色 |
+| p5 API | `createCanvas` (`WEBGL` も) `colorMode(HSB)`、`filter(BLUR)`、3 引数 `noise`、`drawingContext` の影、`windowWidth` / `innerWidth` などの画面いっぱいの大きさ、`fill('cyan')` の CSS の色 |
 | 合成方法 | `blendMode()` に `BLEND ADD MULTIPLY SCREEN DIFFERENCE EXCLUSION DARKEST LIGHTEST SUBTRACT REPLACE` |
 | `push` / `pop` | p5 と同じく座標変換**と**見た目の両方を退避する。座標変換だけの Processing の `pushMatrix()` とは違う。`pushStyle()` / `popStyle()` もある |
 | `Math` | `Math.sin` などを組み込みへ読み替える。`Math.PI` `Math.hypot` `Math.sign` も。`S=Math.sin` と値で持てる |

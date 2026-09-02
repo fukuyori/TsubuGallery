@@ -383,6 +383,10 @@ fn rect_mode_changes_where_the_rectangle_lands() {
     let center = bounds("draw=_=>{createCanvas(400,400);noStroke();rectMode(CENTER);rect(100,100,40,20)}");
     assert!((center.0 - 80.0).abs() < 0.01 && (center.2 - 120.0).abs() < 0.01, "{center:?}");
 
+    // Processing の定数値を数で直接書く短縮形も CENTER。
+    let numeric = bounds("void draw(){size(400,400);noStroke();rectMode(3);rect(100,100,40,20);}");
+    assert!((numeric.0 - 80.0).abs() < 0.01 && (numeric.2 - 120.0).abs() < 0.01, "{numeric:?}");
+
     // CORNERS は 2 つの角。
     let corners = bounds("draw=_=>{createCanvas(400,400);noStroke();rectMode(CORNERS);rect(100,100,140,120)}");
     assert!((corners.0 - 100.0).abs() < 0.01 && (corners.2 - 140.0).abs() < 0.01, "{corners:?}");
@@ -1626,6 +1630,13 @@ fn only_processing_reads_a_lone_int_as_a_packed_colour() {
     let java = colour("void setup(){size(400,400);}\nvoid draw(){noStroke();fill(-1);rect(0,0,9,9);}");
     assert_eq!((java[0], java[3]), (1.0, 1.0), "Processing の詰めた色が効きません: {java:?}");
 
+    // 2 個目が alpha でも、最初の int は詰めた色のまま。
+    let translucent = colour(
+        "void setup(){size(400,400);}\nvoid draw(){noStroke();fill(-1,9);rect(0,0,9,9);}",
+    );
+    assert_eq!(translucent[0], 1.0, "-1 が白になりません: {translucent:?}");
+    assert!((translucent[3] - 9.0 / 255.0).abs() < 0.001, "alpha が違います: {translucent:?}");
+
     // p5: 500 は明度。255 へ丸めて不透明の白。
     let p5 = colour("draw=_=>{createCanvas(400,400);noStroke();fill(500);rect(0,0,9,9)}");
     assert_eq!((p5[0], p5[3]), (1.0, 1.0), "p5 で透明になりました: {p5:?}");
@@ -1637,6 +1648,22 @@ fn only_processing_reads_a_lone_int_as_a_packed_colour() {
     // 0..255 はどちらでも明度のまま。
     let grey = colour("void setup(){size(400,400);}\nvoid draw(){noStroke();fill(128);rect(0,0,9,9);}");
     assert!((grey[0] - 128.0 / 255.0).abs() < 0.01, "{grey:?}");
+}
+
+#[test]
+fn processing_hsb_keeps_the_default_255_component_ranges() {
+    let src = "void setup(){size(400,400);colorMode(3);}\n\
+               void draw(){noStroke();fill(0,255,255,50);rect(0,0,9,9);}";
+    let mut sketch = VmSketch::compile(src, 1).expect("コンパイルできる");
+    let mut g = Graphics::new();
+    g.begin_frame(400.0, 400.0);
+    sketch.setup(&mut g);
+    g.begin_frame(400.0, 400.0);
+    sketch.draw(&mut g);
+    assert!(sketch.error().is_none(), "{:?}", sketch.error());
+    let color = g.draw_list().vertices[0].color;
+    assert!(color[0] > 0.99 && color[1] < 0.01 && color[2] < 0.01, "赤ではありません: {color:?}");
+    assert!((color[3] - 50.0 / 255.0).abs() < 0.001, "alpha が違います: {color:?}");
 }
 
 /// `**` は JavaScript と同じ強さと結び方で読む。

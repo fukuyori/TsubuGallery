@@ -8,6 +8,14 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.6.2 — 2026-09-02
+
+### Fixed
+
+- Processing numeric `rectMode(3)`, the default ranges of `colorMode(3)`, and
+  `fill(-1, alpha)` now follow Java Mode semantics
+- Added p5.js `filter(BLUR)` and negative array keys used by sparse 2D arrays
+
 ## 0.6.1 — 2026-09-02
 
 ### Fixed

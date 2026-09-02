@@ -40,6 +40,7 @@ pub enum BuiltinVar {
     Add,
     Multiply,
     Screen,
+    Blur,
 
     // beginShape() / endShape() の指定。
     Close,
@@ -112,6 +113,7 @@ impl BuiltinVar {
             "ADD" => BuiltinVar::Add,
             "MULTIPLY" => BuiltinVar::Multiply,
             "SCREEN" => BuiltinVar::Screen,
+            "BLUR" => BuiltinVar::Blur,
             "CLOSE" => BuiltinVar::Close,
             "POINTS" => BuiltinVar::Points,
             "LINES" => BuiltinVar::Lines,
@@ -178,6 +180,7 @@ impl BuiltinVar {
             BuiltinVar::Add => Value::Float(1.0),
             BuiltinVar::Multiply => Value::Float(2.0),
             BuiltinVar::Screen => Value::Float(3.0),
+            BuiltinVar::Blur => Value::Float(60.0),
             // 形の指定も番号。beginShape / endShape の側で見分ける。
             BuiltinVar::Close => Value::Float(10.0),
             BuiltinVar::Points => Value::Float(11.0),
@@ -356,6 +359,7 @@ pub enum Native {
     CreateCanvas,
     ColorMode,
     BlendMode,
+    Filter,
     Square,
     Magnitude,
     Atan,
@@ -383,6 +387,7 @@ const SIGNATURES: &[Signature] = &[
     Signature { name: "createCanvas", native: Native::CreateCanvas, arities: &[1, 2, 3] },
     Signature { name: "colorMode", native: Native::ColorMode, arities: &[1, 2, 4, 5] },
     Signature { name: "blendMode", native: Native::BlendMode, arities: &[1] },
+    Signature { name: "filter", native: Native::Filter, arities: &[1, 2] },
     Signature { name: "sq", native: Native::Square, arities: &[1] },
     Signature { name: "mag", native: Native::Magnitude, arities: &[2, 3] },
     Signature { name: "atan", native: Native::Atan, arities: &[1] },
@@ -1241,10 +1246,13 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
             } else {
                 tsubu_renderer::ColorMode::Rgb
             };
-            // p5 の既定値。`colorMode(HSB)` だけなら 360, 100, 100, 1。
-            let default_max = match mode {
-                tsubu_renderer::ColorMode::Hsb => [360.0, 100.0, 100.0, 1.0],
-                tsubu_renderer::ColorMode::Rgb => [255.0; 4],
+            // Processing はどちらのモードも既定範囲が 255。p5.js の HSB だけ
+            // 360, 100, 100, 1 になる。同じ API 名でも方言に合わせて分ける。
+            let default_max = match (g.flavour(), mode) {
+                (tsubu_renderer::Flavour::P5, tsubu_renderer::ColorMode::Hsb) => {
+                    [360.0, 100.0, 100.0, 1.0]
+                }
+                _ => [255.0; 4],
             };
             let max = match args.len() {
                 0 | 1 => default_max,
@@ -1253,6 +1261,15 @@ fn run(native: Native, args: &[Value], g: &mut Graphics, rng: &mut Rng) -> Value
                 _ => [f(1), f(2), f(3), f(4)],
             };
             g.color_mode(mode, max);
+            Value::Void
+        }
+
+        Native::Filter => {
+            // 現在対応する画像フィルタは BLUR だけ。2 引数目を省いた場合は
+            // p5.js と同じく半径 1 とする。
+            if f(0) as i32 == 60 {
+                g.blur(if args.len() >= 2 { f(1) } else { 1.0 });
+            }
             Value::Void
         }
 
@@ -1355,16 +1372,21 @@ fn resolve_color(args: &[Value], g: &Graphics) -> Color {
     //
     // p5.js にこの解釈は無い。`stroke(500)` はただの明度で、255 へ丸まって
     // 白になる。詰めた色として読むと alpha が 0 になり、何も描かれない。
-    if let (1, Some(Value::Int(packed))) = (args.len(), args.first())
+    if let (1 | 2, Some(Value::Int(packed))) = (args.len(), args.first())
         && !(0..=255).contains(packed)
         && g.flavour().packs_ints_into_colors()
     {
         let v = *packed as u32;
+        let alpha = args
+            .get(1)
+            .map_or(((v >> 24) & 255) as f32 / 255.0, |alpha| {
+                (alpha.as_f32() / g.color_max()[3]).clamp(0.0, 1.0)
+            });
         return Color::rgba(
             ((v >> 16) & 255) as f32 / 255.0,
             ((v >> 8) & 255) as f32 / 255.0,
             (v & 255) as f32 / 255.0,
-            ((v >> 24) & 255) as f32 / 255.0,
+            alpha,
         );
     }
     let Some(Value::Array(_)) = args.first() else {
@@ -1414,9 +1436,11 @@ fn text_align(arg: Option<&Value>) -> TextAlign {
 /// `rectMode()` / `ellipseMode()` の引数から指定を決める。
 fn shape_mode(arg: Option<&Value>) -> ShapeMode {
     match arg.map(Value::as_f32) {
-        Some(21.0) => ShapeMode::Corners,
-        Some(22.0) => ShapeMode::Center,
-        Some(23.0) => ShapeMode::Radius,
+        // 0..3 は Processing の実際の定数値。20..23 はフロントエンド内部で
+        // 名前付き定数を衝突なく表す値。
+        Some(1.0 | 21.0) => ShapeMode::Corners,
+        Some(3.0 | 22.0) => ShapeMode::Center,
+        Some(2.0 | 23.0) => ShapeMode::Radius,
         _ => ShapeMode::Corner,
     }
 }

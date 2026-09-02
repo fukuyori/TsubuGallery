@@ -694,6 +694,17 @@ pub struct ShaderPaint {
     pub mouse: [f32; 2],
 }
 
+/// 描画途中でキャンバスへ適用するブラー。
+///
+/// `at` より前の三角形をいったん描いてぼかし、そのあとに残りを重ねる。
+/// p5.js の `filter(BLUR)` は呼び出した時点までの画面へ作用するため、単なる
+/// フレーム末尾のフラグではなく位置も記録する。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanvasFilter {
+    pub at: u32,
+    pub radius: f32,
+}
+
 /// 1 フレーム分の描画コマンドを三角形へ展開したもの。
 #[derive(Default, Debug)]
 pub struct DrawList {
@@ -706,13 +717,15 @@ pub struct DrawList {
     pub indices: Vec<u32>,
     /// 合成方法ごとの区間。ふつうは 1 つだけ。
     pub batches: Vec<Batch>,
+    /// 呼び出された順のキャンバスフィルタ。
+    pub filters: Vec<CanvasFilter>,
     /// GLSL 作品のフラグメントシェーダー。設定されていれば図形の代わりに使う。
     pub shader: Option<ShaderPaint>,
 }
 
 impl DrawList {
     pub fn is_empty(&self) -> bool {
-        self.indices.is_empty() && self.shader.is_none()
+        self.indices.is_empty() && self.filters.is_empty() && self.shader.is_none()
     }
 
     /// 確保済みバッファを保持したまま内容だけ捨てる。
@@ -721,6 +734,7 @@ impl DrawList {
         self.vertices.clear();
         self.indices.clear();
         self.batches.clear();
+        self.filters.clear();
         self.shader = None;
     }
 }
@@ -1207,6 +1221,7 @@ impl Graphics {
         self.list.vertices.clear();
         self.list.indices.clear();
         self.list.batches.clear();
+        self.list.filters.clear();
         self.list.clear = Some(Color::BLACK);
     }
 
@@ -1215,6 +1230,7 @@ impl Graphics {
             self.list.vertices.clear();
             self.list.indices.clear();
             self.list.batches.clear();
+            self.list.filters.clear();
             self.list.clear = Some(c);
             return;
         }
@@ -1234,6 +1250,14 @@ impl Graphics {
 
     pub fn fill(&mut self, gray: f32) {
         self.fill = Some(Color::gray255(gray));
+    }
+
+    /// 現在までに描いたキャンバスをぼかす。
+    pub fn blur(&mut self, radius: f32) {
+        self.list.filters.push(CanvasFilter {
+            at: self.list.indices.len() as u32,
+            radius: radius.clamp(0.0, 64.0),
+        });
     }
 
     pub fn fill_rgb(&mut self, r: f32, g: f32, b: f32) {

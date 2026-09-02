@@ -4,13 +4,66 @@
 //! あり、将来 p5.js subset などを足すときの共通 IR でもある (設計書 §23.2)。
 
 use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 use crate::ast::Type;
 use crate::natives::{BuiltinVar, Native};
 
+/// JavaScript 配列の中身。
+///
+/// 0 以上の整数添字は `items` に置き、負の整数添字は通常のオブジェクト
+/// プロパティとして別に持つ。`a[-1]` は配列長を変えない JavaScript の挙動を
+/// 保ちつつ、つぶやき作品で使われる疎な二次元配列も扱える。
+#[derive(Clone, Debug, Default)]
+pub struct ArrayValue {
+    items: Vec<Value>,
+    negative: Vec<(i32, Value)>,
+}
+
+impl ArrayValue {
+    pub fn new(items: Vec<Value>) -> Self {
+        Self {
+            items,
+            negative: Vec::new(),
+        }
+    }
+
+    pub fn get_negative(&self, index: i32) -> Option<&Value> {
+        self.negative
+            .iter()
+            .find(|(key, _)| *key == index)
+            .map(|(_, value)| value)
+    }
+
+    pub fn set_negative(&mut self, index: i32, value: Value) {
+        match self
+            .negative
+            .iter_mut()
+            .find(|(key, _)| *key == index)
+        {
+            Some((_, slot)) => *slot = value,
+            None => self.negative.push((index, value)),
+        }
+    }
+}
+
+impl Deref for ArrayValue {
+    type Target = Vec<Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+impl DerefMut for ArrayValue {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.items
+    }
+}
+
 /// 配列の中身。`Rc` で共有し、参照が消えたら解放される。
-pub type ArrayRef = Rc<RefCell<Vec<Value>>>;
+pub type ArrayRef = Rc<RefCell<ArrayValue>>;
 /// オブジェクトの中身。鍵はコンパイル時に採番した番号 (`Program::keys`)。
 ///
 /// つぶやき作品のオブジェクトは数個の要素しか持たないので、線形探索で足りる。
@@ -159,7 +212,7 @@ impl Value {
     }
 
     pub fn new_array(values: Vec<Value>) -> Value {
-        Value::Array(Rc::new(RefCell::new(values)))
+        Value::Array(Rc::new(RefCell::new(ArrayValue::new(values))))
     }
 
     /// 文字列を作る。

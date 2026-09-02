@@ -116,6 +116,47 @@ fn calling_background_wipes_the_previous_frame() {
 }
 
 #[test]
+fn blur_affects_only_the_geometry_before_its_call() {
+    let Some((device, queue)) = gpu() else {
+        eprintln!("GPU が無いので飛ばします");
+        return;
+    };
+    let mut batch = BatchRenderer::new(device);
+    let mut capturer = Capturer::new();
+    let mut g = Graphics::new();
+
+    capturer.begin();
+    g.begin_frame(W as f32, H as f32);
+    g.background(0.0);
+    g.no_stroke();
+    g.fill_rgb(255.0, 255.0, 255.0);
+    g.rect(16.0, 24.0, 4.0, 16.0);
+    g.blur(3.0);
+    // filter() の後ろなので、この赤はぼけてはいけない。
+    g.fill_rgb(255.0, 0.0, 0.0);
+    g.rect(48.0, 24.0, 4.0, 16.0);
+    capturer.draw(device, queue, &mut batch, &g, W, H);
+
+    let image = capturer.read(device, queue, W, H).expect("読み戻せる");
+    let spread = pixel(&image, 13, 32);
+    assert!(
+        spread.0 > 10,
+        "白い四角の外へぼけが広がっていません: {spread:?}"
+    );
+
+    let red = pixel(&image, 49, 32);
+    assert!(
+        red.0 > 200 && red.1 < 20 && red.2 < 20,
+        "後段の赤が描けていません: {red:?}"
+    );
+    let before_red = pixel(&image, 45, 32);
+    assert!(
+        before_red.0 < 10,
+        "filter() 後の赤までぼけています: {before_red:?}"
+    );
+}
+
+#[test]
 fn a_translucent_background_fades_the_previous_frame() {
     let Some((device, queue)) = gpu() else {
         eprintln!("GPU が無いので飛ばします");

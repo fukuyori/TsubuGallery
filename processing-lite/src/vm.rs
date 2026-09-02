@@ -435,7 +435,7 @@ impl Vm {
                     };
                     let items: Vec<Value> = match &other {
                         // 自分自身を展開しても止まるよう、先に写しを取る。
-                        Value::Array(source) => source.borrow().clone(),
+                        Value::Array(source) => source.borrow().iter().cloned().collect(),
                         // 文字列は 1 文字ずつに割れる。`[...'あいう']` は
                         // 3 要素。字数を数えるのに使われる書き方でもある。
                         Value::Str(text) => {
@@ -735,7 +735,7 @@ impl Vm {
                 Ok(())
             }
             ("concat", _) => {
-                let mut out = array.borrow().clone();
+                let mut out: Vec<Value> = array.borrow().iter().cloned().collect();
                 for arg in args {
                     match arg {
                         Value::Array(other) => out.extend(other.borrow().iter().cloned()),
@@ -808,7 +808,7 @@ impl Vm {
             }
             // 比べ方を渡さないと、JavaScript と同じく文字として並べる。
             ("sort", _) => {
-                let items: Vec<Value> = array.borrow().clone();
+                let items: Vec<Value> = array.borrow().iter().cloned().collect();
                 let sorted = match args.first() {
                     Some(cmp) => self.sort_with(program, items, cmp.clone(), g)?,
                     None => {
@@ -817,13 +817,16 @@ impl Vm {
                         items
                     }
                 };
-                *array.borrow_mut() = sorted;
+                let mut array = array.borrow_mut();
+                array.clear();
+                array.extend(sorted);
+                drop(array);
                 self.stack.push(receiver.clone());
                 Ok(())
             }
             ("reduce", _) => {
                 let callback = args.first().cloned().unwrap_or(Value::Undefined);
-                let items: Vec<Value> = array.borrow().clone();
+                let items: Vec<Value> = array.borrow().iter().cloned().collect();
                 let mut iter = items.into_iter().enumerate();
                 let mut acc = match args.get(1) {
                     Some(init) => init.clone(),
@@ -848,7 +851,7 @@ impl Vm {
             ("map" | "forEach" | "filter" | "find" | "findIndex" | "findLast" | "some" | "every"
                 | "flatMap", 1) => {
                 let callback = args.into_iter().next().expect("1 個ある");
-                let items: Vec<Value> = array.borrow().clone();
+                let items: Vec<Value> = array.borrow().iter().cloned().collect();
                 let mut results = Vec::with_capacity(items.len());
 
                 // 見つけた時点で答えが決まるものは、そこで止める。
@@ -1126,7 +1129,7 @@ fn get_index(target: &Value, index: &Value) -> Value {
     let Value::Array(items) = target else { return Value::Undefined };
     let at = index.as_i32();
     if at < 0 {
-        return Value::Undefined;
+        return items.borrow().get_negative(at).cloned().unwrap_or(Value::Undefined);
     }
     items.borrow().get(at as usize).cloned().unwrap_or(Value::Undefined)
 }
@@ -1138,6 +1141,7 @@ fn set_index(target: &Value, index: &Value, value: Value) -> Result<(), Trap> {
     };
     let at = index.as_i32();
     if at < 0 {
+        items.borrow_mut().set_negative(at, value);
         return Ok(());
     }
     let at = at as usize;

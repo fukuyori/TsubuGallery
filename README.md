@@ -1012,7 +1012,7 @@ $.map(p⇒fill(p.c,90,W,.1)+circle(p.x+=cos(A=noise(p.x/180,p.y/180,t/W/W)*99),p
 | Control flow | `if` / `else` / `for` / `while` / `switch` (`case` / `default`, falling through when there is no `break`) / `return` / `break` / `continue` / `for...of` |
 | Literals | decimal, hex (`0xFF6B35`), exponent |
 | Other | Semicolon insertion (ASI), numbers as truthiness (`t?…`, `for(i=2;i--;)`) |
-| p5 API | `createCanvas` (including `WEBGL`) `colorMode(HSB)`, 3-argument `noise`, `drawingContext` shadows, `windowWidth` / `innerWidth` and friends for a full-screen canvas, CSS colours as in `fill('cyan')` |
+| p5 API | `createCanvas` (including `WEBGL`) `colorMode(HSB)`, `filter(BLUR)`, 3-argument `noise`, `drawingContext` shadows, `windowWidth` / `innerWidth` and friends for a full-screen canvas, CSS colours as in `fill('cyan')` |
 | Blend modes | `blendMode()` takes `BLEND ADD MULTIPLY SCREEN DIFFERENCE EXCLUSION DARKEST LIGHTEST SUBTRACT REPLACE` |
 | `push` / `pop` | Save and restore the transform **and** the style, as p5 does — unlike Processing's `pushMatrix()`, which is the transform alone. `pushStyle()` / `popStyle()` are there too |
 | `Math` | `Math.sin` and friends map to the built-ins. `Math.PI` `Math.hypot` `Math.sign` too, and `S=Math.sin` works as a value |
