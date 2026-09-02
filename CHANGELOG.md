@@ -8,6 +8,13 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.6.1 — 2026-09-02
+
+### Fixed
+
+- The import dialog now uses its available width for the name, author and tag
+  columns instead of compressing the list against the left edge
+
 ## 0.6.0 — 2026-08-30
 
 ### Added

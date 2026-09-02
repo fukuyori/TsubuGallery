@@ -269,16 +269,39 @@ fn import_dialog(
                 ui.add_space(6.0);
 
                 let max_height = (ctx.viewport_rect().height() - 260.0).max(120.0);
-                egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
+                // 一覧は横幅いっぱいに保ち、行数が少ないときは縦だけ縮める。
+                let scroll = egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .max_height(max_height);
+                scroll.show(ui, |ui| {
+                    let [name_width, author_width, tags_width] = import_column_widths(
+                        ui.available_width(),
+                        ui.spacing().interact_size.x,
+                    );
                     egui::Grid::new("tsubu.gallery.import.rows")
                         .num_columns(4)
                         .spacing([14.0, 6.0])
                         .striped(true)
                         .show(ui, |ui| {
                             ui.label("");
-                            ui.label(egui::RichText::new(locales.t("gallery.import.name")).strong());
-                            ui.label(egui::RichText::new(locales.t("gallery.import.author")).strong());
-                            ui.label(egui::RichText::new(locales.t("gallery.import.tags")).strong());
+                            ui.add_sized(
+                                [name_width, 0.0],
+                                egui::Label::new(
+                                    egui::RichText::new(locales.t("gallery.import.name")).strong(),
+                                ),
+                            );
+                            ui.add_sized(
+                                [author_width, 0.0],
+                                egui::Label::new(
+                                    egui::RichText::new(locales.t("gallery.import.author")).strong(),
+                                ),
+                            );
+                            ui.add_sized(
+                                [tags_width, 0.0],
+                                egui::Label::new(
+                                    egui::RichText::new(locales.t("gallery.import.tags")).strong(),
+                                ),
+                            );
                             ui.end_row();
 
                             for (i, entry) in preview.entries.iter().enumerate() {
@@ -287,6 +310,7 @@ fn import_dialog(
                                     actions.push(GalleryAction::ImportToggle(i));
                                 }
                                 ui.vertical(|ui| {
+                                    ui.set_width(name_width);
                                     ui.label(&entry.title);
                                     let mut note = entry.id.clone();
                                     if entry.exists {
@@ -295,8 +319,8 @@ fn import_dialog(
                                     }
                                     ui.label(egui::RichText::new(note).size(11.0).color(palette.dim));
                                 });
-                                ui.label(&entry.author);
-                                ui.label(&entry.tags);
+                                ui.add_sized([author_width, 0.0], egui::Label::new(&entry.author));
+                                ui.add_sized([tags_width, 0.0], egui::Label::new(&entry.tags));
                                 ui.end_row();
                             }
                         });
@@ -325,6 +349,15 @@ fn import_dialog(
                 });
             });
         });
+}
+
+/// チェック欄と列間隔を除いた幅を、名前・作者・タグへ配る。
+fn import_column_widths(available_width: f32, checkbox_width: f32) -> [f32; 3] {
+    const COLUMN_GAP: f32 = 14.0;
+    let content_width = (available_width - checkbox_width - COLUMN_GAP * 3.0).max(0.0);
+    let name_width = content_width * 0.42;
+    let author_width = content_width * 0.24;
+    [name_width, author_width, content_width - name_width - author_width]
 }
 
 fn hints(ui: &mut egui::Ui, locales: &Locales) {
@@ -1351,6 +1384,17 @@ mod tests {
         let (_, without) = run(&mut view(2), None);
         assert!(vertices > without, "読み込み画面の分だけ描くものが増える");
         assert_eq!(preview.checked_count(), 1);
+    }
+
+    #[test]
+    fn the_import_columns_fill_the_dialog_width() {
+        let available = 560.0;
+        let checkbox = 18.0;
+        let widths = import_column_widths(available, checkbox);
+        let used = checkbox + 14.0 * 3.0 + widths.iter().sum::<f32>();
+
+        assert!((used - available).abs() < 0.01);
+        assert!(widths[0] > 200.0, "名前列が狭すぎます: {}", widths[0]);
     }
 
     /// 印の付いた作品は枠とチェックを足して描く。
