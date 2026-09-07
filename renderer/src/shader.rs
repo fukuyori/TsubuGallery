@@ -42,6 +42,18 @@ layout(location = 0) out vec4 tsubu_color;
 
 const float PI = 3.141592653589793;
 const float TAU = 6.283185307179586;
+const float PI2 = TAU;
+
+// twigl geekest's fract-sine hash (twigl is MIT licensed).
+float fsnoise(vec2 c) {
+    return fract(sin(dot(c, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+// naga 30 does not provide GLSL's two-argument vector modf overload.
+vec3 modf(vec3 x, out vec3 whole) {
+    whole = sign(x) * floor(abs(x));
+    return x - whole;
+}
 
 mat2 rotate2D(float a) {
     return mat2(cos(a), sin(a), -sin(a), cos(a));
@@ -862,7 +874,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             "o.rgb = vec3(FC.xy, 1.) * rotate3D(t, vec3(0, 1, 0));",
             "o = vec4(snoise2D(FC.xy));",
             "o = vec4(snoise3D(vec3(FC.xy, t)));",
-            "o = vec4(PI, TAU, 0, 1);",
+            "o = vec4(fsnoise(ceil(FC.xy)));",
+            "o = vec4(PI, PI2, TAU, 1);",
+            "vec3 whole; o = vec4(modf(vec3(-1.5, 1.5, 0.), whole), 1);",
         ] {
             assert!(compile(source).is_ok(), "{source} が通らない: {:?}", compile(source));
         }

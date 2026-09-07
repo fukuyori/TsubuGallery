@@ -1069,11 +1069,12 @@ GLSL → 前置きを足す → naga (glsl-in) → 検証 → WGSL → wgpu
 | `m` | `vec2` | マウス位置 (0..1) |
 | `FC` | `vec4` | `gl_FragCoord` |
 | `o` | `vec4` | 出力色。`vec4(0)` から始まる |
-| `PI` / `TAU` | `float` | 円周率とその 2 倍 |
+| `PI` / `PI2` / `TAU` | `float` | 円周率とその 2 倍 (`PI2` と `TAU` は同値) |
 | `rotate2D(a)` | `mat2` | 回転 |
 | `rotate3D(a, axis)` | `mat3` | 軸まわりの回転 |
 | `hsv(h, s, v)` | `vec3` | HSV → RGB |
 | `snoise2D(v)` / `snoise3D(v)` | `float` | Simplex ノイズ |
+| `fsnoise(v)` | `float` | `vec2` から作る fract-sine ハッシュ |
 
 `void main()` を自分で書いてもよい (twigl の geek / geeker)。その場合も `o` は
 `vec4(0)` から始まり、`gl_FragColor` は `o` として扱う。
@@ -1096,7 +1097,7 @@ FragCoord.xyz の素の `void main()` 形式も動く。そこでは `u_resoluti
 | `#version` は書かない | naga が受けるのは 440/450/460 だけなので、こちらで付ける |
 | `o.a` は捨てて必ず不透明で出す | つぶやきGLSL の 4 本目はループ回数や明るさの置き場で、透明度ではない |
 | バックバッファ `b` は無い | 未対応 |
-| `snoise4D` / `fsnoise` は無い | 未対応 |
+| `snoise4D` は無い | 未対応 |
 | 末尾の `#つぶやきGLSL` タグ行は読み飛ばす | プリプロセッサ指令ではないので、そのままでは通らない |
 
 `gl_FragCoord` の上下と `z` は OpenGL の規約に合わせてある。wgpu は左上原点で

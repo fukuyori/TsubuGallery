@@ -1152,11 +1152,12 @@ All of this comes from the preamble, so none of it needs declaring.
 | `m` | `vec2` | mouse position (0..1) |
 | `FC` | `vec4` | `gl_FragCoord` |
 | `o` | `vec4` | output colour, starting at `vec4(0)` |
-| `PI` / `TAU` | `float` | π and 2π |
+| `PI` / `PI2` / `TAU` | `float` | π and 2π (`PI2` and `TAU` are equivalent) |
 | `rotate2D(a)` | `mat2` | rotation |
 | `rotate3D(a, axis)` | `mat3` | rotation about an axis |
 | `hsv(h, s, v)` | `vec3` | HSV → RGB |
 | `snoise2D(v)` / `snoise3D(v)` | `float` | simplex noise |
+| `fsnoise(v)` | `float` | fract-sine hash from a `vec2` |
 
 Writing your own `void main()` works too (twigl's geek / geeker). `o` still
 starts at `vec4(0)`, and `gl_FragColor` is treated as `o`.
@@ -1180,7 +1181,7 @@ macros and `#if AA > 1` all go through naga's preprocessor.
 | No `#version` line | naga only accepts 440/450/460, so it is added here |
 | `o.a` is dropped and the output is always opaque | in つぶやきGLSL the fourth channel holds loop counts or brightness, not transparency |
 | No backbuffer `b` | not supported yet |
-| No `snoise4D` / `fsnoise` | not supported yet |
+| No `snoise4D` | not supported yet |
 | A trailing `#つぶやきGLSL` tag line is skipped | it is not a preprocessor directive, so it would not compile |
 
 `gl_FragCoord`'s vertical direction and its `z` follow the OpenGL convention.

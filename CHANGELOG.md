@@ -8,6 +8,13 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.6.3 — 2026-09-07
+
+### Added
+
+- Added つぶやきGLSL compatibility for `PI2`, `fsnoise(vec2)`, and naga's
+  missing `modf(vec3, out vec3)` overload
+
 ## 0.6.2 — 2026-09-02
 
 ### Fixed
