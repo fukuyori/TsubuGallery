@@ -1429,6 +1429,28 @@ again. A `WM_SETICON` makes it read the icon again.
 `scripts/build-macos-installer.sh`. The Dock and the Finder go up to 1024px, so
 scaling the 256px one up would look soft.
 
+### Debian / Ubuntu package
+
+Run on Debian / Ubuntu (amd64 or arm64), with Rust, a C/C++ build toolchain,
+`dpkg-dev` and `binutils` installed:
+
+```sh
+sudo apt install build-essential dpkg-dev binutils
+scripts/build-deb.sh
+sudo apt install ./target/installer/tsubugallery_*.deb
+```
+
+The script reads the version from `Cargo.toml` and writes
+`target/installer/tsubugallery_<version>_<arch>.deb` without requiring root.
+It includes the executable, application menu entry and icon, and detects shared
+library dependencies from the build system. A suitable GPU driver is required
+on the destination system. Build on the oldest Debian / Ubuntu release you
+intend to support; packages built on newer systems may require newer libraries.
+
+The build explicitly uses Rust's host target. To package an existing
+`target/release/tsubugallery` produced by a regular `cargo build --release`, run
+`scripts/build-deb.sh --skip-build`.
+
 ### Windows installer
 
 ```powershell

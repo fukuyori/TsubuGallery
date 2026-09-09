@@ -1330,6 +1330,27 @@ explorer は窓が現れた直後に短い待ち時間つきで `WM_GETICON` を
 がここから各寸法を焼く。Dock と Finder が 1024px まで使うので、256px から
 引き伸ばすとぼやける。
 
+### Debian / Ubuntu パッケージ
+
+Debian / Ubuntu の amd64 / arm64 環境で実行する。Rust と C/C++ のビルド環境に
+加え、`dpkg-dev` と `binutils` が必要。
+
+```sh
+sudo apt install build-essential dpkg-dev binutils
+scripts/build-deb.sh
+sudo apt install ./target/installer/tsubugallery_*.deb
+```
+
+版番号は `Cargo.toml` から取得し、`target/installer/tsubugallery_<version>_<arch>.deb`
+へ出力する。作成時に管理者権限は不要。実行ファイル、アプリメニューの項目、
+アイコンを含み、共有ライブラリの依存関係をビルド環境から検出する。
+GPU ドライバは実行環境に合ったものが必要。配布先で使う最も古い Debian / Ubuntu
+上でビルドすること。新しい環境で作ったパッケージは古い環境に入らない場合がある。
+
+通常は Rust のホストターゲットを明示してビルドする。すでに通常の
+`cargo build --release` で作成した `target/release/tsubugallery` がある場合は、
+`scripts/build-deb.sh --skip-build` でそのバイナリを梱包できる。
+
 ### Windows インストーラ
 
 ```powershell
