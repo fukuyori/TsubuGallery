@@ -82,9 +82,10 @@ appear in the gallery. Drop more `.pde` files there to add your own.
 | `E` | Edit this sketch |
 | `I` | Info overlay (author / link / fps / playback speed / sketch clock / **CPU load** / sketch time / instructions and triangles per frame / frameCount / switch time) |
 | `O` | Open the link in a browser |
+| `B` | Send the window to the back. It remains interactive while focused; press `B` or `Esc` to bring it forward |
 | `F` / `F11` | Fullscreen |
 | `L` | Switch the UI language |
-| `Esc` | Leave fullscreen, or go back to the gallery |
+| `Esc` | Clear the background request and bring the window forward; leave fullscreen or return to the gallery as usual |
 
 **Editor**
 
