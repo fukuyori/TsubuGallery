@@ -219,6 +219,23 @@ impl BatchRenderer {
         self.atlas_version = atlas.version();
     }
 
+    fn set_pending(
+        &mut self,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        batches: &[Batch],
+    ) {
+        let pending = self.pending.get_or_insert_with(|| Pending {
+            format,
+            samples,
+            batches: Vec::new(),
+        });
+        pending.format = format;
+        pending.samples = samples;
+        pending.batches.clear();
+        pending.batches.extend_from_slice(batches);
+    }
+
     /// 描画内容を GPU バッファへ転送する。レンダーパス開始前に呼ぶ。
     pub fn prepare(
         &mut self,
@@ -234,7 +251,7 @@ impl BatchRenderer {
         }
 
         if list.indices.is_empty() {
-            self.pending = Some(Pending { format, samples, batches: Vec::new() });
+            self.set_pending(format, samples, &[]);
             return;
         }
 
@@ -248,7 +265,7 @@ impl BatchRenderer {
                 list.vertices.len(),
                 list.indices.len(),
             );
-            self.pending = Some(Pending { format, samples, batches: Vec::new() });
+            self.set_pending(format, samples, &[]);
             return;
         }
 
@@ -269,11 +286,7 @@ impl BatchRenderer {
             bytemuck::bytes_of(&Uniforms { viewport, _pad: [0.0; 2] }),
         );
 
-        self.pending = Some(Pending {
-            format,
-            samples,
-            batches: list.batches.clone(),
-        });
+        self.set_pending(format, samples, &list.batches);
     }
 
     /// [`BatchRenderer::prepare`] 済みの内容を描画する。

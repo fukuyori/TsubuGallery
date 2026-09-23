@@ -8,6 +8,19 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.7.2 — 2026-09-24
+
+### Fixed
+
+- The viewer can now stay behind other windows while focused and remain
+  interactive. Press `B` or `Esc` to clear the background request and bring it
+  forward
+
+### Improved
+
+- Reuse allocated storage for renderer batch ranges to avoid needless
+  per-frame allocations
+
 ## 0.7.1 — 2026-09-23
 
 ### Fixed

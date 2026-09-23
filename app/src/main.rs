@@ -1561,6 +1561,13 @@ impl App {
     }
 
     fn handle_viewer_key(&mut self, key: KeyCode) {
+        // 背面モード中の Esc は、全画面解除や Gallery への復帰に加えて、
+        // 背面指定も解除する。`sync_window_level` は焦点を奪わず重なりだけを戻す。
+        if key == KeyCode::Escape && self.always_on_bottom {
+            self.always_on_bottom = false;
+            self.sync_window_level();
+        }
+
         match key {
             KeyCode::ArrowRight | KeyCode::PageDown => {
                 self.advance(1);
@@ -2722,6 +2729,16 @@ impl ApplicationHandler for App {
             self.next_redraw = Some(Instant::now());
         }
 
+        // Windows はアプリを選択するとウィンドウを前へ上げる。背面モードは
+        // 選択後も入力可能にするため、フォーカスだけ保って z-order を背面へ戻す。
+        if matches!(&event, WindowEvent::Focused(true))
+            && self.screen == Screen::Viewer
+            && self.always_on_bottom
+            && let Some(window) = self.window.as_ref()
+        {
+            keep_window_on_bottom(window);
+        }
+
         // 操作の記録は egui へ渡す前に行う。文字入力は egui が食べてしまうので、
         // あとで見てもスクリーンセーバーには気付けない。
         let touched = match &event {
@@ -2952,6 +2969,37 @@ fn raise_to_front(window: &Window) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
+}
+
+/// フォーカスを維持したまま、ウィンドウを他の通常ウィンドウの背後へ戻す。
+#[cfg(windows)]
+fn keep_window_on_bottom(window: &Window) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+
+    // SAFETY: winit が管理する有効な HWND を使い、位置・大きさ・アクティブ状態を
+    // 変えずに重なり順だけを背面へ移す。
+    unsafe {
+        SetWindowPos(
+            win32.hwnd.get() as _,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn keep_window_on_bottom(window: &Window) {
+    window.set_window_level(WindowLevel::AlwaysOnBottom);
 }
 
 /// Windows 以外は `WindowLevel::Normal` へ戻すだけで足りる。
