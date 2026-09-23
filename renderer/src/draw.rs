@@ -475,6 +475,14 @@ struct Shape {
     points: Vec<[f32; 3]>,
     /// `curveVertex()` で与えられた制御点。
     curves: Vec<[f32; 2]>,
+    /// 直前の `endShape()` で線を引き終えた頂点の数。
+    ///
+    /// p5.js は `endShape()` を挟んでも頂点を捨てないので、
+    /// `for (t = 0; ++t < 200; endShape()) { vertex(...) }` と書くと、伸びて
+    /// いく折れ線を毎回はじめから引き直すことになる。引かれる線は頂点数の
+    /// 二乗で増えるのに、不透明な線なら絵は最後の一度と変わらない。
+    /// そこで線だけの多角形に限り、ここから先の続きだけを引く。
+    drawn: usize,
 }
 
 /// `drawingContext` の影。canvas の `shadowBlur` / `shadowColor` 相当。
@@ -2025,6 +2033,7 @@ impl Graphics {
         shape.kind = kind;
         shape.points.clear();
         shape.curves.clear();
+        shape.drawn = 0;
         self.shape = Some(shape);
     }
 
@@ -2102,16 +2111,46 @@ impl Graphics {
     }
 
     /// `endShape()`。貯めた頂点を実際に描く。`close` は `endShape(CLOSE)`。
+    ///
+    /// p5.js の頂点は `beginShape()` でしか空にならない。`endShape()` は描くだけ
+    /// なので、そのあと `vertex()` を続けると前の頂点へ積み増さる。
+    /// `for (t = 0; ++t < 200; endShape()) { vertex(...) }` のように、伸びていく
+    /// 折れ線を毎回描き直す作品がこれを当てにしている。Processing は
+    /// `endShape()` より後の `vertex()` を許さないので、残すのは p5.js だけ。
     pub fn end_shape(&mut self, close: bool) {
         let Some(mut shape) = self.shape.take() else { return };
 
         // curveVertex() で作った点は、ここで曲線へ均してから通常の頂点と繋ぐ。
+        let kept = shape.points.len();
         let mut points = std::mem::take(&mut shape.points);
         if shape.curves.len() >= 4 {
             for_each_catmull_rom(&shape.curves, |p| points.push([p[0], p[1], 0.0]));
         }
         if !points.is_empty() {
-            self.draw_shape(shape.kind, &points, close);
+            // 積み増しの途中なら、前に引いた線はもう引かない (Shape::drawn)。
+            // 塗りのある形は輪郭が変わるので、そのときは引き直す。
+            let carried = self.flavour == Flavour::P5
+                && shape.drawn > 0
+                && shape.drawn < points.len()
+                && shape.kind == ShapeKind::Polygon
+                && !close
+                && self.fill.is_none()
+                && shape.curves.is_empty();
+            if carried {
+                self.stroke_run(&points[shape.drawn - 1..]);
+            } else {
+                self.draw_shape(shape.kind, &points, close);
+            }
+            shape.drawn = kept;
+        }
+
+        if self.flavour == Flavour::P5 {
+            // 曲線へ均した分はこの一度きり。次の endShape() で作り直すので、
+            // 元の頂点だけを残す。制御点 (curves) もそのまま持ち越す。
+            points.truncate(kept);
+            shape.points = points;
+            self.shape = Some(shape);
+            return;
         }
 
         // 次の beginShape() へ容量を返す。clear() は長さだけを 0 にするので、
@@ -2180,6 +2219,16 @@ impl Graphics {
             shape.points.clear();
             shape.curves.clear();
             self.shape_spare = shape;
+        }
+    }
+
+    /// 折れ線の続きだけを引く。積み増しの途中で使う。
+    fn stroke_run(&mut self, points: &[[f32; 3]]) {
+        if self.stroke.is_none() || self.stroke_weight <= 0.0 {
+            return;
+        }
+        for pair in points.windows(2) {
+            self.shape_line(pair[0], pair[1]);
         }
     }
 
@@ -3021,6 +3070,117 @@ mod tests {
     /// `beginShape(QUADS)` は 4 点ずつを別々の面として閉じる。
     ///
     /// まとめて 1 つの多角形にすると、面と面の境目に縁の線が引かれない。
+    /// p5.js の頂点は `beginShape()` でしか空にならない。`endShape()` を挟んでも
+    /// 続きの `vertex()` が積み増され、伸びていく折れ線が描き直される。
+    /// 「断続的に接続される世界」のように、`endShape()` をループの更新式へ
+    /// 置く作品がこれを当てにしている。
+    #[test]
+    fn p5_keeps_its_vertices_across_end_shape() {
+        let mut g = Graphics::new();
+        g.set_flavour(Flavour::P5);
+        g.begin_frame(100.0, 100.0);
+        g.no_fill();
+        g.begin_shape(ShapeKind::Polygon);
+
+        // 1 点だけでは線にならない。
+        g.vertex(0.0, 0.0);
+        g.end_shape(false);
+        assert!(g.draw_list().indices.is_empty(), "1 点では引く線が無い");
+
+        // 続きの頂点は捨てられず、2 点の折れ線として引かれる。
+        g.vertex(10.0, 10.0);
+        g.end_shape(false);
+        let two = g.draw_list().indices.len();
+        assert!(two > 0, "2 点目で線が引かれる");
+
+        // 3 点目でも積み増さるので、引かれる線は増える。
+        g.vertex(20.0, 0.0);
+        g.end_shape(false);
+        assert!(g.draw_list().indices.len() > two, "点が増えるほど線も増える");
+    }
+
+    /// 積み増しの途中は、前に引いた線を引き直さない。線の数は頂点の数に
+    /// 比例するだけで、二乗にはならない。「断続的に接続される世界」は
+    /// 1 フレームで 329 万本になり、引き直していると上限を超える。
+    #[test]
+    fn p5_strokes_only_the_new_part_while_a_shape_grows() {
+        let lines = |n: usize| {
+            let mut g = Graphics::new();
+            g.set_flavour(Flavour::P5);
+            g.begin_frame(1000.0, 1000.0);
+            g.no_fill();
+            g.begin_shape(ShapeKind::Polygon);
+            for i in 0..n {
+                g.vertex(i as f32 * 3.0, (i % 7) as f32 * 3.0);
+                g.end_shape(false);
+            }
+            g.draw_list().indices.len()
+        };
+
+        let (ten, twenty) = (lines(10), lines(20));
+        assert!(ten > 0, "線は引かれている");
+        // 引き直していれば 4 倍前後になる。続きだけなら 2 倍あたりで収まる。
+        assert!(twenty < ten * 3, "10 点 {ten} → 20 点 {twenty}。二乗で増えている");
+    }
+
+    /// 塗りのある形は、点が増えると輪郭そのものが変わる。続きだけでは
+    /// 塗り直せないので、積み増しの途中でも引き直す。
+    #[test]
+    fn a_filled_shape_is_redrawn_whole_while_it_grows() {
+        let mut g = Graphics::new();
+        g.set_flavour(Flavour::P5);
+        g.begin_frame(100.0, 100.0);
+        g.fill(255.0);
+        g.no_stroke();
+        g.begin_shape(ShapeKind::Polygon);
+        g.vertex(0.0, 0.0);
+        g.vertex(10.0, 0.0);
+        g.vertex(10.0, 10.0);
+        g.end_shape(false);
+        let three = g.draw_list().indices.len();
+        assert!(three > 0, "3 点で 1 枚は塗れている");
+
+        g.vertex(0.0, 10.0);
+        g.end_shape(false);
+        // 4 点なら 2 枚。引き直しているので 1 枚ぶんより増える。
+        assert!(g.draw_list().indices.len() > three * 2 - 1, "塗りが引き直されていない");
+    }
+
+    /// Processing は `endShape()` より後の `vertex()` を受け付けない。
+    #[test]
+    fn processing_drops_its_vertices_at_end_shape() {
+        let mut g = Graphics::new();
+        g.set_flavour(Flavour::Processing);
+        g.begin_frame(100.0, 100.0);
+        g.no_fill();
+        g.begin_shape(ShapeKind::Polygon);
+        g.vertex(0.0, 0.0);
+        g.end_shape(false);
+
+        g.vertex(10.0, 10.0);
+        g.end_shape(false);
+        assert!(g.draw_list().indices.is_empty(), "形の外の vertex() は捨てる");
+    }
+
+    /// `beginShape()` はいつでも空から始める。前の形を引きずらない。
+    #[test]
+    fn a_new_shape_starts_empty_even_for_p5() {
+        let mut g = Graphics::new();
+        g.set_flavour(Flavour::P5);
+        g.begin_frame(100.0, 100.0);
+        g.no_fill();
+        g.begin_shape(ShapeKind::Polygon);
+        g.vertex(0.0, 0.0);
+        g.vertex(10.0, 10.0);
+        g.end_shape(false);
+
+        g.begin_shape(ShapeKind::Polygon);
+        g.vertex(50.0, 50.0);
+        let before = g.draw_list().indices.len();
+        g.end_shape(false);
+        assert_eq!(g.draw_list().indices.len(), before, "1 点だけの新しい形は線にならない");
+    }
+
     #[test]
     fn quads_close_every_four_points() {
         let quads = |kind| {

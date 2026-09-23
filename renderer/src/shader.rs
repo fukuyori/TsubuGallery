@@ -38,6 +38,9 @@ layout(std140, set = 0, binding = 0) uniform Tsubu {
     float f;
 };
 
+layout(set = 0, binding = 1) uniform texture2D tsubu_channel_tex;
+layout(set = 0, binding = 2) uniform sampler tsubu_channel_smp;
+
 layout(location = 0) out vec4 tsubu_color;
 
 const float PI = 3.141592653589793;
@@ -166,6 +169,10 @@ vec4 o;
 /// 定義すると、作品自身の uniform 宣言をマクロ展開で壊すため入口ごとに分ける。
 const MAIN_IMAGE_COMPAT: &str = r#"#define iResolution vec3(r, 1.0)
 #define iTime t
+#define iChannel0 sampler2D(tsubu_channel_tex, tsubu_channel_smp)
+#define iChannel1 sampler2D(tsubu_channel_tex, tsubu_channel_smp)
+#define iChannel2 sampler2D(tsubu_channel_tex, tsubu_channel_smp)
+#define iChannel3 sampler2D(tsubu_channel_tex, tsubu_channel_smp)
 "#;
 
 /// FragCoord.xyz の `void main()` 形式が前提にする名前。
@@ -936,5 +943,36 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         for source in ["", "{", "/* 閉じない", "日本語だけ", "#", "#version 100"] {
             let _ = compile(source);
         }
+    }
+
+    #[test]
+    fn a_shadertoy_channel_becomes_a_bound_texture() {
+        let wgsl = compile(
+            "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p / iResolution.xy); }",
+        )
+        .expect("iChannel0 が通る");
+        assert!(wgsl.contains("@group(0) @binding(1)"), "{wgsl}");
+        assert!(wgsl.contains("texture_2d<f32>"), "{wgsl}");
+        assert!(wgsl.contains("@group(0) @binding(2)"), "{wgsl}");
+    }
+
+    #[test]
+    fn a_channel_can_be_measured_so_a_sketch_can_fall_back() {
+        // 入力の有無を大きさで見分ける ShaderToy の作品がある。束ねているのは
+        // 1×1 なので、そういう作品は自前の代用へ入る。
+        let wgsl = compile(
+            "void mainImage(out vec4 c, in vec2 p) { c = vec4(float(textureSize(iChannel0, 0).x)); }",
+        )
+        .expect("textureSize が通る");
+        assert!(wgsl.contains("textureDimensions"), "{wgsl}");
+    }
+
+    #[test]
+    fn every_channel_points_at_the_same_placeholder() {
+        let wgsl = compile(
+            "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel3, p) + texture(iChannel1, p); }",
+        )
+        .expect("iChannel1 と iChannel3 が通る");
+        assert!(wgsl.contains("tsubu_channel_tex"), "{wgsl}");
     }
 }

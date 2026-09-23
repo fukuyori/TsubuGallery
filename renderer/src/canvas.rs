@@ -386,19 +386,39 @@ struct ShaderStage {
 const SHADER_UNIFORM_BYTES: u64 = 32;
 
 impl ShaderStage {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("tsubu.shader.layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // 作品が iChannel0 を使わなくても常に束ねる。束ねた側が余る
+                // ぶんには通るが、足りないとパイプラインが作れない。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -414,13 +434,64 @@ impl ShaderStage {
             mapped_at_creation: false,
         });
 
+        // ShaderToy の `iChannel0` に当てる 1×1 の黒。音や映像の入力は持って
+        // いないので、絵の代わりを渡すのではなく「入力が無い」と分かる大きさを
+        // 渡す。ShaderToy の作品は `textureSize(iChannel0, 0).x == 1` で入力の
+        // 有無を見分け、自前の代用へ切り替えるものが多い。
+        // Texture 自体はここで落ちるが、BindGroup が中身を持つので残り続ける。
+        let channel = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tsubu.shader.channel"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // 中身は不透明な黒。読んでも絵にはならないが、値が決まっていないと
+        // 作品ごとに違うものが出る。
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &channel,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0, 0, 0, 255],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let channel_view = channel.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // ShaderToy のチャンネル既定に合わせて、繰り返しと線形補間。
+        let channel_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tsubu.shader.channel.sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tsubu.shader.bind"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&channel_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&channel_sampler),
+                },
+            ],
         });
 
         Self { pipeline_layout, uniforms, bind, pipelines: HashMap::new() }
@@ -653,7 +724,7 @@ impl Canvas {
 
             match &list.shader {
                 Some(paint) => {
-                    let stage = self.shader.get_or_insert_with(|| ShaderStage::new(device));
+                    let stage = self.shader.get_or_insert_with(|| ShaderStage::new(device, queue));
                     stage.draw(
                         device,
                         queue,

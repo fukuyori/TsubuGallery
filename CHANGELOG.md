@@ -8,6 +8,38 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.7.0 — 2026-09-23
+
+### Added
+
+- ShaderToy's `iChannel0`–`iChannel3` are now accepted. There is no audio or
+  video input behind them, so a 1×1 black texture is bound instead. Sketches
+  that check the channel's size and fall back to their own substitute when
+  there is no input now render the way their author intended
+- Viewer `B`: send the playing window below other windows. It works together
+  with fullscreen. Unlike fullscreen it is not remembered in the settings — it
+  lasts for the moment only, and returning to the gallery restores the normal
+  stacking order
+
+### Fixed
+
+- p5.js `endShape()` no longer discards the vertices. In p5.js the vertex list
+  is only emptied by `beginShape()`, so a sketch written as
+  `for (t = 0; ++t < 200; endShape()) { vertex(…) }` — redrawing a polyline as
+  it grows — used to draw nothing at all. While a shape grows, the lines
+  already drawn are not drawn again, so the number of lines grows with the
+  number of vertices rather than with its square (redrawing them overflowed
+  the per-frame limit)
+- On Windows, refusing a second instance can now report the PID of the process
+  already running. The PID lives in `instance.pid`, beside the lock file
+  rather than inside it: Windows byte-range locks are mandatory, so a locked
+  file cannot be read, and writing the PID into it made the PID unreadable on
+  Windows only
+- Launching on Windows no longer opens a console window alongside the app;
+  the executable is now built as a GUI program. When it is run from a command
+  line it reattaches to the calling console, so `--help`, `--version` and
+  `--capture-all` still print as before, and `> file` or `| more` keep working
+
 ## 0.6.3 — 2026-09-07
 
 ### Added

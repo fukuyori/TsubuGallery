@@ -6,7 +6,13 @@
 //! - D: スクリーンショットをグリッド表示し、選択した作品を Viewer へ渡す
 //! - E: 外部の Processing Lite コードを Parser / AST / Bytecode 経由で実行する
 
+// 起動のたびにコンソールを開かない。コマンドラインから叩いたときの出力は
+// [`console::attach_to_parent`] が呼んだ側のコンソールへ繋ぎ直す。
+// Windows 以外では無視される属性。
+#![windows_subsystem = "windows"]
+
 mod alert;
+mod console;
 mod editing;
 mod editor;
 mod editor_ui;
@@ -37,7 +43,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Fullscreen, Icon, Window, WindowId};
+use winit::window::{Fullscreen, Icon, Window, WindowId, WindowLevel};
 
 use editor::Editor;
 use editor_ui::EditorAction;
@@ -89,6 +95,9 @@ TsubuGallery — 短い Processing / p5.js / GLSL 作品のギャラリー
 ";
 
 fn main() {
+    // 何かを書き出す前に。標準ライブラリはハンドルを遅れて取りに行く。
+    console::attach_to_parent();
+
     let paths = DataPaths::resolve();
     // ログの置き場は作っておく。ここで失敗しても、標準エラーには出せる。
     let _ = std::fs::create_dir_all(paths.logs());
@@ -316,6 +325,13 @@ struct App {
     screen: Screen,
     show_info: bool,
     fullscreen: bool,
+    /// プレイ画面で `B` を押したか。窓をほかの窓より下へ送る。
+    ///
+    /// 全画面と違って設定には残さない。その場限りの見せ方なので、
+    /// 次に開いたときは通常の重なりから始める。
+    always_on_bottom: bool,
+    /// いま窓へ実際に反映してある重なり。二重に頼まないための控え。
+    window_on_bottom: bool,
     mouse: (f32, f32),
     mouse_pressed: bool,
     /// カーソルがこの窓の上にあるか。全画面でも、別のモニタへ出ていれば false。
@@ -485,6 +501,8 @@ impl App {
             slideshow: None,
             last_input: Instant::now(),
             screensaver: None,
+            always_on_bottom: false,
+            window_on_bottom: false,
             settings,
             next_redraw: Some(Instant::now()),
             redraw_pending: false,
@@ -1326,6 +1344,34 @@ impl App {
         window.set_fullscreen(self.fullscreen.then(|| Fullscreen::Borderless(None)));
     }
 
+    /// `B`。再生中の窓をほかの窓の下へ送る。設定には残さない。
+    fn toggle_always_on_bottom(&mut self) {
+        self.always_on_bottom = !self.always_on_bottom;
+        self.sync_window_level();
+    }
+
+    /// 窓の重なりを画面に合わせる。
+    ///
+    /// 下へ送るのはプレイ画面のあいだだけ。ギャラリーや設定へ移ったら戻す。
+    /// 画面の切り替え口は何か所もあるので、切り替えのたびに消して回るのでは
+    /// なく、描くたびにここで合わせる。頼むのは値が変わったときだけ。
+    ///
+    /// なお winit の `set_window_level` は OS への希望でしかなく、聞き入れ
+    /// られるとは限らない。
+    fn sync_window_level(&mut self) {
+        let want = self.always_on_bottom && self.screen == Screen::Viewer;
+        if self.window_on_bottom == want {
+            return;
+        }
+        let Some(window) = &self.window else { return };
+        window.set_window_level(if want {
+            WindowLevel::AlwaysOnBottom
+        } else {
+            WindowLevel::Normal
+        });
+        self.window_on_bottom = want;
+    }
+
     fn cycle_language(&mut self) {
         let tags: Vec<String> = self
             .locales
@@ -1533,6 +1579,7 @@ impl App {
             }
             KeyCode::KeyI => self.show_info = !self.show_info,
             KeyCode::KeyO => self.open_selected_link(self.viewer.current_index()),
+            KeyCode::KeyB => self.toggle_always_on_bottom(),
             KeyCode::KeyP => self.toggle_slideshow(),
             KeyCode::KeyE => self.open_editor(self.viewer.current_index()),
             KeyCode::KeyL => self.cycle_language(),
@@ -1872,6 +1919,7 @@ impl App {
         // 1 フレームの仕事にかかる時間。これをフレームの間隔で割ると、
         // このアプリが CPU をどれだけ使い続けているかになる。
         let frame_started = std::time::Instant::now();
+        self.sync_window_level();
         self.pump_thumbnails();
         self.pump_screensaver();
         self.pump_slideshow();

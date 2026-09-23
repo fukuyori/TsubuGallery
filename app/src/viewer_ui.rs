@@ -144,6 +144,7 @@ fn hint_area(ctx: &egui::Context, info: &ViewerOverlay<'_>, locales: &Locales) {
                         ("I", locales.t("viewer.info")),
                         ("O", locales.t("gallery.open_link")),
                         ("F", locales.t("viewer.fullscreen")),
+                        ("B", locales.t("viewer.always_on_bottom")),
                         ("Esc", locales.t("viewer.back_to_gallery")),
                     ] {
                         ui.label(egui::RichText::new(key).size(12.0).strong().color(fade));
