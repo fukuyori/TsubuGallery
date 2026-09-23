@@ -325,10 +325,13 @@ struct App {
     screen: Screen,
     show_info: bool,
     fullscreen: bool,
-    /// プレイ画面で `B` を押したか。窓をほかの窓より下へ送る。
+    /// プレイ中に `B` を押したか。窓をほかの窓より下へ送る。
     ///
-    /// 全画面と違って設定には残さない。その場限りの見せ方なので、
-    /// 次に開いたときは通常の重なりから始める。
+    /// プレイ画面を出たらここも false に戻す。持ち越すと、ギャラリーから
+    /// 作品を開き直しただけで窓がひとりでに沈む。一度下ろしたら、次に `B`
+    /// を押すまでは通常の重なりのまま。
+    ///
+    /// 全画面と違って設定には残さない。その場限りの見せ方。
     always_on_bottom: bool,
     /// いま窓へ実際に反映してある重なり。二重に頼まないための控え。
     window_on_bottom: bool,
@@ -1352,23 +1355,27 @@ impl App {
 
     /// 窓の重なりを画面に合わせる。
     ///
-    /// 下へ送るのはプレイ画面のあいだだけ。ギャラリーや設定へ移ったら戻す。
+    /// 背後へ送るのは、プレイ中に `B` を押したときだけ。プレイ画面を出たら
+    /// 頼まれごとそのものを取り下げる。旗を持ち越すと、Esc でギャラリーへ
+    /// 戻ってから作品を開き直しただけで、また沈んでしまう。
+    ///
     /// 画面の切り替え口は何か所もあるので、切り替えのたびに消して回るのでは
-    /// なく、描くたびにここで合わせる。頼むのは値が変わったときだけ。
+    /// なく、描くたびにここで合わせる。窓へ頼むのは値が変わったときだけ。
     ///
     /// なお winit の `set_window_level` は OS への希望でしかなく、聞き入れ
     /// られるとは限らない。
     fn sync_window_level(&mut self) {
-        let want = self.always_on_bottom && self.screen == Screen::Viewer;
+        let want = settle_bottom(self.screen, &mut self.always_on_bottom);
         if self.window_on_bottom == want {
             return;
         }
         let Some(window) = &self.window else { return };
-        window.set_window_level(if want {
-            WindowLevel::AlwaysOnBottom
+        if want {
+            window.set_window_level(WindowLevel::AlwaysOnBottom);
         } else {
-            WindowLevel::Normal
-        });
+            window.set_window_level(WindowLevel::Normal);
+            raise_to_front(window);
+        }
         self.window_on_bottom = want;
     }
 
@@ -2915,6 +2922,53 @@ mod input_tests {
     }
 }
 
+/// 窓を重なりのいちばん手前へ上げる。
+///
+/// 背後から戻すときに要る。winit の `WindowLevel::Normal` が送るのは
+/// `HWND_NOTOPMOST`、つまり「最前面の組から外す」指定でしかない。いちばん下へ
+/// 沈めた窓はそこに居座ったままなので、重なりを戻すだけでは見えるように
+/// ならない。位置も大きさも焦点も動かさず、順番だけを上げる。
+#[cfg(windows)]
+fn raise_to_front(window: &Window) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+
+    // SAFETY: winit がいま生かしている窓のハンドル。`SWP_NOMOVE` と
+    // `SWP_NOSIZE` で位置と大きさを、`SWP_NOACTIVATE` で焦点を据え置き、
+    // 重なりの順番だけを変える。
+    unsafe {
+        SetWindowPos(
+            win32.hwnd.get() as _,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Windows 以外は `WindowLevel::Normal` へ戻すだけで足りる。
+#[cfg(not(windows))]
+fn raise_to_front(_window: &Window) {}
+
+/// 背後へ送る頼まれごとを、いまの画面に合わせて決め直す。
+///
+/// プレイ画面を出たら `asked` ごと下ろす。旗を持ち越すと、ギャラリーへ戻って
+/// から作品を開き直しただけで、また沈んでしまう。戻り値は窓へ頼むべき状態。
+fn settle_bottom(screen: Screen, asked: &mut bool) -> bool {
+    if screen != Screen::Viewer {
+        *asked = false;
+    }
+    *asked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2925,6 +2979,40 @@ mod tests {
 
     fn source(text: &str) -> loader::Source {
         loader::Source::from_id_and_text("x", text.to_string())
+    }
+
+    /// 背後にとどまるのは、プレイ中に `B` を押したあいだだけ。
+    #[test]
+    fn the_window_stays_behind_only_while_playing() {
+        let mut asked = true;
+        assert!(settle_bottom(Screen::Viewer, &mut asked), "プレイ中は背後のまま");
+        assert!(asked);
+    }
+
+    /// プレイ画面を出たら通常へ戻す。旗そのものを下ろすので、戻ってきても
+    /// `B` を押し直すまでは沈まない。
+    #[test]
+    fn leaving_the_viewer_drops_the_request_for_good() {
+        let mut asked = true;
+
+        assert!(!settle_bottom(Screen::Gallery, &mut asked), "ギャラリーでは通常へ");
+        assert!(!asked, "頼まれごとごと下ろす");
+
+        assert!(!settle_bottom(Screen::Viewer, &mut asked), "戻ってもひとりでには沈まない");
+
+        // 押し直せばまた沈む。
+        asked = true;
+        assert!(settle_bottom(Screen::Viewer, &mut asked));
+    }
+
+    /// 設定や編集へ移ったときも同じ。
+    #[test]
+    fn any_screen_but_the_viewer_clears_the_request() {
+        for screen in [Screen::Gallery, Screen::Editor, Screen::Settings] {
+            let mut asked = true;
+            assert!(!settle_bottom(screen, &mut asked), "{screen:?} では通常へ");
+            assert!(!asked, "{screen:?} で旗が残っている");
+        }
     }
 
     #[test]

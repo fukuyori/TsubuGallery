@@ -8,6 +8,19 @@ actually does is in [README.md](README.md); the fine detail is in `git log`.
 There is a single version number, in `Cargo.toml` under `[workspace.package]`,
 shared by all five crates. Dates are when the version was cut.
 
+## 0.7.1 — 2026-09-23
+
+### Fixed
+
+- Viewer `B` (send to back) kept the request alive after leaving the viewer.
+  Returning to the gallery restored the normal stacking order, but reopening a
+  sketch from there sent the window straight back down again. The request is
+  now dropped on leaving the viewer, so the window stays at the normal level
+  until `B` is pressed again
+- Raising the window back from the bottom now brings it to the front. winit's
+  `WindowLevel::Normal` only clears the topmost flag, so a window that had been
+  sent to the bottom stayed there
+
 ## 0.7.0 — 2026-09-23
 
 ### Added
